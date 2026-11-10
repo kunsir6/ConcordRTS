@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ON-1-03: macOS 交付形态的最小 Info.plist。
+
+  每一项都是"少了就会静默坏掉"的那种：
+    · CFBundleExecutable       —— 找不到主程序，双击直接弹"应用已损坏"
+    · NSHighResolutionCapable  —— 不给 true 时窗口在 Retina 上被系统放大一倍，
+                                  1024x640 的帧会糊成 512x320 的观感
+    · LSMinimumSystemVersion   —— 低于此版本的系统不显示"不兼容"而是直接崩
+    · CFBundleIconFile         —— 没有它 Dock 里是一张白纸
+  LSUIElement 刻意不设：我们要出现在 Dock、要能接收键盘焦点。
+
+  @CONCORD_*@ 由 packaging/make-app-bundle.sh 在打包时替换（不是 CMake 的
+  configure_file，因为 bundle 是一次 add_custom_target 组装出来的）。
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>@CONCORD_APP_NAME@</string>
+    <key>CFBundleDisplayName</key>
+    <string>@CONCORD_APP_NAME@</string>
+    <key>CFBundleExecutable</key>
+    <string>concord_runtime</string>
+    <key>CFBundleIdentifier</key>
+    <string>@CONCORD_BUNDLE_ID@</string>
+    <key>CFBundleIconFile</key>
+    <string>ConcordRTS</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@CONCORD_APP_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@CONCORD_APP_VERSION@</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>@CONCORD_MIN_MACOS@</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>

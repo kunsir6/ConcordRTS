@@ -2283,7 +2283,39 @@ RuntimeMainMenuResult runRuntimeMainMenu(
     }
     MenuState& state = *stateOwner;
     if (!state.initialized) {
-        std::cerr << "Main menu initialization failed: original shell assets are incomplete.\n";
+        // ON-1-02：资产不完整时把「解析到哪儿 / 缺哪个文件 / 该放哪儿」一次讲清。
+        // 旧行为只有一行 "original shell assets are incomplete."，与上游那行
+        // palette not found 加起来仍然回答不了「是资产缺了还是路径错了」。
+        // 逐文件实测（不是泛泛列期望清单），才能把这两种情形分开。
+        const auto report = [](std::string label, const fs::path& path) {
+            // 31 = 最长标签 "local_data/runtime_config.ini"（30）再留一列，保证三行对齐。
+            const std::size_t width = 31;
+            label.append(label.size() < width ? width - label.size() : 1, ' ');
+            std::error_code error;
+            const bool present = !path.empty() && fs::exists(path, error);
+            std::cerr << "    " << (present ? "ok      " : "missing ") << label
+                      << path.string() << "\n";
+        };
+        std::cerr
+            << "Main menu initialization failed: original shell assets are incomplete.\n"
+            << "  resolved roots:\n"
+            << "    resource root : " << config.resourceRootPath << "\n"
+            << "    local data    : " << config.localDataRootPath << "\n"
+            << "    export root   : " << state.exportRoot.string() << "\n"
+            << "  required files:\n";
+        const fs::path resourceRoot(config.resourceRootPath);
+        const fs::path localData(config.localDataRootPath);
+        report("resource/GameMD/ra2md.mix", resourceRoot / "GameMD" / "ra2md.mix");
+        report("local_data/runtime_config.ini", localData / "runtime_config.ini");
+        report("local_data/rulesmd.ini", localData / "rulesmd.ini");
+        std::cerr
+            << "  palette ids the menu needs (inside ra2md.mix):\n"
+            << "    shell.pal, sdbtnanm.pal, mainbttn.pal, mousepal.pal\n"
+            << "  shp ids the menu needs (inside ra2md.mix):\n"
+            << "    mnscrnl.shp, lwscrnl.shp, sdtp.shp, sdwrnanm.shp,\n"
+            << "    sdbtnbkgd.shp, sdbtnanm.shp, sdbtm.shp\n"
+            << "  hint: if the data tree lives elsewhere, export "
+            << "CONCORD_DATA_ROOT=<dir containing RedAlert2/ and local_data/>\n";
         return RuntimeMainMenuResult::Exit;
     }
     resetMainMenuForEntry(state, config, startPage);

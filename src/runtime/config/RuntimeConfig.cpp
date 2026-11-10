@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -44,6 +46,53 @@ std::string resolveRuntimePath(
     if (value.empty()) return "";
     return runtimeConfigLegacyPathString(runtimeResolveConfigPath(
         std::filesystem::path(value), projectRoot, std::filesystem::current_path()));
+}
+
+// ON-1-01：数据根命中时的相对路径解析。
+//
+// 不能直接复用 resolveRuntimePath 的「cwd 存在优先」语义，理由是自污染：
+// 进程会在 cwd 下创建 local_data/runtime_map_cache，于是第二次启动时
+// `local_data` 相对 cwd"存在"了，localDataRoot 就漂到源码树里的空目录，
+// 资源层随即找不到 mix_exports。第一次能跑、第二次跑不动，且没有任何报错。
+//
+// preferBase 只在「数据根不是源码根」时打开（见 loadRuntimeConfig），
+// 单仓库布局（Windows 常规）仍走原来的 cwd 优先，行为逐字节不变。
+std::string resolveRuntimePathAgainstBase(
+    const std::string& value,
+    const std::filesystem::path& base,
+    bool preferBase
+) {
+    if (value.empty()) return "";
+    const std::filesystem::path declared(value);
+    if (!preferBase || declared.is_absolute() || base.empty()) {
+        return resolveRuntimePath(value, base);
+    }
+    std::error_code error;
+    const std::filesystem::path candidate = base / declared;
+    if (!std::filesystem::exists(candidate, error) || error) {
+        return resolveRuntimePath(value, base);
+    }
+    const std::filesystem::path canonical = std::filesystem::weakly_canonical(candidate, error);
+    return runtimeConfigLegacyPathString(error ? candidate.lexically_normal() : canonical);
+}
+
+// path 版本：配置文件的解析不能经过窄字符串往返（Windows 上是 ACP）。
+std::filesystem::path resolveConfigPathAgainstBase(
+    const std::filesystem::path& value,
+    const std::filesystem::path& base,
+    const std::filesystem::path& currentDirectory,
+    bool preferBase
+) {
+    if (!preferBase || value.is_absolute() || base.empty()) {
+        return runtimeResolveConfigPath(value, base, currentDirectory);
+    }
+    std::error_code error;
+    const std::filesystem::path candidate = base / value;
+    if (!std::filesystem::exists(candidate, error) || error) {
+        return runtimeResolveConfigPath(value, base, currentDirectory);
+    }
+    const std::filesystem::path canonical = std::filesystem::weakly_canonical(candidate, error);
+    return error ? candidate.lexically_normal() : canonical;
 }
 
 std::string toLowerAsciiLocal(std::string value) {
@@ -129,11 +178,62 @@ int parseRuntimePercent(const std::string& value, int fallback) {
 RuntimeConfig loadRuntimeConfig(const RuntimeConfigOverrides& overrides) {
     RuntimeConfig config;
     std::error_code currentDirectoryError;
+    const std::filesystem::path currentDirectory =
+        std::filesystem::current_path(currentDirectoryError);
+    const std::filesystem::path executableDirectory = runtimeExecutableDirectory();
     const std::filesystem::path projectRoot = runtimeConfigProjectRoot(
-        std::filesystem::current_path(currentDirectoryError), runtimeExecutableDirectory());
-    const std::filesystem::path configFile = runtimeResolveConfigPath(
+        currentDirectory, executableDirectory);
+
+    // ON-1-01：相对路径的解析基准从「源码根」改成「数据根」。
+    //
+    // 源码根的判据要求 local_data + CMakeLists.txt + (RedAlert2|.git) 三者齐备，
+    // 而 1.7 GB 的游戏数据实际落在兄弟目录（../ConcordRTS-GameData）。两边都
+    // 不满足时 projectRoot 回退到 cwd，`RedAlert2` / `local_data` 于是都指向
+    // 不存在的路径——主菜单拿不到 shell.pal 就静默退出，看起来像"资产缺失"。
+    //
+    // 未命中数据根（root 为空）时退回 projectRoot，单仓库布局行为逐字节不变。
+    const RuntimeDataRootSearch dataRoot = runtimeLocateDataRoot(
+        currentDirectory, executableDirectory, projectRoot);
+    const std::filesystem::path pathBase =
+        dataRoot.root.empty() ? projectRoot : dataRoot.root;
+    // 只有当「数据根 != 源码根」时才改相对路径的优先级：
+    // 单仓库布局（Windows 常规）下 source 恒为 self，preferBase 为 false，
+    // 所有相对路径的解析结果与改动前逐字节一致。
+    const bool preferBase = !dataRoot.root.empty() && dataRoot.source != "self";
+    if (dataRoot.root.empty()) {
+        // ON-1-02：未命中时一次打全「判据 / 试过的候选 / 每个缺哪一条 / 该放哪里」。
+        // 旧行为只有一行 `data root <projectRoot> (source=not-found)`——既把源码根
+        // 冒充成数据根，也没说缺什么，用户只能看到下游那句 palette not found，
+        // 于是把「没找对目录」误判成「资产缺了」。
+        std::fputs(runtimeDataRootDiagnosticText(dataRoot).c_str(), stderr);
+    } else if (dataRoot.source != "self") {
+        std::fprintf(
+            stderr,
+            "[config] data root %s (source=%s)\n",
+            pathBase.generic_string().c_str(),
+            dataRoot.source.c_str()
+        );
+    }
+    if (const char* trace = std::getenv("CONCORD_DATA_ROOT_TRACE")) {
+        if (trace[0] == '1') {
+            std::fprintf(stderr, "[config] data root probes=%zu\n",
+                         dataRoot.probed.size());
+            for (const RuntimeDataRootProbe& probe : dataRoot.probed) {
+                std::fprintf(
+                    stderr,
+                    "[config]   probe [%s] %s%s%s%s\n",
+                    probe.stage == nullptr ? "" : probe.stage,
+                    probe.path.generic_string().c_str(),
+                    probe.isDirectory ? "" : " (not a directory)",
+                    probe.hasLocalData ? " local_data=yes" : " local_data=no",
+                    probe.hasRedAlert2 ? " RedAlert2=yes" : " RedAlert2=no"
+                );
+            }
+        }
+    }
+    const std::filesystem::path configFile = resolveConfigPathAgainstBase(
         std::filesystem::path(chooseString(overrides.configPath, config.configPath)),
-        projectRoot, std::filesystem::current_path());
+        pathBase, currentDirectory, preferBase);
     config.configPath = runtimeConfigLegacyPathString(configFile);
 
     std::error_code errorCode;
@@ -398,37 +498,37 @@ RuntimeConfig loadRuntimeConfig(const RuntimeConfigOverrides& overrides) {
         }
     }
 
-    config.resourceRootPath = resolveRuntimePath(
+    config.resourceRootPath = resolveRuntimePathAgainstBase(
         chooseString(overrides.resourceRootPath, config.resourceRootPath),
-        projectRoot
+        pathBase, preferBase
     );
-    config.localDataRootPath = resolveRuntimePath(
+    config.localDataRootPath = resolveRuntimePathAgainstBase(
         chooseString(overrides.localDataRootPath, config.localDataRootPath),
-        projectRoot
+        pathBase, preferBase
     );
-    config.modRootPath = resolveRuntimePath(
+    config.modRootPath = resolveRuntimePathAgainstBase(
         chooseString(overrides.modRootPath, config.modRootPath),
-        projectRoot
+        pathBase, preferBase
     );
-    config.defaultMapPath = resolveRuntimePath(
+    config.defaultMapPath = resolveRuntimePathAgainstBase(
         chooseString(overrides.defaultMapPath, config.defaultMapPath),
-        projectRoot
+        pathBase, preferBase
     );
-    config.campaignIntroVideoPath = resolveRuntimePath(
+    config.campaignIntroVideoPath = resolveRuntimePathAgainstBase(
         config.campaignIntroVideoPath,
-        projectRoot
+        pathBase, preferBase
     );
-    config.campaignPostScoreVideoPath = resolveRuntimePath(
+    config.campaignPostScoreVideoPath = resolveRuntimePathAgainstBase(
         config.campaignPostScoreVideoPath,
-        projectRoot
+        pathBase, preferBase
     );
-    config.campaignLoadSavePath = resolveRuntimePath(
+    config.campaignLoadSavePath = resolveRuntimePathAgainstBase(
         config.campaignLoadSavePath,
-        projectRoot
+        pathBase, preferBase
     );
-    config.campaignSavePath = resolveRuntimePath(
+    config.campaignSavePath = resolveRuntimePathAgainstBase(
         config.campaignSavePath,
-        projectRoot
+        pathBase, preferBase
     );
     config.windowWidth =
         choosePositiveInt(overrides.windowWidth, config.windowWidth);
@@ -438,12 +538,12 @@ RuntimeConfig loadRuntimeConfig(const RuntimeConfigOverrides& overrides) {
         choosePositiveInt(overrides.fixedTickHz, config.fixedTickHz);
     config.targetFps =
         choosePositiveInt(overrides.targetFps, config.targetFps);
-    config.runtimeReplayEventOutputPath = resolveRuntimePath(
+    config.runtimeReplayEventOutputPath = resolveRuntimePathAgainstBase(
         chooseString(
             overrides.runtimeReplayEventOutputPath,
             config.runtimeReplayEventOutputPath
         ),
-        projectRoot
+        pathBase, preferBase
     );
 
     return config;

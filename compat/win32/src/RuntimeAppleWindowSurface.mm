@@ -41,6 +41,12 @@ int gPresentedWidth = 0;
 int gPresentedHeight = 0;
 std::string gPresentedTitle;
 
+// ON-1-03: 一次性注入合成 Cmd+Q 的自测开关（CONCORD_QUIT_SELFTEST=1）。
+// 真实按键无法在无人值守环境下发出（需要辅助功能授权），但"事件进队列 →
+// pumpEvents 取到 → 命中菜单键等价物 → terminate"这条链是可以自动验证的：
+// 注入的事件走的就是同一条队列与同一个处理分支，只有事件来源是合成的。
+bool gQuitSelfTestPosted = false;
+
 // 32bpp DIB 的字节序是 B,G,R,X（小端），所以 CGImage 用
 // kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst：
 //   · Little 让 CG 按 B,G,R 顺序读字节；
@@ -68,8 +74,23 @@ void present(const Surface& surface) {
             // 才能出现在 Dock 里并接收键盘焦点；Accessory 会让窗口浮着但收不到键。
             [NSApplication sharedApplication];
             [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-            // 没有 mainMenu 时 AppKit 会打印警告，而且 Cmd-Q 不工作。
+            // ON-1-03：菜单栏必须真的有一条 App 菜单，且其中的「退出」项要挂着
+            // Cmd+Q 的键等价物。此前这里只 setMainMenu: 了一个空 NSMenu——
+            // AppKit 的警告没了，但 Cmd+Q 依然没有对应的菜单项可命中，
+            // 于是"按 Cmd+Q 没反应"会被误当成键盘事件没接上。
             NSMenu* menuBar = [[NSMenu alloc] init];
+            NSMenuItem* applicationItem = [[NSMenuItem alloc] init];
+            [menuBar addItem:applicationItem];
+            NSMenu* applicationMenu = [[NSMenu alloc] init];
+            NSString* applicationName = [[NSProcessInfo processInfo] processName];
+            NSMenuItem* quitItem = [[NSMenuItem alloc]
+                initWithTitle:[NSString stringWithFormat:@"Quit %@", applicationName]
+                       action:@selector(terminate:)
+                keyEquivalent:@"q"];
+            // 不设 target：走响应链直到 NSApp，terminate: 由 NSApplication 处理，
+            // 进程随后以 0 退出。
+            [applicationMenu addItem:quitItem];
+            [applicationItem setSubmenu:applicationMenu];
             [NSApp setMainMenu:menuBar];
             gApplicationReady = true;
         }
@@ -166,6 +187,28 @@ void present(const Surface& surface) {
             // SW_HIDE / 最小化：orderOut 而不是 close，
             // 关掉会让窗口对象进入"已关闭"状态、再显示需要额外复位。
             if (gWindow.isVisible) [gWindow orderOut:nil];
+        }
+
+        // ON-1-03 自测注入（见 gQuitSelfTestPosted 的注释）。只在窗口建好之后
+        // 投一次：performKeyEquivalent 需要 windowNumber 才认键。
+        if (!gQuitSelfTestPosted) {
+            gQuitSelfTestPosted = true;
+            const char* selftest = std::getenv("CONCORD_QUIT_SELFTEST");
+            if (selftest != nullptr && selftest[0] == '1') {
+                NSEvent* synthetic = [NSEvent
+                    keyEventWithType:NSEventTypeKeyDown
+                          location:NSZeroPoint
+                     modifierFlags:NSEventModifierFlagCommand
+                         timestamp:[[NSProcessInfo processInfo] systemUptime]
+                      windowNumber:gWindow.windowNumber
+                           context:nil
+                        characters:@"q"
+       charactersIgnoringModifiers:@"q"
+                         isARepeat:NO
+                           keyCode:0x0C];  // kVK_ANSI_Q
+                [NSApp postEvent:synthetic atStart:NO];
+                std::fprintf(stderr, "[cocoa] quit self-test: posted synthetic Cmd+Q\n");
+            }
         }
     }
 }
@@ -304,6 +347,13 @@ void pumpEvents() {
             // 窗口关闭按钮走标准关闭路径：转成 quit，否则点了红叉没反应。
             if (event.type == NSEventTypeAppKitDefined) continue;
             if (event.window != nil && event.window != gWindow) continue;
+            // ON-1-03：菜单键等价物（Cmd+Q）必须自己派发。本进程没有 [NSApp run]，
+            // AppKit 不会替我们跑这一步，事件只会躺在队列里——这正是上一版
+            // "Cmd+Q 没反应"的真因（当时还以为要配 mainMenu，其实配了也没人派发）。
+            if (event.type == NSEventTypeKeyDown
+                && [[NSApp mainMenu] performKeyEquivalent:event]) {
+                continue;
+            }
             emit(event);
         }
     }

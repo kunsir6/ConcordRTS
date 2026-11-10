@@ -667,3 +667,108 @@ function(concord_apple_assert_no_win32_sources _capps_target)
         )
     endif()
 endfunction()
+
+# ---------------------------------------------------------------------------
+# ON-1-03: macOS 交付形态（.app bundle）
+# ---------------------------------------------------------------------------
+#
+# 刻意**不用** MACOSX_BUNDLE：那会把已链接的可执行文件搬进
+# ConcordRTS.app/Contents/MacOS/ 下面，而仓库里十几套 smoke、scripts/ 里的验证
+# 脚本、以及 RUNLOG 里的每一条命令都写着 build-product-mac/concord_runtime。
+# 改产物路径等于把既有验证全打断，而这件事本身不带来任何能力。
+#
+# 所以 bundle 由一个显式目标（concord_app）从已链接的二进制**复制**出来：
+# build 目录里的二进制仍是开发形态，.app 是交付形态，两者互不影响。
+#
+# 用法：cmake --build build-product-mac --target concord_app
+# 产出：<build>/app/ConcordRTS.app（ad-hoc 已签名，双击即玩）
+
+set(
+    CONCORD_MACOS_APP_NAME
+    "ConcordRTS"
+    CACHE STRING "macOS bundle name (also the .app file name)"
+)
+set(
+    CONCORD_MACOS_BUNDLE_ID
+    "org.concord.rts"
+    CACHE STRING "CFBundleIdentifier of the macOS bundle"
+)
+set(
+    CONCORD_MACOS_APP_VERSION
+    "0.1.0"
+    CACHE STRING "CFBundleShortVersionString of the macOS bundle"
+)
+set(
+    CONCORD_MACOS_MIN_VERSION
+    "11.0"
+    CACHE STRING "LSMinimumSystemVersion of the macOS bundle"
+)
+set(
+    CONCORD_MACOS_APP_DATA_ROOT
+    ""
+    CACHE PATH
+    "Game data tree baked into Contents/Resources/data-root (local_data/ + RedAlert2/)"
+)
+
+# 默认值猜一次：数据是兄弟目录（../ConcordRTS-GameData）或内联目录。
+# 猜不到就留空——打包脚本会打印警告，探测器退回兄弟/祖先扫描，
+# 比写一个错路径更诚实。
+if(NOT CONCORD_MACOS_APP_DATA_ROOT)
+    foreach(
+        _concord_data_candidate
+        "${CMAKE_SOURCE_DIR}/../ConcordRTS-GameData"
+        "${CMAKE_SOURCE_DIR}/ConcordRTS-GameData"
+    )
+        if(
+            EXISTS "${_concord_data_candidate}/local_data"
+            AND EXISTS "${_concord_data_candidate}/RedAlert2"
+        )
+            get_filename_component(
+                _concord_data_real
+                "${_concord_data_candidate}"
+                REALPATH
+            )
+            set(
+                CONCORD_MACOS_APP_DATA_ROOT
+                "${_concord_data_real}"
+                CACHE PATH
+                "Game data tree baked into Contents/Resources/data-root (local_data/ + RedAlert2/)"
+                FORCE
+            )
+            break()
+        endif()
+    endforeach()
+endif()
+
+# TARGET 守卫：portable-core 构建（CONCORD_PORTABLE_CORE=ON）在
+# CompilerAndPlatform.cmake 里提前 return，不会走到这里；但若将来平台轴被
+# 更早引入，这里的守卫能保证"没有产品可执行文件时也不会配置失败"。
+if(TARGET concord_runtime)
+    set(
+        CONCORD_MACOS_APP_DIR
+        "${CMAKE_BINARY_DIR}/app"
+        CACHE PATH
+        "Directory that receives the assembled .app bundle"
+    )
+    add_custom_target(
+        concord_app
+        COMMAND
+            sh "${CMAKE_SOURCE_DIR}/packaging/make-app-bundle.sh"
+            --binary "$<TARGET_FILE:concord_runtime>"
+            --output "${CONCORD_MACOS_APP_DIR}"
+            --data-root "${CONCORD_MACOS_APP_DATA_ROOT}"
+            --version "${CONCORD_MACOS_APP_VERSION}"
+            --bundle-id "${CONCORD_MACOS_BUNDLE_ID}"
+            --app-name "${CONCORD_MACOS_APP_NAME}"
+            --min-macos "${CONCORD_MACOS_MIN_VERSION}"
+            --icon-source "${CMAKE_SOURCE_DIR}/packaging/icon-source.png"
+        DEPENDS concord_runtime
+        COMMENT
+            "Assembling ${CONCORD_MACOS_APP_NAME}.app (data root: ${CONCORD_MACOS_APP_DATA_ROOT})"
+        VERBATIM
+    )
+    message(
+        STATUS
+        "concord_app target: ${CONCORD_MACOS_APP_DIR}/${CONCORD_MACOS_APP_NAME}.app"
+    )
+endif()
