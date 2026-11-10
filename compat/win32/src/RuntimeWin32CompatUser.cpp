@@ -321,6 +321,18 @@ BOOL GetClassInfoExW(HINSTANCE hInstance, LPCWSTR lpszClass, WNDCLASSEXW* lpwcx)
 // 窗口创建 / 销毁
 // ===========================================================================
 
+// Windows 的预定义系统窗口类。产品会直接 `CreateWindowExW(0, L"STATIC", ...)`
+// 而**不先** RegisterClassExW —— 在真 Windows 上这 8 个类天然存在。
+//
+// 不对位的后果很隐蔽：CreateWindowExW 返回 nullptr，产品那边只看到
+// "hosted child page did not preserve its top-level shell"，完全看不出
+// 是"类没注册"。这个失败正是 `--main-menu-ui-smoke-test` 卡住的原因。
+bool isStockWindowClass(const std::wstring& name) {
+    return name == L"STATIC" || name == L"BUTTON" || name == L"EDIT"
+        || name == L"LISTBOX" || name == L"COMBOBOX" || name == L"SCROLLBAR"
+        || name == L"MDICLIENT";
+}
+
 HWND CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR lpWindowName,
                      DWORD dwStyle, int X, int Y, int nWidth, int nHeight,
                      HWND hWndParent, HMENU hMenu, HINSTANCE hInstance,
@@ -331,8 +343,17 @@ HWND CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR lpWindowName,
     {
         std::lock_guard<std::mutex> lock(userMutex());
         auto found = classTable().find(lpClassName);
-        if (found == classTable().end()) return nullptr;
-        cls = found->second;
+        if (found != classTable().end()) {
+            cls = found->second;
+        } else if (isStockWindowClass(lpClassName)) {
+            // 预定义类由系统提供，行为就是默认窗口过程。这里只在**局部**填一个
+            // cls 供本次创建使用，不写进 classTable —— 否则产品之后
+            // RegisterClassExW(L"STATIC") 会撞上"类已存在"。
+            cls.lpfnWndProc = DefWindowProcW;
+            cls.lpszClassName = lpClassName;
+        } else {
+            return nullptr;
+        }
     }
 
     CompatWindow* w = new (std::nothrow) CompatWindow();
