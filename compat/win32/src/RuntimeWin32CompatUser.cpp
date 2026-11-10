@@ -726,6 +726,12 @@ int GetClassNameW(HWND hWnd, LPWSTR lpClassName, int nMaxCount) {
 // ===========================================================================
 
 HDC GetDC(HWND hWnd) {
+    // GetDC(NULL) = 屏幕 DC。这不是"取个空窗口的 DC"，而是整个屏幕参照设备，
+    // 产品拿它给 CreateCompatibleDC/CreateDIBSection 当目标设备描述，并用
+    // 非空当成功判据。之前这里直接走 asWindow(nullptr) 返回 nullptr，导致
+    // 本仓库 71 处 `GetDC(nullptr)` 调用点**全部**走失败分支——菜单 smoke 的
+    // "offscreen surface creation failed" 就是这一句。
+    if (hWnd == nullptr) return concord_compat::screenReferenceDc(kVirtualScreenW, kVirtualScreenH);
     CompatWindow* w = asWindow(hWnd);
     if (w == nullptr) return nullptr;
     if (!ensureSurface(w, clientWidth(w), clientHeight(w))) return nullptr;
@@ -736,6 +742,8 @@ int ReleaseDC(HWND hWnd, HDC hDC) {
     (void)hWnd;
     (void)hDC;
     // 纯离屏缓存 DC：不真正释放，返回 1（成功）。DC 随窗口销毁而释放。
+    // 屏幕 DC（hWnd==nullptr）同样是单例，ReleaseDC 本来就该是配对语义而**不是**
+    // 销毁语义——所以这里无需区分：不释放正是正确行为。
     return 1;
 }
 
@@ -1156,7 +1164,24 @@ LRESULT DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:
-        PostQuitMessage(0);
+        // 真实 Windows 的 DefWindowProc(WM_DESTROY) **什么都不做**。投 WM_QUIT
+        // 是应用自己的事——最典型的写法是在主窗口的 WM_DESTROY 里
+        // `PostQuitMessage(0); return 0;`。
+        //
+        // 本层曾经在这里 PostQuitMessage(0)，本意是"最后一个窗口关掉就退出"。
+        // 那是**错的**，而且错得很隐蔽：它让**任何**窗口的销毁都杀掉整个消息
+        // 循环，包括子窗口和测试用的临时窗口。实测证据（`--main-menu-ui-smoke-test`）：
+        //     [quit-trace] WM_DESTROY class=ConcordRTS.RuntimeMainMenu parent=0x… child=1  ← 子窗口
+        //     [quit-trace] WM_DESTROY class=STATIC                   parent=0x0 child=0  ← smoke 自建的宿主壳
+        // 主菜单窗口是宿主壳的子窗口，它一销毁，菜单→遭遇战异步转场的主循环就被
+        // 这条 WM_QUIT 带走，报 "skirmish transition received WM_QUIT"。
+        //
+        // 试过"只在销毁最后一个顶层窗口时才补 quit"——同样不行：smoke 自己就会
+        // 建一个 STATIC 顶层壳再销毁它，那时它正好是"最后一个顶层窗口"。
+        //
+        // 所以这里保持忠实：不投。代价是**独立**菜单/遭遇战可执行文件在主窗口
+        // 销毁后不会自动退出（GetMessage 会一直阻塞）——但真 Windows 上同样
+        // 如此，那是产品侧该显式 PostQuitMessage 的地方，不该由默认过程代劳。
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps{};

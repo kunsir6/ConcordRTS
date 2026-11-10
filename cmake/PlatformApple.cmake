@@ -322,6 +322,21 @@ function(concord_apple_add_win32_compat_selftest)
         concord_apple_link_win32_compat_frameworks(concord_apple_input_semantics_selftest)
     endif()
 
+    # Q-10：屏幕 DC（GetDC(NULL)）。这是本仓库出现最多的 GDI 惯用法（71 处），
+    # 语义上"必须非空、必须单例、必须能当参照设备"，而这些都是编译器看不见的契约。
+    if(NOT TARGET concord_screen_dc_semantics_selftest)
+        add_executable(
+            concord_screen_dc_semantics_selftest
+            "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/selftest/CompatScreenDcSemantics.cpp"
+            ${CONCORD_APPLE_WIN32_COMPAT_SOURCES}
+        )
+        target_include_directories(
+            concord_screen_dc_semantics_selftest
+            BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
+        )
+        concord_apple_link_win32_compat_frameworks(concord_screen_dc_semantics_selftest)
+    endif()
+
     # The XAPO half of the audio story: CXAPOBase is only "done" if the project's
     # real peak limiter (src/audio/backend/RuntimeAudioPeakLimiter.h, pure DSP)
     # still compiles, still limits, and is still destroyed by Release().  That

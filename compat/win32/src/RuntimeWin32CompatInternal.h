@@ -71,6 +71,18 @@ bool isRegisteredHandle(void* handle, const char* kind) noexcept;
 std::size_t liveHandleCount() noexcept;
 
 // ---------------------------------------------------------------------------
+// 屏幕 DC（GetDC(NULL) 的后备设备）
+// ---------------------------------------------------------------------------
+// Win32 里 GetDC(NULL) 返回屏幕 DC，产品大量拿它当 CreateCompatibleDC /
+// CreateDIBSection 的参照设备，并用"非空"当成功判据（本仓库 71 处）。返回
+// nullptr 会让这些调用点**全部**走进失败分支，而失败信息通常只有一句
+// "... creation failed"，看不出根因。
+//
+// 实现说明见 RuntimeWin32CompatGdi.cpp 末尾：单例、进程级、不计入 GDI 对象数、
+// DeleteDC 明确拒绝。width/height 由调用方传入（与 GetSystemMetrics 保持同一套值）。
+HDC screenReferenceDc(int width, int height) noexcept;
+
+// ---------------------------------------------------------------------------
 // 文本编解码
 // ---------------------------------------------------------------------------
 // 本平台的 wchar_t 是 **32 位（UTF-32）**，Windows 是 16 位（UTF-16）。这不是

@@ -38,6 +38,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <vector>
 
@@ -237,6 +238,13 @@ struct EmfMetafile {
 
 struct CompatDevice {
     std::uint32_t magic = kDeviceMagic;
+    // 这是不是 GetDC(NULL) 返回的那个**进程级屏幕 DC 单例**。
+    // 唯一的用途是让 DeleteDC 拒绝释放它：产品里 71 处调用点都用
+    // `HDC screen = GetDC(nullptr); ... ReleaseDC(nullptr, screen);` 这个惯用法，
+    // 但只要有**一处**写成 DeleteDC（在真 Windows 上同样是错的），单例就会
+    // 变成野指针，之后每个 GetDC(nullptr) 都返回悬垂句柄——而症状是随机的
+    // 崩溃或乱画，不是"某处调用写错了"。
+    bool screenReference = false;
     CompatObject* bitmap = nullptr;  // 借用，不拥有
     // CreateCompatibleDC 自带的 1×1 单色位图（S4-3）。与 bitmap 的区别是**拥有**：
     // 由 DeleteDC 释放。Win32 里这块位图是新 DC 的初值，也是首个 SelectObject
@@ -1755,6 +1763,10 @@ BOOL DeleteObject(HGDIOBJ ho) {
 BOOL DeleteDC(HDC hdc) {
     CompatDevice* device = asDevice(hdc);
     if (device == nullptr) return FALSE;
+    // 屏幕 DC 是进程级单例，生命周期到进程结束；DeleteDC 它不是合法操作
+    // （真 Windows 上应该用 ReleaseDC，而本层 ReleaseDC 本来就是无操作）。
+    // 放过去会让单例指针悬垂，之后每个 GetDC(nullptr) 都返回野句柄。
+    if (device->screenReference) return FALSE;
     // 未 CloseEnhMetaFile 就删录制 DC，等于丢弃这份图元文件——与 Windows 一致。
     delete device->recording;
     device->recording = nullptr;
@@ -3625,3 +3637,70 @@ DPI_AWARENESS GetAwarenessFromDpiAwarenessContext(DPI_AWARENESS_CONTEXT value) {
 }
 
 }  // extern "C"
+
+// ---------------------------------------------------------------------------
+// 屏幕 DC：GetDC(NULL) 的后备设备
+// ---------------------------------------------------------------------------
+// Win32 里 GetDC(NULL) 返回整个屏幕的 DC，它是产品最常用的**参照设备**：
+// `CreateCompatibleDC(GetDC(NULL))`、`CreateDIBSection(screenDc, ...)`、
+// `ensureRuntimeBackBuffer(buf, screenDc, w, h)` 全是这个写法。本仓库
+// `src/` 下有 **71 处** `GetDC(nullptr)`，性质相同：拿它当"目标设备的色彩能力"
+// 与"我拿得到 DC"的判据。
+//
+// 之前 GetDC(nullptr) 直接走 asWindow(nullptr) → 返回 nullptr，于是：
+//   · 用 `if (!screen || !ensure...)` 判成败的调用点**全部**走进失败分支；
+//   · 这正是 `--main-menu-ui-smoke-test` 报 "offscreen surface creation failed"
+//     的原因——菜单 smoke 里那一句 `HDC screen = GetDC(nullptr);` 拿到空。
+//
+// 本层的设备模型里 hdc 只是色彩能力提示（CreateCompatibleDC 明确忽略它），
+// 所以屏幕 DC 只需要是一个**真实存在、尺寸正确**的设备：
+//   · 尺寸取 GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN) 的同一套值
+//     （kVirtualScreenW/H，由调用方传入，避免两处各写一份常数）；
+//   · 带一块真实 DIB，`GetDeviceCaps(HORZRES/VERTRES)` 才能答对，绘制也不会崩；
+//   · 单例，永不释放（进程级），DeleteDC 明确拒绝。
+//
+// 它**不**计入 GetGuiResources(GR_GDIOBJECTS)：那块计数是产品侧"对象是否配平"
+// 断言的基线，凭空多一个进程级对象会让首帧的配平断言整体偏移一位。
+namespace concord_compat {
+
+HDC screenReferenceDc(int width, int height) noexcept {
+    static std::once_flag once;
+    static HDC screen = nullptr;
+    std::call_once(once, [width, height]() {
+        auto* device = new (std::nothrow) CompatDevice();
+        if (device == nullptr) return;
+        device->screenReference = true;
+        device->pen = toHandle(&stockTable()[BLACK_PEN]);
+        device->brush = toHandle(&stockTable()[WHITE_BRUSH]);
+        device->font = toHandle(&stockTable()[DEFAULT_GUI_FONT]);
+        // 手工构造位图（不走 allocateBitmap）：唯一区别是不动 liveObjectCount，
+        // 理由见上面的注释。字段与 allocateBitmap 保持逐项一致。
+        const int w = width > 0 ? width : 1;
+        const int h = height > 0 ? height : 1;
+        const std::size_t stride = static_cast<std::size_t>(w) * 4u;
+        auto* pixels = new (std::nothrow) std::uint8_t[stride * static_cast<std::size_t>(h)]();
+        auto* surface = new (std::nothrow) CompatObject();
+        if (pixels == nullptr || surface == nullptr) {
+            // 位图拿不到就让 DC 保持"未选位图"状态：绘制会失败返回，
+            // 但 GetDC(nullptr) 仍然返回非空——比返回 nullptr 更接近真相，
+            // 也不会把 71 个调用点全推回失败分支。
+            delete[] pixels;
+            delete surface;
+            screen = reinterpret_cast<HDC>(device);
+            return;
+        }
+        surface->kind = ObjectKind::Bitmap;
+        surface->width = w;
+        surface->height = h;
+        surface->stride = static_cast<int>(stride);
+        surface->topDown = true;
+        surface->pixels = pixels;
+        surface->selectedCount = 1;
+        device->bitmap = surface;
+        device->ownedBitmap = surface;
+        screen = reinterpret_cast<HDC>(device);
+    });
+    return screen;
+}
+
+}  // namespace concord_compat
