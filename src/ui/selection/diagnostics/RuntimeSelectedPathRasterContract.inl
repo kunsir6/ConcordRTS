@@ -62,6 +62,9 @@ bool runRuntimeSelectedPathRasterPixelContract(std::string& error) {
     const auto next = [&] { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
     const auto reset = [&](int test) {
         GdiFlush();
+        // 背景像素的高 8 位故意非零（0x91 起、逐 index 变化）：32bpp BI_RGB 下 GDI
+        // 画笔画线只覆盖 RGB 24 位、保留目标 alpha，CPU stamp 快路径必须做同样的事。
+        // 若把这里改成 0 或纯黑，alpha 语义的偏离会变得不可观测（S14b 的教训）。
         for (std::size_t index = 0; index < pixels; ++index)
             reference.pixels[index] = optimized.pixels[index] = 0x91293874U ^ static_cast<std::uint32_t>(index * 13397U);
         SelectClipRgn(reference.dc, nullptr);

@@ -258,8 +258,16 @@ public:
         for (const auto& pixel : stamp->pixels) {
             const std::int64_t x = static_cast<std::int64_t>(anchor.x) + pixel.x;
             const std::int64_t y = static_cast<std::int64_t>(anchor.y) + pixel.y;
-            if (x >= clip_.left && x < clip_.right && y >= clip_.top && y < clip_.bottom)
-                pixels_[static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) + static_cast<std::size_t>(x)] = pixel.color;
+            if (x < clip_.left || x >= clip_.right || y < clip_.top || y >= clip_.bottom) continue;
+            // 32bpp BI_RGB 的高 8 位不参与 GDI 语义：compat 的所有像素写入都经
+            // PixelSink::fillSpan -> applyRop2()，只替换 RGB 24 位、保留目标原有的
+            // alpha 字节。scratch DIB 每次清零，stamp 里的 alpha 恒为 0；整 32 位
+            // 赋值会把目标背景的 alpha 抹掉，于是像素契约在首个画线像素上报
+            // ref=0x9269e6be / optimized=0x0069e6be（RGB 相同、只有 alpha 不同）。
+            // supported() 已把 ROP2 限定为 R2_COPYPEN，故这里等价于它的复制分支。
+            std::uint32_t& target = pixels_[static_cast<std::size_t>(y) * static_cast<std::size_t>(width_)
+                + static_cast<std::size_t>(x)];
+            target = (target & 0xFF000000u) | (pixel.color & 0x00FFFFFFu);
         }
     }
 

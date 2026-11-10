@@ -222,8 +222,14 @@ public:
         for (const auto& pixel : *stamp) {
             const std::int64_t x = static_cast<std::int64_t>(bounds.left) + pixel.x;
             const std::int64_t y = static_cast<std::int64_t>(bounds.top) + pixel.y;
-            if (x >= clip_.left && x < clip_.right && y >= clip_.top && y < clip_.bottom)
-                pixels_[static_cast<std::size_t>(y) * width_ + static_cast<std::size_t>(x)] = pixel.color;
+            if (x < clip_.left || x >= clip_.right || y < clip_.top || y >= clip_.bottom) continue;
+            // 与 RuntimeSelectedPathRaster::draw 同理：32bpp BI_RGB 上 GDI 只替换
+            // RGB 24 位、保留目标 alpha（PixelSink::fillSpan -> applyRop2）。stamp
+            // 来自清零的 scratch DIB，整 32 位赋值会抹掉目标背景的高 8 位。
+            // supported() 已限定 R2_COPYPEN，故等价于 applyRop2 的复制分支。
+            std::uint32_t& target = pixels_[static_cast<std::size_t>(y) * width_
+                + static_cast<std::size_t>(x)];
+            target = (target & 0xFF000000u) | (pixel.color & 0x00FFFFFFu);
         }
         MoveToEx(dc_, center.x, center.y + 9, nullptr);
         return true;
