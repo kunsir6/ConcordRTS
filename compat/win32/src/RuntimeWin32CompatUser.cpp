@@ -22,6 +22,7 @@
 #include <windows.h>
 
 #include "RuntimeWin32CompatInternal.h"
+#include "RuntimeAppleWindowSurface.h"
 
 #include <algorithm>
 #include <chrono>
@@ -530,6 +531,9 @@ HWND WindowFromPoint(POINT Point) {
 // 窗口状态
 // ===========================================================================
 
+// 定义在 EndPaint 上方；ShowWindow 先用后定义，所以在这里前置声明。
+void maybePresentClientFrame(CompatWindow* w);
+
 BOOL ShowWindow(HWND hWnd, int nCmdShow) {
     CompatWindow* w = asWindow(hWnd);
     if (w == nullptr) return FALSE;
@@ -540,6 +544,11 @@ BOOL ShowWindow(HWND hWnd, int nCmdShow) {
     case SW_RESTORE: w->iconic = false; w->zoomed = false; w->visible = true; break;
     default: w->visible = true; break;  // SW_SHOW / SW_SHOWNORMAL 等
     }
+    // Q-05：ShowWindow 必须**立刻**让 NSWindow 出现。只翻 bool 的话，窗口要等
+    // 下一帧 EndPaint 才贴上来；而菜单初始化后可能长时间不重绘（S11 的定时器
+    // 探针是 1s 一次），用户会先看到"程序没起来"。这里先贴一帧空白也无妨——
+    // 紧接着的首次 WM_PAINT 会把它覆盖成真实画面。
+    maybePresentClientFrame(w);
     return TRUE;
 }
 
@@ -822,10 +831,36 @@ void maybeDumpClientFrame(CompatWindow* w) {
     }
 }
 
+// Q-05：把一帧贴到真正的 NSWindow 上。与 maybeDumpClientFrame 走同一条取像素
+// 路径（GetObjectW + DIBSECTION），区别是这一个走**主路径**（无条件执行），
+// 那个是 getenv 开关下的取证工具。零配置是刻意的：屏幕上有没有画面不该取决于
+// 用户是否设了环境变量。
+void maybePresentClientFrame(CompatWindow* w) {
+    if (w == nullptr || w->surface == nullptr) return;
+    DIBSECTION section{};
+    if (::GetObjectW(w->surface, static_cast<int>(sizeof(section)), &section) == 0) return;
+    const auto* bits = static_cast<const unsigned char*>(section.dsBm.bmBits);
+    if (bits == nullptr || section.dsBm.bmWidth <= 0 || section.dsBm.bmHeight <= 0
+        || section.dsBm.bmBitsPixel != 32) {
+        return;
+    }
+    concord_compat::apple::Surface surface;
+    surface.pixels = bits;
+    surface.width = section.dsBm.bmWidth;
+    surface.height = section.dsBm.bmHeight;
+    surface.bytesPerRow = surface.width * 4;
+    const std::string title = concord_compat::utf8FromWideText(w->title.c_str());
+    surface.titleUtf8 = title.c_str();
+    surface.visible = w->visible && !w->iconic;
+    concord_compat::apple::present(surface);
+}
+
 BOOL EndPaint(HWND hWnd, const PAINTSTRUCT* lpPaint) {
     (void)lpPaint;
-    // Q-05：一帧画完（EndPaint）之后才导出，保证拿到的是完整帧。
-    maybeDumpClientFrame(asWindow(hWnd));
+    CompatWindow* window = asWindow(hWnd);
+    // Q-05：一帧画完（EndPaint）之后才导出/贴图，保证拿到的是完整帧。
+    maybeDumpClientFrame(window);
+    maybePresentClientFrame(window);
     return TRUE;
 }
 

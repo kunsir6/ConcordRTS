@@ -202,6 +202,10 @@ set(
     # 只有声明、compat/src 下 0 实现；tests/multiplayer 的 smoke 是唯一没有 #if
     # 保护的调用方，所以不加进来就是"能 -fsyntax-only、链接必失败"。
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatKernel.cpp"
+    # Q-05：Cocoa 呈现层。S7 的窗口是"纯离屏"——对象、WM_PAINT、DIB 全真，
+    # 但进程里没有 NSWindow，所以屏幕上什么都没有。这个 .mm 负责把每帧贴上去。
+    # 它是本仓库唯一的 Objective-C++ TU（CMakeLists 里 if(APPLE) 才 enable OBJCXX）。
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeAppleWindowSurface.mm"
     CACHE INTERNAL
     "Win32 compatibility implementations compiled into Apple builds"
 )
@@ -222,8 +226,20 @@ set(
     # P4-02: the XAudio2 engine drives a real AudioQueue. 十二个 compat 自测目标
     # 都编译同一份源清单，框架漏了它们就会在链接期各报一次同样的错。
     AudioToolbox
+    # Q-05: NSWindow/NSView/NSApplication 来自 Cocoa，CALayer/contentsGravity
+    # 来自 QuartzCore（CoreAnimation）。两者都随源清单走，任何编译那个 .mm 的
+    # 目标都不会漏链接。
+    Cocoa
+    QuartzCore
     CACHE INTERNAL
     "Apple frameworks required by the Win32 compatibility layer"
+)
+
+# Q-05：Cocoa 那个 TU 用 ARC。项目其余部分全是 C++（无 ARC 概念），
+# 只有这一个文件需要 —— 按文件属性设，不动全局编译选项。
+set_source_files_properties(
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeAppleWindowSurface.mm"
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc"
 )
 
 #   usage: concord_apple_link_win32_compat_frameworks(<target>)
