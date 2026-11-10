@@ -4,6 +4,7 @@
 #include "assets/codecs/PalDecoder.h"
 
 #include "data/art/ArtDatabase.h"
+#include "data/art/TheaterResourceLetters.h"
 #include "assets/archive/MixArchive.h"
 #include "data/rules/RulesDatabase.h"
 
@@ -678,9 +679,44 @@ std::vector<IndexedMixArchive> buildMixArchiveIndex(
     return archives;
 }
 
-char newTheaterCharForExtension(const std::string& tileExtension) {
+// Q-02：**建筑**与**地表 overlay** 用的是两套剧场字符约定，同一个函数服务两边必错一边。
+//
+// 数据（ConcordRTS-GameData/local_data/resources/mix_exports/art/）：
+//   建筑：温带图在 art/base/gg*.shp（28 个：ggpowr / gggap / ggyard / ggweap…），
+//         雪地在 art/snow/ga*.shp（65 个）。gt*powr 在全部归档里**不存在**。
+//         → 温带 = 'G'
+//   地表：温带在 art/temperat/gtsand.shp + gtwall.shp + ntwall.shp，雪地在
+//         art/snow/gasand.shp，城市 gu*，沙漠 gd*，月球 gl*，新城市 gn*。
+//         → 温带 = 'T'
+// 也就是说 "gt" 只对地表成立、对建筑不成立；"gg" 只对建筑成立、对地表不成立。
+// 上一版把这个函数写成 .tem → 't' 并让两条路径共用：建筑侧的第一个候选名永远是
+// 一个不存在的 gt*.shp，只是因为后面还有一个 'g' 兜底候选才没有变成"缺图"。
+char structureTheaterCharForExtension(const std::string& tileExtension) {
     if (tileExtension == ".tem") {
-        return 't';
+        return 'g'; // 温带建筑在 art/base/gg*.shp
+    }
+    if (tileExtension == ".urb") {
+        return 'u';
+    }
+    if (tileExtension == ".ubn") {
+        return 'n';
+    }
+    if (tileExtension == ".des") {
+        return 'd';
+    }
+    if (tileExtension == ".lun") {
+        return 'l';
+    }
+    if (tileExtension == ".sno") {
+        return 'a';
+    }
+
+    return '\0';
+}
+
+char overlayTheaterCharForExtension(const std::string& tileExtension) {
+    if (tileExtension == ".tem") {
+        return 't'; // 温带地表在 art/temperat/gt*.shp
     }
     if (tileExtension == ".urb") {
         return 'u';
@@ -708,9 +744,13 @@ bool artIdSupportsNewTheater(const std::string& artId) {
 
     const char first = static_cast<char>(std::toupper(static_cast<unsigned char>(artId[0])));
     const char second = static_cast<char>(std::toupper(static_cast<unsigned char>(artId[1])));
+    // Q-02：第二个字符里必须有 'G'——温带建筑的 art id 自己就长这样（GGPOWR / NGYARD）。
+    // 少了 'G'，这些 id 会被判成"不支持新剧场"，于是温带 id 只能靠"原名直查"命中；
+    // 一旦 Image= 指向别的 id，替代候选就整条不生成。
     return (first == 'G' || first == 'N' || first == 'C' || first == 'Y')
         && (
             second == 'A'
+            || second == 'G'
             || second == 'T'
             || second == 'U'
             || second == 'D'
@@ -935,7 +975,7 @@ std::vector<std::string> structureAssetFileCandidates(
     }
 
     const std::string lowerBaseName = toLowerAscii(baseName);
-    const char newTheaterChar = newTheaterCharForExtension(theaterDatabase.getTileExtension());
+    const char newTheaterChar = structureTheaterCharForExtension(theaterDatabase.getTileExtension());
     if (link.newTheater
         && newTheaterChar != '\0'
         && artIdSupportsNewTheater(link.artId)
@@ -1028,7 +1068,7 @@ std::vector<std::string> overlayAssetFileCandidates(
         addTheaterCandidates("bridgb");
     }
 
-    const char newTheaterChar = newTheaterCharForExtension(tileExtension);
+    const char newTheaterChar = overlayTheaterCharForExtension(tileExtension);
     if (newTheaterChar != '\0'
         && lowerBaseName.size() >= 2
         && artIdSupportsNewTheater(lowerBaseName)
@@ -1037,9 +1077,11 @@ std::vector<std::string> overlayAssetFileCandidates(
         newTheaterName[1] = newTheaterChar;
         addUniqueCandidate(candidates, newTheaterName + ".shp");
 
-        std::string genericName = lowerBaseName;
-        genericName[1] = 'g';
-        addUniqueCandidate(candidates, genericName + ".shp");
+        // 地表 overlay 的温带兜底是 't'（art/temperat/gt*），不是建筑那个 'g'
+        // （gg* 是建筑用的；对地表写 'g' 只会得到一个永远不存在的候选）。
+        std::string temperateName = lowerBaseName;
+        temperateName[1] = 't';
+        addUniqueCandidate(candidates, temperateName + ".shp");
     }
     return candidates;
 }
