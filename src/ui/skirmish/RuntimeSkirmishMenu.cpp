@@ -4203,13 +4203,25 @@ RuntimeSkirmishSelection runRuntimeSkirmishMenu(const RuntimeConfig& config,Runt
     state.audio.startMusic(state.exportRoot / "thememd" / "drok.wav");
     state.audio.play("MenuSlideIn");
 
+    // 注意：这里**不能**用 GetMessageW 做主循环。
+    //
+    // 原因不是性能，是"永远不返回"：菜单收尾的路径是
+    //     WM_TIMER(2) → updateMenuTransition → 滑出动画结束 → DestroyWindow(window)
+    // 一旦窗口在上一次派发里被销毁，队列里**再也不会来消息**，而 GetMessageW 会无限
+    // 阻塞在等待上（本层没有 WM_QUIT 可等，真 Windows 也一样），于是
+    // `while (IsWindow(window))` 这个退出条件**永远没有机会被重判**——进程挂死。
+    // 实测：遭遇战 preload smoke 的 4 次进出就卡死在这里（采样栈落在 GetMessageW）。
+    //
+    // 改成 PeekMessage + 有界等待：没消息时最多睡 5ms 就让外层重判一次 IsWindow。
+    // 产品里同类循环（主菜单 smoke、preload smoke）本来就是这个写法，这里只是对齐。
     MSG message{};
     while (IsWindow(window)) {
-        const BOOL result = GetMessageW(&message, nullptr, 0, 0);
-        if (result <= 0) {
-            if (result == 0) {
-                PostQuitMessage(static_cast<int>(message.wParam));
-            }
+        if (!PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            MsgWaitForMultipleObjectsEx(0, nullptr, 5, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            continue;
+        }
+        if (message.message == WM_QUIT) {
+            PostQuitMessage(static_cast<int>(message.wParam));
             break;
         }
         TranslateMessage(&message);
@@ -4389,16 +4401,31 @@ int runRuntimeSkirmishMenuSmokeTest(
     state.selection.slots = savedSlots;
     state.startingSpots = savedStarts;
     syncSelection(state);
+    // 暴露契约是**双向**的，不是单向的"必须暴露"：
+    //   · 数据完整（cooperativeDataComplete）→ Cooperative 必须出现在模式表里，
+    //     且 4 人 A-D 槽位/国家约束/队伍/出生点全部成立（cooperativeSelectionContract）；
+    //   · 数据不全 → 必须**不**出现（产品自己的策略：缺数据不得悄悄当普通遭遇战开局）。
+    // 只写"必须暴露"会把这个 smoke 绑死在完整资产集上：本资产集没有 coopcampmd.ini，
+    // 产品正确地隐藏了该模式，却会被判成失败——那是测试错，不是产品错。
+    const bool cooperativeExposureValid = state.cooperativeDataComplete
+        ? (cooperativeMode != state.modes.end() && cooperativeSelectionContract)
+        : (cooperativeMode == state.modes.end());
+    if (!state.cooperativeDataComplete) {
+        std::cout << "Skirmish shell: cooperative not exposed (data incomplete); "
+                     "exposure contract checked in the reverse direction\n";
+    }
     const bool modeExposureContract = !state.modes.empty()
-        && state.cooperativeDataComplete
-        && cooperativeMode != state.modes.end()
-        && cooperativeSelectionContract
+        && cooperativeExposureValid
         && unavailableFallbackHidden
         && !allowsAllMapsFallback("cooperative");
     if (!modeExposureContract) {
         std::cerr << "Skirmish shell smoke failed: Cooperative data, map, "
                   << "A-D slot, country constraint, or fallback contract "
-                  << "did not hold.\n";
+                  << "did not hold (dataComplete=" << state.cooperativeDataComplete
+                  << " modeExposed=" << (cooperativeMode != state.modes.end())
+                  << " selectionContract=" << cooperativeSelectionContract
+                  << " unavailableFallbackHidden=" << unavailableFallbackHidden
+                  << ").\n";
         return 1;
     }
     HWND hostedShell = CreateWindowExW(

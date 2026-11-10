@@ -928,6 +928,12 @@ void appleInputDispatch(const concord_compat::apple::InputEvent& event, void* co
 // 会先画；后来的独立主窗口更大时应由它显示。反过来"更小者接管"没有正当场景，
 // 一律拒绝。
 HWND gPresentedWindow = nullptr;
+// 上次成为可见窗口时的**面积**。为什么要单独记：窗口可以被销毁，而句柄一失效
+// 就查不到尺寸了；只比较"当前 owner 的尺寸"会让 owner 一死就无门槛——
+// 实测发生过：800x600 的遭遇战壳销毁后，10x10 的随机地图名字输入框重绘，
+// 直接把窗口 resize 成 10x10（`[cocoa] NSWindow resized to 10x10`），整屏变成
+// 一个小输入框。记住历史面积就能挡住这种"小控件捡漏"。
+long long gPresentedArea = 0;
 
 void maybePresentClientFrame(CompatWindow* w) {
     if (w == nullptr || w->surface == nullptr) return;
@@ -935,14 +941,17 @@ void maybePresentClientFrame(CompatWindow* w) {
         const long long area = static_cast<long long>(clientWidth(w))
             * static_cast<long long>(clientHeight(w));
         CompatWindow* owner = asWindow(gPresentedWindow);
-        if (owner == nullptr) {
-            gPresentedWindow = toHwnd(w);
-        } else if (owner != w) {
-            const long long ownerArea = static_cast<long long>(clientWidth(owner))
-                * static_cast<long long>(clientHeight(owner));
-            if (area <= ownerArea) return;  // 小控件（EDIT/STATIC 等）不得接管画面
-            gPresentedWindow = toHwnd(w);
-        }
+        const bool takeOver = [&]() {
+            if (gPresentedWindow == nullptr || gPresentedArea <= 0) return true;  // 首个窗口
+            if (owner != nullptr) return area > gPresentedArea;   // 主人还在：只能被更大者接管
+            // 主人已销毁：允许接手，但门槛是"不小于历史面积的一半"。
+            // 半数是刻意的宽松档：既挡得住 EDIT/STATIC 这类小控件，
+            // 又不会因为"新界面比旧界面小一点"就白屏。
+            return area * 2 >= gPresentedArea;
+        }();
+        if (!takeOver) return;
+        gPresentedWindow = toHwnd(w);
+        gPresentedArea = area;
     }
     DIBSECTION section{};
     if (::GetObjectW(w->surface, static_cast<int>(sizeof(section)), &section) == 0) return;
