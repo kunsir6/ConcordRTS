@@ -1604,6 +1604,23 @@ HANDLE FindFirstFileW(LPCWSTR lpFileName, WIN32_FIND_DATAW* lpFindFileData);
 BOOL FindNextFileW(HANDLE hFindFile, WIN32_FIND_DATAW* lpFindFileData);
 BOOL FindClose(HANDLE hFindFile);
 
+// ---- 目录变更通知 ----
+// 产品用它判断"资源树有没有变"（RuntimeMenuResourceWatch）。语义要点：
+//   · 返回的 HANDLE 在**观察到变更后保持 signaled**，直到 FindNextChangeNotification
+//     复位（不会自动清）——产品侧只靠 WaitForSingleObject(h, 0) 轮询，从不复位，
+//     所以"一旦变过就永远 signaled"正是它要的语义；
+//   · 监视范围是**子树**（bWatchSubtree=TRUE 时），不是单层目录。
+#define FILE_NOTIFY_CHANGE_FILE_NAME 0x00000001
+#define FILE_NOTIFY_CHANGE_DIR_NAME 0x00000002
+#define FILE_NOTIFY_CHANGE_ATTRIBUTES 0x00000004
+#define FILE_NOTIFY_CHANGE_SIZE 0x00000008
+#define FILE_NOTIFY_CHANGE_LAST_WRITE 0x00000010
+#define FILE_NOTIFY_CHANGE_CREATION 0x00000040
+#define FILE_NOTIFY_CHANGE_SECURITY 0x00000100
+HANDLE FindFirstChangeNotificationW(LPCWSTR lpPathName, BOOL bWatchSubtree, DWORD dwNotifyFilter);
+BOOL FindNextChangeNotification(HANDLE hChangeHandle);
+BOOL FindCloseChangeNotification(HANDLE hChangeHandle);
+
 // ---- 字符串 / 编码 ----
 int MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr, int cbMultiByte,
                         LPWSTR lpWideCharStr, int cchWideChar);

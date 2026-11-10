@@ -6,7 +6,10 @@
 #include <string>
 #include <system_error>
 
-#ifdef _WIN32
+// 变更通知这一族在 macOS 上由 compat 层提供（FindFirstChangeNotificationW 等，
+// 实现走 FSEvents），所以这个 TU 在 Apple 上也要拿 windows.h——那是 shim 头，
+// 不是真 Windows SDK。反过来"没有通知后端"的平台仍然走下面 #else 的诚实拒绝。
+#if defined(_WIN32) || defined(__APPLE__)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -51,20 +54,23 @@ struct RuntimeMenuResourceWatch::Impl {
     fs::path resourceRoot;
     fs::path localRoot;
     std::array<FileStamp, localInputs.size()> localStamps{};
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     std::array<HANDLE, 2> handles{INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE};
 #endif
 
     explicit Impl(const RuntimeMenuResourcePaths& paths)
         : resourceRoot(absolutePath(paths.resourceRoot)),
           localRoot(absolutePath(paths.localDataRoot)) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
         const std::array<fs::path, 2> roots{
             resourceRoot, localRoot / "resources" / "mix_exports"
         };
         for (std::size_t i = 0; i < roots.size(); ++i) {
+            // 显式取宽串：Windows 上 path::value_type 就是 wchar_t（与原来
+            // c_str() 完全等价），macOS 上是 char，直接传 c_str() 编不过。
+            const std::wstring notifyPath = roots[i].wstring();
             handles[i] = FindFirstChangeNotificationW(
-                roots[i].c_str(), TRUE,
+                notifyPath.c_str(), TRUE,
                 FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME
                     | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
         }
@@ -75,7 +81,7 @@ struct RuntimeMenuResourceWatch::Impl {
     }
 
     ~Impl() {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
         for (HANDLE handle : handles) {
             if (handle != INVALID_HANDLE_VALUE) FindCloseChangeNotification(handle);
         }
@@ -89,13 +95,13 @@ struct RuntimeMenuResourceWatch::Impl {
 
     bool unchanged(const RuntimeMenuResourcePaths& paths) const {
         if (!sameRoots(paths)) return false;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
         for (HANDLE handle : handles) {
             if (handle == INVALID_HANDLE_VALUE
                 || WaitForSingleObject(handle, 0) != WAIT_TIMEOUT) return false;
         }
 #else
-        // No notification backend exists here yet. Do not certify a stale tree.
+        // No notification backend for this platform. Do not certify a stale tree.
         return false;
 #endif
         for (std::size_t i = 0; i < localInputs.size(); ++i) {

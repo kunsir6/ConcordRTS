@@ -206,6 +206,10 @@ set(
     # 但进程里没有 NSWindow，所以屏幕上什么都没有。这个 .mm 负责把每帧贴上去。
     # 它是本仓库唯一的 Objective-C++ TU（CMakeLists 里 if(APPLE) 才 enable OBJCXX）。
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeAppleWindowSurface.mm"
+    # S12：目录变更通知族（FindFirstChangeNotificationW / FindNextChangeNotification /
+    # FindCloseChangeNotification）。产品只有 RuntimeMenuResourceWatch 用它，
+    # 判断"资源树有没有变、能不能复用已预热的菜单状态"。
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatChangeNotify.cpp"
     CACHE INTERNAL
     "Win32 compatibility implementations compiled into Apple builds"
 )
@@ -231,9 +235,49 @@ set(
     # 目标都不会漏链接。
     Cocoa
     QuartzCore
+    # S12: FSEvents（目录变更通知）在 CoreServices 伞框架之下。链接用伞框架，
+    # 头用窄头 <FSEvents/FSEvents.h>（嵌套搜索路径见下面的 -F）。
+    CoreServices
     CACHE INTERNAL
     "Apple frameworks required by the Win32 compatibility layer"
 )
+
+# S12：FSEvents 是**嵌套**框架（CoreServices.framework/Frameworks/FSEvents.framework），
+# 默认框架搜索路径只覆盖顶层，`<FSEvents/FSEvents.h>` 因此找不到。
+# 按**文件属性**加 -F 而不是按目标加：同一份源清单被十几个目标编译
+# （产品 + 12 个 compat 自测），按目标加必然漏掉几个，症状是"某些自测链接报了
+# 一堆 FSEvent 符号未定义"，而产品好好的。
+# 注意 CMAKE_OSX_SYSROOT 在"用默认 SDK"时是空串（不是路径），直接拼会得到
+# -F/System/Library/... 这种不存在的绝对路径，报"did not find FSEvents.h in
+# framework 'FSEvents' (loaded from '/System/Library/...')"——看起来像 SDK 缺失，
+# 实际只是拼错了前缀。所以显式问 xcrun 要 SDK 路径。
+if(NOT DEFINED CONCORD_APPLE_FSEVENTS_FRAMEWORK_DIR)
+    execute_process(
+        COMMAND xcrun --show-sdk-path
+        OUTPUT_VARIABLE _concord_sdk_path
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_concord_sdk_path AND EXISTS
+        "${_concord_sdk_path}/System/Library/Frameworks/CoreServices.framework/Frameworks")
+        set(
+            CONCORD_APPLE_FSEVENTS_FRAMEWORK_DIR
+            "${_concord_sdk_path}/System/Library/Frameworks/CoreServices.framework/Frameworks"
+            CACHE INTERNAL "Nested framework search path for FSEvents"
+        )
+    endif()
+endif()
+if(CONCORD_APPLE_FSEVENTS_FRAMEWORK_DIR)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatChangeNotify.cpp"
+        PROPERTIES COMPILE_FLAGS
+            "-F${CONCORD_APPLE_FSEVENTS_FRAMEWORK_DIR}"
+    )
+else()
+    message(FATAL_ERROR
+        "S12: cannot locate CoreServices.framework/Frameworks for FSEvents headers "
+        "(xcrun --show-sdk-path failed).")
+endif()
 
 # Q-05：Cocoa 那个 TU 用 ARC。项目其余部分全是 C++（无 ARC 概念），
 # 只有这一个文件需要 —— 按文件属性设，不动全局编译选项。
@@ -350,6 +394,21 @@ function(concord_apple_add_win32_compat_selftest)
             BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
         )
         concord_apple_link_win32_compat_frameworks(concord_window_cursor_semantics_selftest)
+    endif()
+
+    # S12：目录变更通知（FSEvents 后端）。产品用它判断"资源树有没有变、能不能复用
+    # 已预热的菜单状态"，所以"未变更不能假阳性"和"变更后必须保持 signaled"都要钉住。
+    if(NOT TARGET concord_change_notify_semantics_selftest)
+        add_executable(
+            concord_change_notify_semantics_selftest
+            "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/selftest/CompatChangeNotifySemantics.cpp"
+            ${CONCORD_APPLE_WIN32_COMPAT_SOURCES}
+        )
+        target_include_directories(
+            concord_change_notify_semantics_selftest
+            BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
+        )
+        concord_apple_link_win32_compat_frameworks(concord_change_notify_semantics_selftest)
     endif()
 
     # The XAPO half of the audio story: CXAPOBase is only "done" if the project's

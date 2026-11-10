@@ -596,6 +596,11 @@ DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds) {
         // process 句柄：等到子进程退出（这是 smoke 里 Join 的核心动作）。
         CompatProcess* process = asProcess(hHandle);
         if (process != nullptr) return waitForProcess(process, dwMilliseconds);
+        // 目录变更通知句柄（S12）：等"资源树变了"。实现在 ChangeNotify.cpp，
+        // 这里只做分发——两边各写一份"是否 signaled"的判定就会走偏。
+        if (concord_compat::isChangeNotifyHandle(hHandle)) {
+            return concord_compat::waitChangeNotify(hHandle, dwMilliseconds);
+        }
         // 其余类型（job / mapping 等）不冒充成功：返回 WAIT_OBJECT_0 会让
         // 调用方以为"已经 signaled"，从而跳过真正的握手。
         concord_compat::setLastError(ERROR_INVALID_HANDLE);

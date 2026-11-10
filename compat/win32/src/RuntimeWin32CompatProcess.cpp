@@ -93,14 +93,28 @@ struct HandleEntry {
     const char* kind = "unknown";
 };
 
+// 永不析构的锁与表。
+//
+// 为什么要故意泄漏这两个对象（而不是老老实实放一个 static）：
+// 句柄表会被**静态对象**在析构期访问。实测崩溃：产品的 `prewarmedMenuState`
+// 是静态 unique_ptr，它的析构里调 `FindCloseChangeNotification` →
+// `closeRegisteredHandle` → 锁 handleMutex()；而本 TU 与产品 TU 的静态析构顺序
+// 不确定，锁可能已经先被销毁，于是抛
+//     libc++abi: terminating due to uncaught exception of type
+//     std::__1::system_error: mutex lock failed: Invalid argument
+// 进程以 SIGABRT 退出——所有断言都过了，挂在进程收尾，最难联想到根因。
+//
+// 句柄表本来就该活到进程结束（Windows 的 HANDLE 表同理），所以让它**不析构**
+// 是正确语义，不是为了绕开崩溃的权宜之计。
 std::mutex& handleMutex() {
-    static std::mutex value;
-    return value;
+    static std::mutex* value = new std::mutex();
+    return *value;
 }
 
 std::unordered_map<void*, HandleEntry>& handleTable() {
-    static std::unordered_map<void*, HandleEntry> value;
-    return value;
+    static std::unordered_map<void*, HandleEntry>* value =
+        new std::unordered_map<void*, HandleEntry>();
+    return *value;
 }
 
 }  // namespace

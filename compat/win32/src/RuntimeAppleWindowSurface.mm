@@ -286,11 +286,18 @@ void emit(NSEvent* event) {
 void pumpEvents() {
     if (gInputSink == nullptr || gWindow == nil) return;
     @autoreleasepool {
-        // distantPast 让调用立刻返回（不阻塞），把所有排队事件一次排空。
-        // 只在窗口是关键窗口/主窗口时取，否则会偷走别的 App 的事件焦点语义。
+        // **不要**用 [NSDate distantPast] 当"立刻返回"。
+        // 文档说它不阻塞，实测会进 AppKit 的事件循环（采样栈：nextEventMatchingMask →
+        // _DPSNextEvent → _DPSBlockUntilNextEventMatchingListInMode → mach_msg），
+        // 也就是**真阻塞**。后果极隐蔽：compat 的 GetMessageW 在取不到消息时会调
+        // pumpEvents 再睡，一旦这里卡住，WM_TIMER 就再也不会派发——产品的定时器
+        // 驱动的菜单收尾直接死等（遭遇战 preload smoke 卡在这里，30s 后被杀）。
+        //
+        // 用"现在 + 2ms"这种**有界**超时：最坏多等 2ms，但绝不会无限挂。
+        // 取不到事件就 break，等价于非阻塞；取到就一次排空。
         for (;;) {
             NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                                untilDate:[NSDate distantPast]
+                                                untilDate:[NSDate dateWithTimeIntervalSinceNow:0.002]
                                                    inMode:NSDefaultRunLoopMode
                                                   dequeue:YES];
             if (event == nil) break;

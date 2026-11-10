@@ -83,6 +83,17 @@ std::size_t liveHandleCount() noexcept;
 HDC screenReferenceDc(int width, int height) noexcept;
 
 // ---------------------------------------------------------------------------
+// 目录变更通知（S12）
+// ---------------------------------------------------------------------------
+// "同一种对象、两个入口"再一次出现：创建/复位/关闭在 ChangeNotify.cpp，
+// 而等待在 Kernel.cpp 的 WaitForSingleObject 里。这两个函数就是那个接缝——
+// 没有它们，Kernel.cpp 只能看见"未知句柄"，于是 WaitForSingleObject 会对
+// 变更通知句柄返回 WAIT_FAILED（调用方会把它当成"资源变了"或"没变"的**错误**
+// 答案之一，而不是"不支持"）。
+bool isChangeNotifyHandle(HANDLE handle);
+DWORD waitChangeNotify(HANDLE handle, DWORD milliseconds);
+
+// ---------------------------------------------------------------------------
 // 文本编解码
 // ---------------------------------------------------------------------------
 // 本平台的 wchar_t 是 **32 位（UTF-32）**，Windows 是 16 位（UTF-16）。这不是
