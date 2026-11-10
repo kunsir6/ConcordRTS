@@ -2336,6 +2336,7 @@ RuntimeMainMenuResult runRuntimeMainMenu(
 #include "ui/main_menu/diagnostics/RuntimeMainSystemFontFallbackSmoke.inl"
 #include "ui/main_menu/diagnostics/RuntimeMainVideoFooterSmoke.inl"
 #include "ui/main_menu/diagnostics/RuntimeMainVideoCallerBoundarySmoke.inl"
+#include "ui/main_menu/diagnostics/RuntimeMainMenuPointerNavigationSmoke.inl"
 
 int runRuntimeMainMenuSmokeTest(
     const RuntimeConfig& config,
@@ -2377,6 +2378,14 @@ int runRuntimeMainMenuSmokeTest(
         return runRuntimeInternetMenuClockContract(fs::path(*output));
     }
 #endif
+    if (const auto only=mainMenuSmokeEnvironment("CONCORD_MAIN_MENU_POINTER_NAV_ONLY")) {
+        const auto output=mainMenuSmokeEnvironment("CONCORD_MAIN_MENU_POINTER_NAV_OUTPUT");
+        if(*only!="1" || !output || output->empty()) {
+            std::cerr<<"Main pointer nav requires ONLY=1 and explicit OUTPUT directory\n";
+            return 1;
+        }
+        return runMainMenuPointerNavigationSmoke(config,fs::path(*output));
+    }
     if (const auto only=mainMenuSmokeEnvironment("CONCORD_MAIN_MENU_PRESENTATION_CLOCK_ONLY")) {
         const auto output=mainMenuSmokeEnvironment("CONCORD_MAIN_MENU_PRESENTATION_CLOCK_OUTPUT");
         if(*only!="1" || !output || output->empty()) {
