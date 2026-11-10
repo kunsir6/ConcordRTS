@@ -23,6 +23,7 @@
 
 #include "RuntimeWin32CompatInternal.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -222,6 +223,15 @@ bool messageMatches(const MSG& msg, HWND hWnd, UINT filterMin, UINT filterMax) {
     return true;
 }
 
+// 合成消息（WM_TIMER / WM_PAINT）走同一个范围规则。**min==max==0 表示不过滤**，
+// 这是 Win32 的约定，产品也正是用 GetMessageW(&msg, nullptr, 0, 0) 取消息；
+// 若这里写成 `min <= msg && msg <= max`，0..0 会把一切合成消息挡在门外——
+// 表现为"定时器已注册但 GetMessageW 永久阻塞"，而任何单看返回值的断言都不会红。
+bool rangeAccepts(UINT message, UINT filterMin, UINT filterMax) {
+    if (filterMin == 0 && filterMax == 0) return true;
+    return message >= filterMin && message <= filterMax;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -386,6 +396,11 @@ BOOL DestroyWindow(HWND hWnd) {
     if (w == nullptr) return FALSE;
     if (w->destroying) return FALSE;
     w->destroying = true;
+
+    // S11：窗口的定时器随窗口一起消失。真实 user32 也这样——否则表里会留着一个
+    // 指向已销毁句柄的定时器，每 16ms 合成一条 WM_TIMER 往死窗口上派发，而
+    // 调用方完全看不出问题（消息"投递成功"、DispatchMessage 静默丢弃）。
+    concord_compat::timerDropForWindow(hWnd);
 
     // 先发销毁消息，让窗口过程清理（WM_NCDESTROY 里会清 GWLP_USERDATA）。
     callWindowProc(hWnd, WM_DESTROY, 0, 0);
@@ -777,13 +792,66 @@ void PostQuitMessage(int nExitCode) {
 }
 
 // 从队列取一条匹配消息（不阻塞）。返回 true 表示取到并填入 lpMsg。
+//
+// S11：真实队列之外还要**合成**两类低优先级消息，这是 user32 的既有语义，
+// 不是本层的发明：
+//   · WM_TIMER —— 定时器到期时在"取消息"这一刻生成，从不入队（见
+//     RuntimeWin32CompatTimer.cpp 文件头）。
+//   · WM_PAINT —— 有窗口脏且队列为空时生成。没有这一条，定时器回调里的
+//     InvalidateRect 只是置一个标志，屏幕永远不重画，菜单看起来仍然"冻住"。
+//
+// 合成的两条都只在 remove=true（PM_REMOVE / GetMessage）时成立：PeekMessage 的
+// PM_NOREMOVE 语义是"看一眼但不动队列"，而合成消息没有队列位置可比，返回一条
+// 不可消费的 WM_PAINT 会让调用方的 `while (PeekMessageW(..., PM_NOREMOVE)) { ... }`
+// 变成死循环。
 bool popMessage(LPMSG lpMsg, HWND hWnd, UINT filterMin, UINT filterMax, bool remove) {
-    std::lock_guard<std::mutex> lock(userMutex());
-    auto& q = messageQueue();
-    for (auto it = q.begin(); it != q.end(); ++it) {
-        if (messageMatches(*it, hWnd, filterMin, filterMax)) {
-            *lpMsg = *it;
-            if (remove) q.erase(it);
+    {
+        std::lock_guard<std::mutex> lock(userMutex());
+        auto& q = messageQueue();
+        for (auto it = q.begin(); it != q.end(); ++it) {
+            if (messageMatches(*it, hWnd, filterMin, filterMax)) {
+                *lpMsg = *it;
+                if (remove) q.erase(it);
+                return true;
+            }
+        }
+    }
+    if (!remove) return false;
+
+    const bool timerInRange = rangeAccepts(WM_TIMER, filterMin, filterMax);
+    const bool paintInRange = rangeAccepts(WM_PAINT, filterMin, filterMax);
+
+    // 1) 定时器。回调形式的定时器（lpTimerFunc 非空）由**消息循环**调用，不产生
+    // 消息——所以这里可能连续吃掉几条回调再返回，这正是真实行为。
+    if (timerInRange) {
+        for (;;) {
+            concord_compat::TimerDue due{};
+            if (!concord_compat::timerTakeDue(hWnd, true, due)) break;
+            if (due.proc != nullptr) {
+                // 回调里可能 PostMessage / InvalidateRect，所以**不能**在这里持
+                // userMutex 调用；timerTakeDue 已经释放了它自己的锁。
+                due.proc(due.hwnd, WM_TIMER, due.id, 0);
+                continue;
+            }
+            *lpMsg = MSG{};
+            lpMsg->hwnd = due.hwnd;
+            lpMsg->message = WM_TIMER;
+            lpMsg->wParam = static_cast<WPARAM>(due.id);
+            lpMsg->lParam = 0;
+            return true;
+        }
+    }
+
+    // 2) 重绘。脏标志由 InvalidateRect/RedrawWindow 置位，由 BeginPaint/ValidateRect
+    // 清位——本层不在这里清，否则"BeginPaint 之前又脏了一次"的合并语义会丢。
+    if (paintInRange) {
+        std::lock_guard<std::mutex> lock(userMutex());
+        for (CompatWindow* window : windowTable()) {
+            if (window == nullptr || !window->dirty) continue;
+            if (hWnd != nullptr && toHwnd(window) != hWnd) continue;
+            *lpMsg = MSG{};
+            lpMsg->hwnd = toHwnd(window);
+            lpMsg->message = WM_PAINT;
             return true;
         }
     }
@@ -799,24 +867,34 @@ BOOL PeekMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax
 
 BOOL GetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax) {
     if (lpMsg == nullptr) return -1;
-    // 阻塞取消息：无消息时短 sleep 轮询（虚拟时钟/真实输入源是下一块硬活）。
+    // 阻塞取消息：无消息时按"下一次定时器到期"睡眠（没有定时器就 1ms 轮询）。
+    // 上限 8ms 是留给人手投递的跨线程消息：PostMessageW 不会唤醒这里的睡眠。
     for (;;) {
         if (popMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, true)) {
             if (lpMsg->message == WM_QUIT) return 0;
             return 1;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const long long untilNext = concord_compat::timerMillisUntilNext();
+        const auto waitMs = untilNext < 0 ? 1 : (untilNext == 0 ? 0 : std::min<long long>(untilNext, 8));
+        std::this_thread::sleep_for(std::chrono::milliseconds(waitMs > 0 ? waitMs : 1));
     }
 }
 
 BOOL WaitMessage() {
-    // 阻塞直到有消息。与 GetMessageW 共用轮询语义。
+    // 阻塞直到有消息。与 GetMessageW 共用轮询语义；定时器到期与脏窗口也算"有消息"，
+    // 否则 WaitMessage 会永久挂住（真实 API 里 WM_TIMER 正是唤醒它的来源之一）。
     for (;;) {
         {
             std::lock_guard<std::mutex> lock(userMutex());
             if (!messageQueue().empty()) return TRUE;
+            for (CompatWindow* window : windowTable()) {
+                if (window != nullptr && window->dirty) return TRUE;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (concord_compat::timerMillisUntilNext() == 0) return TRUE;
+        const long long untilNext = concord_compat::timerMillisUntilNext();
+        const auto waitMs = untilNext < 0 ? 1 : (untilNext == 0 ? 0 : std::min<long long>(untilNext, 8));
+        std::this_thread::sleep_for(std::chrono::milliseconds(waitMs > 0 ? waitMs : 1));
     }
 }
 

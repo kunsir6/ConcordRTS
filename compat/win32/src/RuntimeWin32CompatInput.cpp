@@ -23,6 +23,8 @@
 
 #include <windows.h>
 
+#include "RuntimeWin32CompatInternal.h"
+
 #include <cstdint>
 #include <cstring>
 
@@ -165,23 +167,26 @@ BOOL ReleaseCapture() {
 }
 
 // ---------------------------------------------------------------------------
-// 定时器
+// 定时器（S11 起是真实现）
 // ---------------------------------------------------------------------------
-
+// P5-05 版本是"登记即成功"的桩：两条都直接 return TRUE，于是产品 SetTimer 之后
+// 收不到任何 WM_TIMER，菜单动画与 EOF 重启全部静止（见 queue.rules.
+// wm_timer_never_delivered）。真正的登记表与"取消息时合成"的逻辑在
+// RuntimeWin32CompatTimer.cpp / User.cpp，这里只做转发。
+//
+// 返回值语义按真实 API：KillTimer 对不存在的定时器返回 FALSE（调用点用它判断
+// "有没有真的停掉一个"），SetTimer 失败才是 FALSE。
 BOOL SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse,
               void (*lpTimerFunc)(HWND, UINT, UINT_PTR, DWORD)) {
-    (void)hWnd;
-    (void)nIDEvent;
-    (void)uElapse;
-    (void)lpTimerFunc;
-    // 纯登记桩：无事件循环派发 WM_TIMER / 定时回调，登记即成功。
+    if (!concord_compat::timerCreate(hWnd, nIDEvent, uElapse, lpTimerFunc)) {
+        concord_compat::setLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
     return TRUE;
 }
 
 BOOL KillTimer(HWND hWnd, UINT_PTR uIDEvent) {
-    (void)hWnd;
-    (void)uIDEvent;
-    return TRUE;
+    return concord_compat::timerRemove(hWnd, uIDEvent) ? TRUE : FALSE;
 }
 
 DWORD GetDoubleClickTime() {

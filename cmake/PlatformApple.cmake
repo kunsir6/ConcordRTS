@@ -183,6 +183,10 @@ set(
     # startup/shutdown token bookkeeping, a one-codec (PNG) encoder report, and
     # a Bitmap that holds a pixel buffer and saves it via ImageIO.
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatGdiplus.cpp"
+    # S11：定时器。P5-05 时 SetTimer/KillTimer 是"登记即成功"的桩，WM_TIMER
+    # 一次都不派发；这一份 TU 持有真正的定时器表，User.cpp 在取消息时合成
+    # WM_TIMER / WM_PAINT（两者都是"检索时生成"，不进队列）。
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatTimer.cpp"
     # P4-02：XAudio2 的真引擎。P4-01b 时这里只是"诚实的 E_NOTIMPL"（未实现多路
     # 混音，返回成功会变成"每条语音都播放成功但不出声"）；现在它是一台真正的
     # 软件混音器：多条 source voice 在 48kHz 立体声浮点缓冲里相加、按音量/输出
@@ -458,6 +462,25 @@ function(concord_apple_add_win32_compat_selftest)
         target_include_directories(
             concord_win32_compat_gdiplus_selftest
             BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
+        )
+    endif()
+
+    # S11: timer delivery.  The assertion is a **count inside a real GetMessageW
+    # loop**, not a return code: the previous stub returned TRUE from SetTimer and
+    # the product still reached the menu -- it just never animated.  A stub that
+    # answers "registered" while nothing is ever delivered passes every signature
+    # check and fails only this one.
+    if(NOT TARGET concord_win32_compat_timer_selftest)
+        add_executable(
+            concord_win32_compat_timer_selftest
+            "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/selftest/CompatTimerDeliverySemantics.cpp"
+            ${CONCORD_APPLE_WIN32_COMPAT_SOURCES}
+        )
+        target_include_directories(
+            concord_win32_compat_timer_selftest
+            BEFORE PRIVATE
+                "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
+                "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src"
         )
     endif()
 

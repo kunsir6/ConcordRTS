@@ -103,6 +103,34 @@ void appendWide(std::wstring& out, std::uint32_t code);
 std::string utf8FromWideText(const wchar_t* text);
 std::wstring wideTextFromUtf8(const char* text);
 
+// ---------------------------------------------------------------------------
+// 定时器（S11）
+// ---------------------------------------------------------------------------
+// 这是"SetTimer 在 Input.cpp、取消息在 User.cpp"造成的**跨 TU 接缝**：定时器
+// 必须由注册方与派发方共享同一张表，否则两边各记一份就永远对不上。
+//
+// 为什么表放在这里而不是直接塞进 User.cpp：SetTimer/KillTimer 属于 P5-05 的
+// 输入族，把它们的实现搬走会让"这一族在哪"变得含糊；抬成共享件只是把一个
+// 隐式耦合写成显式的。
+using TimerProc = void (*)(HWND, UINT, UINT_PTR, DWORD);
+
+struct TimerDue {
+    HWND hwnd = nullptr;
+    UINT_PTR id = 0;
+    TimerProc proc = nullptr;
+};
+
+bool timerCreate(HWND hwnd, UINT_PTR id, UINT elapse, TimerProc proc);
+bool timerRemove(HWND hwnd, UINT_PTR id);
+// 取一条**已到期**的定时器。filter 非空时只匹配该窗口（不匹配的留在表里）。
+// consume=false 供 PeekMessage(PM_NOREMOVE) 用：看得见但不消费。
+bool timerTakeDue(HWND filter, bool consume, TimerDue& out);
+// 距下一次到期还有多少毫秒；没有定时器返回 -1，已到期返回 0。取消息的等待
+// 上限用它，否则 16ms 的定时器会被 1ms 轮询白白唤醒 16 次。
+long long timerMillisUntilNext();
+void timerDropForWindow(HWND hwnd);
+std::size_t timerCount();
+
 }  // namespace concord_compat
 
 #endif  // CONCORD_COMPAT_WIN32_INTERNAL_H

@@ -734,6 +734,10 @@ using WNDPROC = LRESULT (*)(HWND, UINT, WPARAM, LPARAM);
 #define WM_SYSKEYUP 0x0105
 #define WM_COMMAND 0x0111
 #define WM_TIMER 0x0113
+// S11：SetTimer 的间隔夹紧边界。真实 user32 把 <10ms 抬到最小值（不是失败），
+// 超过上限同样夹紧。缺这两个常量时调用方只能用魔数 10，且写错没人发现。
+#define USER_TIMER_MINIMUM 0x0000000A
+#define USER_TIMER_MAXIMUM 0x7FFFFFFF
 #define WM_MOUSEMOVE 0x0200
 #define WM_LBUTTONDOWN 0x0201
 #define WM_LBUTTONUP 0x0202

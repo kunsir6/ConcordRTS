@@ -156,8 +156,11 @@ void testCapture() {
 void testTimerAndTracking() {
     std::printf("[定时器 / 鼠标跟踪]\n");
 
-    check(SetTimer(nullptr, 1, 16, nullptr) == TRUE, "SetTimer 桩返回 TRUE");
-    check(KillTimer(nullptr, 1) == TRUE, "KillTimer 桩返回 TRUE");
+    // S11 起这两条不再是桩：登记进真表、能取出、删得掉。派发行为（WM_TIMER
+    // 计数）由 CompatTimerDeliverySemantics 在真实消息循环里验证。
+    check(SetTimer(nullptr, 1, 16, nullptr) == TRUE, "SetTimer 登记成功");
+    check(KillTimer(nullptr, 1) == TRUE, "KillTimer 移除已登记的定时器返回 TRUE");
+    check(KillTimer(nullptr, 999) == FALSE, "KillTimer 对未登记的 id 返回 FALSE");
     checkEqual(500u, GetDoubleClickTime(), "GetDoubleClickTime 返回系统默认 500ms");
 
     TRACKMOUSEEVENT tme{};
