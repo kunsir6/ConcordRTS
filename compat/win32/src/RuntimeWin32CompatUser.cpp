@@ -74,6 +74,10 @@ struct CompatWindow {
 
     LONG_PTR userData = 0;    // GWLP_USERDATA（WM_NCCREATE 时窗口过程写入）
     WNDPROC wndProc = nullptr;  // 来自窗口类 lpfnWndProc
+    // 类光标（WNDCLASSEXW::hCursor 的副本）。DefWindowProc(WM_SETCURSOR) 用它。
+    // 内建类（EDIT 等）由系统提供，不走 RegisterClassExW，所以这一项在
+    // CreateWindowExW 里按类名填。
+    HCURSOR cursor = nullptr;
 
     HDC dc = nullptr;         // 缓存窗口 DC（客户区位图已选入）
     HBITMAP surface = nullptr;  // 客户区位图（32bpp top-down DIB）
@@ -327,6 +331,16 @@ BOOL GetClassInfoExW(HINSTANCE hInstance, LPCWSTR lpszClass, WNDCLASSEXW* lpwcx)
 // 不对位的后果很隐蔽：CreateWindowExW 返回 nullptr，产品那边只看到
 // "hosted child page did not preserve its top-level shell"，完全看不出
 // 是"类没注册"。这个失败正是 `--main-menu-ui-smoke-test` 卡住的原因。
+// 内建窗口类的**类光标**。真 Windows 上这些值来自系统 WNDCLASS：
+//   EDIT → IDC_IBEAM(32513)，其余 → IDC_ARROW(32512)。
+// 少了它会怎样：DefWindowProc(WM_SETCURSOR) 装不上光标，GetCursor() 保持 nullptr，
+// 而产品侧 `SetCursor(nullptr); SendMessage(WM_SETCURSOR...); GetCursor() != nullptr`
+// 这种"编辑框该恢复成 I 形光标"的断言就会红——遭遇战菜单的 cursor smoke 正是这么红的。
+HCURSOR stockWindowCursor(const std::wstring& name) {
+    const bool ibeam = (name == L"EDIT");
+    return reinterpret_cast<HCURSOR>(static_cast<std::uintptr_t>(ibeam ? 32513u : 32512u));
+}
+
 bool isStockWindowClass(const std::wstring& name) {
     return name == L"STATIC" || name == L"BUTTON" || name == L"EDIT"
         || name == L"LISTBOX" || name == L"COMBOBOX" || name == L"SCROLLBAR"
@@ -366,6 +380,9 @@ HWND CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR lpWindowName,
     w->menu = hMenu;
     w->instance = hInstance;
     w->wndProc = cls.lpfnWndProc;
+    // 类光标：内建类用系统默认（EDIT=I-beam，其余箭头）；注册类用 WNDCLASSEXW
+    // 里给的值。DefWindowProc(WM_SETCURSOR) 靠它回答"这个窗口该显示什么光标"。
+    w->cursor = isStockWindowClass(lpClassName) ? stockWindowCursor(lpClassName) : cls.hCursor;
     w->windowRect = {X, Y, X + nWidth, Y + nHeight};
 
     if (!ensureSurface(w, nWidth, nHeight)) {
@@ -897,8 +914,36 @@ void appleInputDispatch(const concord_compat::apple::InputEvent& event, void* co
 // 路径（GetObjectW + DIBSECTION），区别是这一个走**主路径**（无条件执行），
 // 那个是 getenv 开关下的取证工具。零配置是刻意的：屏幕上有没有画面不该取决于
 // 用户是否设了环境变量。
+// 一个进程只呈现**一个**窗口：第一个画完的窗口成为"可见窗口"，之后
+// 只有**严格更大**的窗口才接管。
+//
+// 为什么必须有这条规则：EndPaint 是逐窗口的，而本层的呈现目标是"屏幕上唯一的
+// 那个 NSWindow"。不加限制的话，任何小控件一重绘就会把整屏换掉——实测就发生过：
+// 随机地图名字输入框（EDIT，10×10）重绘时日志变成
+//     [cocoa] NSWindow created 10x10 title= visible=1
+// 也就是整个游戏画面被一个 10×10 的输入框顶替。这种缺陷不崩不报，只表现为
+// "画面没了"，最难查。
+//
+// 为什么允许"更大者接管"：宿主子页面（hosted menu child，1024×640 或 800×600）
+// 会先画；后来的独立主窗口更大时应由它显示。反过来"更小者接管"没有正当场景，
+// 一律拒绝。
+HWND gPresentedWindow = nullptr;
+
 void maybePresentClientFrame(CompatWindow* w) {
     if (w == nullptr || w->surface == nullptr) return;
+    {
+        const long long area = static_cast<long long>(clientWidth(w))
+            * static_cast<long long>(clientHeight(w));
+        CompatWindow* owner = asWindow(gPresentedWindow);
+        if (owner == nullptr) {
+            gPresentedWindow = toHwnd(w);
+        } else if (owner != w) {
+            const long long ownerArea = static_cast<long long>(clientWidth(owner))
+                * static_cast<long long>(clientHeight(owner));
+            if (area <= ownerArea) return;  // 小控件（EDIT/STATIC 等）不得接管画面
+            gPresentedWindow = toHwnd(w);
+        }
+    }
     DIBSECTION section{};
     if (::GetObjectW(w->surface, static_cast<int>(sizeof(section)), &section) == 0) return;
     const auto* bits = static_cast<const unsigned char*>(section.dsBm.bmBits);
@@ -1192,8 +1237,26 @@ LRESULT DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
     case WM_ERASEBKGND:
         return 1;
     case WM_SETCURSOR:
-        // 默认：让系统光标显示。纯离屏无真实光标，返回 TRUE 表示已处理。
-        return TRUE;
+        // 真 Windows 的默认过程：命中客户区就把**类光标**装上并返回 TRUE；
+        // 非客户区返回 FALSE，交给父窗口/系统继续。
+        //
+        // 曾经这里无条件 return TRUE 且不装光标——后果很具体：EDIT 之类的内建
+        // 控件不处理 WM_SETCURSOR，落到默认过程后 GetCursor() 仍是 nullptr，
+        // 于是"编辑框该恢复 I 形光标"这类断言必红（遭遇战 cursor smoke 的
+        // `native name edit lost its pointer`），而且真机上表现为"点了输入框
+        // 光标没变"，谁都查不出是默认过程的锅。
+        if (LOWORD(lParam) == HTCLIENT) {
+            CompatWindow* target = asWindow(hWnd);
+            HCURSOR classCursor = target != nullptr ? target->cursor : nullptr;
+            // 类没给光标时退到箭头：Windows 会把这种情况一路交给父窗口，最终
+            // 落到箭头上；这里直接给，避免"光标凭空消失"。
+            if (classCursor == nullptr) {
+                classCursor = reinterpret_cast<HCURSOR>(static_cast<std::uintptr_t>(32512u));
+            }
+            SetCursor(classCursor);
+            return TRUE;
+        }
+        return FALSE;
     default:
         return 0;
     }

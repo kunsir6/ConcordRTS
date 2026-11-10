@@ -33,6 +33,14 @@ concord_compat::apple::InputSink gInputSink = nullptr;
 void* gInputContext = nullptr;
 bool gInputTrace = false;  // CONCORD_INPUT_TRACE=1 时打一行/事件，取证用
 
+// 上一次**呈现**的尺寸/标题。用来判断"这次贴的是不是另一个界面"。
+// 为什么不拿 NSWindow 的当前尺寸比对：窗口可以被用户拖动缩放，那时
+// 尺寸与 surface 不一致是正常的，不该被我们掰回去。只有"surface 自己变了"
+// 才说明换了界面（主菜单 1024x640 → 遭遇战 800x600 → 游戏内视图）。
+int gPresentedWidth = 0;
+int gPresentedHeight = 0;
+std::string gPresentedTitle;
+
 // 32bpp DIB 的字节序是 B,G,R,X（小端），所以 CGImage 用
 // kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst：
 //   · Little 让 CG 按 B,G,R 顺序读字节；
@@ -99,6 +107,28 @@ void present(const Surface& surface) {
             std::fprintf(stderr, "[cocoa] NSWindow created %dx%d title=%s visible=%d\n",
                          surface.width, surface.height, title != nullptr ? title : "",
                          surface.visible ? 1 : 0);
+            gPresentedWidth = surface.width;
+            gPresentedHeight = surface.height;
+            gPresentedTitle = title != nullptr ? title : "";
+        } else if (surface.width != gPresentedWidth || surface.height != gPresentedHeight) {
+            // 换了界面尺寸：必须跟着改，否则小尺寸界面会被 contentsGravity=Resize
+            // 拉伸铺满旧窗口——画面"能看"但比例是错的，而且这种错不会报任何东西。
+            // 遭遇战菜单是 800x600、主菜单是 1024x640，走的就是这条路。
+            gPresentedWidth = surface.width;
+            gPresentedHeight = surface.height;
+            const NSRect contentRect = NSMakeRect(0, 0, surface.width, surface.height);
+            [gWindow setContentSize:contentRect.size];
+            gView.frame = contentRect;
+            std::fprintf(stderr, "[cocoa] NSWindow resized to %dx%d\n",
+                         surface.width, surface.height);
+        }
+
+        // 标题只在真的变了时才写（每帧写会打断 AppKit 的标题栏）。
+        const char* currentTitle = surface.titleUtf8;
+        if (currentTitle != nullptr && currentTitle[0] != '\0'
+            && gPresentedTitle != currentTitle) {
+            gPresentedTitle = currentTitle;
+            gWindow.title = [NSString stringWithUTF8String:currentTitle];
         }
 
         CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();

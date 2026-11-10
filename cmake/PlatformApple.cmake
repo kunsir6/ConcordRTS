@@ -337,6 +337,21 @@ function(concord_apple_add_win32_compat_selftest)
         concord_apple_link_win32_compat_frameworks(concord_screen_dc_semantics_selftest)
     endif()
 
+    # Q-12：窗口类光标 + DefWindowProc(WM_SETCURSOR)。产品的"编辑框该恢复 I 形
+    # 光标"断言直接依赖它，而默认过程不装光标时既不崩也不报错。
+    if(NOT TARGET concord_window_cursor_semantics_selftest)
+        add_executable(
+            concord_window_cursor_semantics_selftest
+            "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/selftest/CompatWindowCursorSemantics.cpp"
+            ${CONCORD_APPLE_WIN32_COMPAT_SOURCES}
+        )
+        target_include_directories(
+            concord_window_cursor_semantics_selftest
+            BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
+        )
+        concord_apple_link_win32_compat_frameworks(concord_window_cursor_semantics_selftest)
+    endif()
+
     # The XAPO half of the audio story: CXAPOBase is only "done" if the project's
     # real peak limiter (src/audio/backend/RuntimeAudioPeakLimiter.h, pure DSP)
     # still compiles, still limits, and is still destroyed by Release().  That
