@@ -553,7 +553,8 @@ bool runRuntimePlannerCellPassabilityContract(const RuntimeConfig& config, std::
             const auto query = [&]{return runtimeCellIsPassable(state,state.terrainByCell,occupied,point,mover);};
             const bool expected = runtimeCellIsPassableUncached(state,state.terrainByCell,occupied,point,mover);
             if (query()!=expected || query()!=expected || outer.hits()!=1) return fail("outer cache actual warm/hit");
-            const auto entries = outer.entries(), hits = outer.hits();
+            const auto entries = outer.entries();
+            const auto hits = outer.hits();
             {
                 RuntimePlannerCellPassabilityScope disabled(state,mover,state.terrainByCell,occupied,false);
                 if (query()!=expected || disabled.entries()!=0 || outer.hits()!=hits) return fail("disabled nested borrowed outer");

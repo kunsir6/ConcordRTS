@@ -526,7 +526,7 @@ std::unique_ptr<concord::audio::MenuSoundDevice> makeRuntimeMenuSoundDevice() {
 struct MenuAudio {
     explicit MenuAudio(const RuntimeUiClock& clock = runtimeWin32UiClock())
         : musicDevice(concord::audio::createSkirmishMusicDeviceWin32(
-            +[](const fs::path& path) { return path.native(); })),
+            +[](const fs::path& path) { return path.wstring(); })),
           music(clock,regularFile) {}
     bool enabled = true;
     std::vector<std::string>* eventTrace = nullptr;

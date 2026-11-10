@@ -3,9 +3,9 @@ using namespace concord::campaign_menu::win32;
 void blitCampaignShellImage(std::vector<unsigned char>& canvas, const CampaignImage& image,
                             const RECT& rect) {
     if (!image.valid() || rect.right <= rect.left || rect.bottom <= rect.top) return;
-    for (int y = std::max(0L, rect.top); y < std::min(600L, rect.bottom); ++y) {
+    for (int y = std::max<LONG>(0L, rect.top); y < std::min<LONG>(600L, rect.bottom); ++y) {
         const int sy = (y - rect.top) * image.height / (rect.bottom - rect.top);
-        for (int x = std::max(0L, rect.left); x < std::min(800L, rect.right); ++x) {
+        for (int x = std::max<LONG>(0L, rect.left); x < std::min<LONG>(800L, rect.right); ++x) {
             const int sx = (x - rect.left) * image.width / (rect.right - rect.left);
             const auto src = static_cast<std::size_t>((sy * image.width + sx) * 4);
             const auto dst = static_cast<std::size_t>((y * 800 + x) * 4);
@@ -180,11 +180,11 @@ void drawCampaignMenu(CampaignMenuState& state, HDC dc, const RECT& client) {
             traceCampaignSystemFont(1U,briefing,{48,118,585,118},0U,
                 DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,true,campaignPixelRect(bounds));
             state.briefingScroll = std::clamp(state.briefingScroll, 0,
-                static_cast<int>(std::max(0L, bounds.bottom - bounds.top - 408)));
+                static_cast<int>(std::max<LONG>(0L, bounds.bottom - bounds.top - 408)));
             const int saved = SaveDC(buffer);
             IntersectClipRect(buffer, 42, 112, 590, 536);
             label(briefing, RECT{48, 118 - state.briefingScroll, 585,
-                std::max(536L, bounds.bottom) - state.briefingScroll}, false, kText, true);
+                std::max<LONG>(536L, bounds.bottom) - state.briefingScroll}, false, kText, true);
             RestoreDC(buffer, saved);
         }
     } else if (state.page == CampaignPage::Saves) {

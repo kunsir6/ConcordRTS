@@ -35,19 +35,61 @@ std::string runtimePlayerChatUtf8(const std::wstring& text) {
 }
 
 std::u16string runtimeChatTextDraftFromWide(std::wstring_view text) {
+#if defined(_WIN32)
+    // Windows 的 wchar_t 就是 UTF-16 码元，逐单元拷贝即可。
     static_assert(sizeof(wchar_t) == sizeof(char16_t));
     std::u16string result;
     result.reserve(text.size());
     for (wchar_t unit : text) result.push_back(static_cast<char16_t>(unit));
     return result;
+#else
+    // POSIX 的 wchar_t 是 32 位（UTF-32）。按码点转换，BMP 之外的码点必须
+    // 拆成代理对——直接 static_cast 会把 U+1F600 这类字符静默截断成非法码元。
+    std::u16string result;
+    result.reserve(text.size());
+    for (wchar_t unit : text) {
+        char32_t code = static_cast<char32_t>(unit);
+        if (code > 0x10FFFFu || (code >= 0xD800u && code <= 0xDFFFu)) code = 0xFFFDu;
+        if (code <= 0xFFFFu) {
+            result.push_back(static_cast<char16_t>(code));
+            continue;
+        }
+        const char32_t rest = code - 0x10000u;
+        result.push_back(static_cast<char16_t>(0xD800u + (rest >> 10)));
+        result.push_back(static_cast<char16_t>(0xDC00u + (rest & 0x3FFu)));
+    }
+    return result;
+#endif
 }
 
 std::wstring runtimeChatTextDraftToWide(std::u16string_view text) {
+#if defined(_WIN32)
     static_assert(sizeof(wchar_t) == sizeof(char16_t));
     std::wstring result;
     result.reserve(text.size());
     for (char16_t unit : text) result.push_back(static_cast<wchar_t>(unit));
     return result;
+#else
+    // 反向同理：把代理对合回单个码点，孤立代理项替换为 U+FFFD。
+    std::wstring result;
+    result.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char32_t code = static_cast<char16_t>(text[i]);
+        if (code >= 0xD800u && code <= 0xDBFFu) {
+            const char32_t low = i + 1 < text.size() ? static_cast<char16_t>(text[i + 1]) : 0u;
+            if (low >= 0xDC00u && low <= 0xDFFFu) {
+                code = 0x10000u + ((code - 0xD800u) << 10) + (low - 0xDC00u);
+                ++i;
+            } else {
+                code = 0xFFFDu;
+            }
+        } else if (code >= 0xDC00u && code <= 0xDFFFu) {
+            code = 0xFFFDu;
+        }
+        result.push_back(static_cast<wchar_t>(code));
+    }
+    return result;
+#endif
 }
 
 class RuntimeChatTextUiHost final : public RuntimeChatTextHost {
@@ -299,7 +341,7 @@ void drawRuntimePlayerHotkeyOverlay(HDC dc, const RECT& client, RuntimeWindowSta
     for (const auto& entry : ui.lines) if (!ui.diplomacyOpen && (entry.untilTick > state.tick || ui.chatOpen)) {
         if (y + 25 > viewport.bottom) break;
         const std::wstring text = (entry.allies ? L"[盟友] " : L"") + widenUtf8(entry.owner + ": " + entry.text);
-        RECT bounds{viewport.left+10,y,std::min(viewport.right-10,viewport.left+850L),y+25}; panel(bounds);
+        RECT bounds{viewport.left+10,y,std::min<LONG>(viewport.right-10,viewport.left+850L),y+25}; panel(bounds);
         SetTextColor(dc,RGB(235,240,245)); font.drawText(dc,concord::ui::HudSystemWideTextRequest{text.c_str(),-1,{bounds.left,bounds.top,bounds.right,bounds.bottom},DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX});
         y += 27;
     }
@@ -307,7 +349,7 @@ void drawRuntimePlayerHotkeyOverlay(HDC dc, const RECT& client, RuntimeWindowSta
         const POINT cell = approximateCellFromScreenPoint(state,viewport,state.mouseClientPoint);
         if (pointInRectInclusive(viewport,state.mouseClientPoint)
             && viewport.top + 12 + noticeHeight + 25 <= viewport.bottom)
-            line(std::max(viewport.left+10L,viewport.right-190),viewport.top+12+noticeHeight,
+            line(std::max<LONG>(viewport.left+10L,viewport.right-190),viewport.top+12+noticeHeight,
                 L"坐标 " + std::to_wstring(cell.x) + L", " + std::to_wstring(cell.y));
     }
     if (ui.chatOpen) {

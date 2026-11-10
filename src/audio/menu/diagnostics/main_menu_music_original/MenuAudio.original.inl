@@ -67,7 +67,7 @@ struct OriginalMainMenuAudio {
         musicPath = path;
         nextMusicProbe = GetTickCount64() + 1000ULL;
         mciSendStringW(L"close concord_runtime_intro", nullptr, 0, nullptr);
-        const std::wstring command = L"open \"" + path.native()
+        const std::wstring command = L"open \"" + path.wstring()
             + L"\" type waveaudio alias concord_runtime_intro";
         const MCIERROR openError =
             mciSendStringW(command.c_str(), nullptr, 0, nullptr);

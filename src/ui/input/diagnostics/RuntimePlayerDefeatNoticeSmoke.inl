@@ -462,7 +462,7 @@ bool runRuntimePlayerDefeatNoticeSmoke(RuntimeWindowState& stock, std::string& e
             // Independent authored layout: every actual notice occupies 27px.
             // Do not use the production visible-row/stack-height helpers.
             const LONG top = viewport.top + 12 + static_cast<LONG>(names.size()) * 27;
-            RECT bounds{left, top, std::min(viewport.right - 10, viewport.left + 850L), top + 25};
+            RECT bounds{left, top, std::min<LONG>(viewport.right - 10, viewport.left + 850L), top + 25};
             HBRUSH panel = CreateSolidBrush(RGB(19, 29, 39));
             if (!panel) return fail("reference chat panel unavailable");
             FillRect(expected.dc, &bounds, panel);

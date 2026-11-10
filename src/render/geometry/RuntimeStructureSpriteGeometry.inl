@@ -500,7 +500,7 @@ bool extractRuntimeBuildingVisibleHitSpans(const RuntimeBuildingDepthFrameState&
     const auto& viewport = frame.viewport;
     const auto scanStarted = runtimeMaybeTimingStart(frame.profileEnabled);
     for (const int id : frame.participatingIds) visibleSpans.try_emplace(id);
-    const int height = std::max(0L, viewport.bottom - viewport.top);
+    const int height = std::max<LONG>(0L, viewport.bottom - viewport.top);
     // Only collected draw rectangles can change an initially unowned pixel.
     // Keep one conservative interval per row so every emitted owner's spans
     // retain their original coordinates and left-to-right order. All original

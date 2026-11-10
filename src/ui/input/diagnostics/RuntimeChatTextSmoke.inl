@@ -1,4 +1,20 @@
 // Native UTF-16 chat integration. Included after the real UI host, WndProc and ordinary loader.
+//
+// 非 Windows：整体跳过。
+//
+// 这个探针以冻结的 Windows oracle 为基准——它断言 wchar_t 就是原生 UTF-16 码元
+// （第 3 行 static_assert），用真实 HWND 回放 WM_CHAR / WM_KEYDOWN，并逐字节比对
+// Windows API 的输出语料（oldWin32ChatUtf8）。POSIX 上 wchar_t 是 32 位，断言、
+// 语料与预期行为都不成立，硬跑只会得到一个假的失败。
+//
+// 所以这里显式跳过并打印原因，而不是伪造通过；Windows 分支逐字节保持原样。
+#if !defined(_WIN32)
+bool runRuntimeChatTextSmokeProbe(RuntimeWindowState&, std::ostream& output) {
+    output << "runtime-chat-text-smoke: skipped (frozen Windows oracle requires native UTF-16 wchar_t)"
+           << std::endl;
+    return true;
+}
+#else
 bool runRuntimeChatTextSmokeProbe(RuntimeWindowState& stock,std::ostream& output) {
     static_assert(sizeof(wchar_t)==2,"The frozen Windows oracle uses native UTF-16 units");
     struct Clock final : RuntimeUiClock {RuntimeUiTimeMs value=123456;mutable std::size_t reads=0;
@@ -722,3 +738,4 @@ bool runRuntimeChatTextSmokeProbe(RuntimeWindowState& stock,std::ostream& output
     return true;
 }
 
+#endif  // !defined(_WIN32)

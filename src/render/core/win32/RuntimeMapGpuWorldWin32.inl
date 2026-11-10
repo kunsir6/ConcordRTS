@@ -21,7 +21,7 @@ static bool runtimeGpuWorldEmit(concord::render::MapDrawCommand command) {
     if(!runtimeGpuWorldOwner)return false;return runtimeGpuWorldOwner->emit(command);
 }
 static concord::render::MapDrawCommand runtimeGpuWorldRegion(const RECT& rect,concord::render::MapDrawKind kind) {
-    concord::render::MapDrawCommand c;c.left=std::max(0L,rect.left);c.top=std::max(0L,rect.top);
+    concord::render::MapDrawCommand c;c.left=std::max<LONG>(0L,rect.left);c.top=std::max<LONG>(0L,rect.top);
     c.right=std::min<LONG>(runtimeGpuWorldOwner->width(),rect.right);c.bottom=std::min<LONG>(runtimeGpuWorldOwner->height(),rect.bottom);c.kind=kind;return c;
 }
 static concord::render::MapDrawCommand runtimeGpuWorldRegion(int left,int top,int right,int bottom,concord::render::MapDrawKind kind){return runtimeGpuWorldRegion(RECT{left,top,right,bottom},kind);}

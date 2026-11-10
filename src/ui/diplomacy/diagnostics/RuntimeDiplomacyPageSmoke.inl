@@ -247,7 +247,7 @@ bool runRuntimeDiplomacyPageSmoke(RuntimeWindowState& live, std::string& error) 
         std::size_t checkedChatRow=1; while (checkedChatRow<rows.size() && !rows[checkedChatRow].human) ++checkedChatRow;
         if (checkedChatRow==rows.size() || !pcxProbe("cce_i",runtimeDiplomacyCheckboxRect(client,chatIds[checkedChatRow-1]),localmd)) return false;
         const RECT returnRect=runtimeDiplomacyControlRect(client,1059);
-        const LONG cap=std::max(1L,(returnRect.right-returnRect.left)*8/108);
+        const LONG cap=std::max<LONG>(1L,(returnRect.right-returnRect.left)*8/108);
         const auto returnSkin=[&](const std::string& prefix) {
             return pcxProbe(prefix+"li24",RECT{returnRect.left,returnRect.top,returnRect.left+cap,returnRect.bottom},localmd,true)
                 && pcxProbe(prefix+"mi24",RECT{returnRect.left+cap,returnRect.top,returnRect.right-cap,returnRect.bottom},localmd,true)

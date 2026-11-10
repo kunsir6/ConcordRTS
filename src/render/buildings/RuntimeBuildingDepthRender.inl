@@ -177,8 +177,8 @@ struct RuntimeBuildingDepthFrameScope {
         state.stageTimingEnabled = context.coarseStageTimingEnabled || runtimeRenderDetailDiagnosticsEnabled(context)
             || (profile && profile[0] == '1');
         const auto constructorStarted = runtimeMaybeTimingStart(state.stageTimingEnabled);
-        state.width = std::max(0L, viewport.right - viewport.left);
-        const int height = std::max(0L, viewport.bottom - viewport.top);
+        state.width = std::max<LONG>(0L, viewport.right - viewport.left);
+        const int height = std::max<LONG>(0L, viewport.bottom - viewport.top);
         const auto templateStarted = runtimeMaybeTimingStart(state.stageTimingEnabled);
         ready = state.width > 0 && height > 0 && prepareRuntimeBuildingDepthTemplate(context, cache);
         state.profileDepthTemplateMs = runtimeMaybeElapsedMs(state.stageTimingEnabled, templateStarted);
@@ -557,8 +557,8 @@ void initializeRuntimeBuildingDepthPixelBuffer(RuntimeBuildingDepthFrameState& s
             state.requestedViewport.left, state.requestedViewport.top};
     }
     state.viewport = bounds;
-    state.width = std::max(0L, bounds.right - bounds.left);
-    const auto height = std::max(0L, bounds.bottom - bounds.top);
+    state.width = std::max<LONG>(0L, bounds.right - bounds.left);
+    const auto height = std::max<LONG>(0L, bounds.bottom - bounds.top);
     state.pixels.assign(static_cast<std::size_t>(state.width) * height, RuntimeBuildingDepthPixel{});
 }
 

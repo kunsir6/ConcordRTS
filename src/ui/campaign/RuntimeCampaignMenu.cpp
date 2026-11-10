@@ -2040,8 +2040,8 @@ void drawCampaignMapTargets(
             static_cast<std::size_t>(stage->declaredTargetCount)
         );
     }
-    const int clientWidth = std::max(1L, client.right - client.left);
-    const int clientHeight = std::max(1L, client.bottom - client.top);
+    const int clientWidth = std::max<LONG>(1L, client.right - client.left);
+    const int clientHeight = std::max<LONG>(1L, client.bottom - client.top);
     const RECT media = campaignMapMediaRect(state.mapPresentation);
     const int authoredWidth = state.mapPresentation.clickMap.width > 0
         ? state.mapPresentation.clickMap.width
@@ -2210,8 +2210,8 @@ HWND createCampaignMenuWindow(CampaignMenuState& state, HWND hostWindow) {
             WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             0,
             0,
-            std::max(1L, client.right),
-            std::max(1L, client.bottom),
+            std::max<LONG>(1L, client.right),
+            std::max<LONG>(1L, client.bottom),
             hostWindow,
             nullptr,
             instance,

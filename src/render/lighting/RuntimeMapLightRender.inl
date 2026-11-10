@@ -198,9 +198,9 @@ int applyRuntimeMapLights(HDC dc, const RECT& viewport, const RuntimeMapRenderCo
     if (frame.sources.empty()) return applyRuntimeLightingTintToViewport(dc, viewport, context);
     if(runtimeGpuWorldDc(dc)&&runtimeGpuWorldTarget(context))return runtimeGpuWorldMapLightTiles(viewport,frame);
     int changed = 0;
-    for (int y = std::max(0L, viewport.top); y < viewport.bottom; ++y) {
+    for (int y = std::max<LONG>(0L, viewport.top); y < viewport.bottom; ++y) {
         if (hasPixelSurface(context) && y >= context.surfaceHeight) break;
-        for (int x = std::max(0L, viewport.left); x < viewport.right; ++x) {
+        for (int x = std::max<LONG>(0L, viewport.left); x < viewport.right; ++x) {
             if (hasPixelSurface(context)) {
                 if (x >= context.surfaceWidth) break;
                 auto& pixel = context.surfacePixels[static_cast<std::size_t>(y) * context.surfaceWidth + x];

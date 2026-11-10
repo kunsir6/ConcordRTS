@@ -272,8 +272,8 @@ void drawCampaignMapTargets(
             static_cast<std::size_t>(stage->declaredTargetCount)
         );
     }
-    const int clientWidth = std::max(1L, client.right - client.left);
-    const int clientHeight = std::max(1L, client.bottom - client.top);
+    const int clientWidth = std::max<LONG>(1L, client.right - client.left);
+    const int clientHeight = std::max<LONG>(1L, client.bottom - client.top);
     const RECT media = campaignMapMediaRect(state.mapPresentation);
     const int authoredWidth = state.mapPresentation.clickMap.width > 0
         ? state.mapPresentation.clickMap.width

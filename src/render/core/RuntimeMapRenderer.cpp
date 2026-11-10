@@ -27047,7 +27047,7 @@ void stampRuntimeBridgeSurfaceSpans(
         if (!intactDeck(source)) return;
         neighboringDeck.push_back(source);
         const bool alongX = runtimeResourceOverlayFrame(cell, mapFact) % 18 < 9;
-        const int searchSteps = std::clamp(
+        const int searchSteps = std::clamp<LONG>(
             (bounds.right - bounds.left) / std::max(1, camera.tileWidth)
                 + (bounds.bottom - bounds.top) / std::max(1, camera.tileHeight) + 2,
             1L, 16L);

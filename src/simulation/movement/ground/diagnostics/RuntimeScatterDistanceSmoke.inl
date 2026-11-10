@@ -297,7 +297,8 @@ bool runRuntimeScatterDistanceSmoke(RuntimeWindowState& live, std::string& error
         accepted += int(ids.size());
         std::map<int, std::string> oldRecords; std::map<int, Pose> oldPoses;
         for (int id : ids) { oldRecords[id] = record(s, id); oldPoses[id] = pose(*findObjectById(s, id)); }
-        const auto queue = s.playerCommands.stateHash(), capture = input.commands.size(); key(input, 'X', true);
+        const auto queue = s.playerCommands.stateHash();
+        const auto capture = input.commands.size(); key(input, 'X', true);
         if (input.commands.size() != capture || s.playerCommands.stateHash() != queue) return fail("autorepeat dispatched another X/cancelled a queue");
         for (int id : ids) if (record(s, id) != oldRecords.at(id) || pose(*findObjectById(s, id)) != oldPoses.at(id))
             return fail("bit30 autorepeat changed an accepted target/pose");

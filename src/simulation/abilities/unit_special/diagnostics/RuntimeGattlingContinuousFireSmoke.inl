@@ -417,7 +417,8 @@ bool runRuntimeGattlingContinuousFireSmoke(RuntimeWindowState& live, std::string
                     || u32(4) + 8 != bytes.size()) return fail("actual sound cache is not a complete WAVE: " + sample);
                 std::uint64_t data = 0, average = 0; bool format = false;
                 for (std::size_t p = 12; p + 8 <= bytes.size();) {
-                    const auto count = u32(p + 4), start = p + 8;
+                    const auto count = u32(p + 4);
+                    const auto start = p + 8;
                     if (count > bytes.size() - start) return fail("invalid original BAG-decoded WAVE chunk");
                     if (!std::memcmp(bytes.data() + p, "fmt ", 4)) {
                         if (count < 16 || u16(start) != 1 || u16(start + 2) != 1 || u32(start + 4) != 22050

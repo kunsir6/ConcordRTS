@@ -43,7 +43,7 @@ template<class Audio> MainMusicClockObservation runMainMusicClockScene(MainMusic
             std::ostringstream text;
             const auto wide=[&](const std::wstring& value){for(wchar_t unit:value)text<<std::hex<<static_cast<unsigned int>(unit)<<',';text<<';'<<std::dec;};
             text<<audio.enabled<<' '<<audio.musicVolumePercent<<' '<<audio.musicOpen<<' '<<audio.nextMusicProbe<<' '<<clock.reads.size()<<' ';
-            wide(audio.assetRoot.native());wide(audio.cacheRoot.native());wide(audio.musicPath.native());
+            wide(audio.assetRoot.wstring());wide(audio.cacheRoot.wstring());wide(audio.musicPath.wstring());
             std::vector<std::pair<std::string,std::string>> samples(audio.samples.begin(),audio.samples.end());std::sort(samples.begin(),samples.end());
             for(const auto& [key,value]:samples)text<<std::quoted(key)<<' '<<std::quoted(value)<<' ';
             std::vector<std::string> names;for(const auto& [key,value]:audio.waves){(void)value;names.push_back(key);}std::sort(names.begin(),names.end());
@@ -93,8 +93,8 @@ int runMainMenuMusicClockSmoke() {
     if(!value||value->empty()){std::cerr<<"Main music clock requires explicit isolated output\n";return 1;}
     const fs::path directory(*value);
     const auto projectRoot=fs::current_path();
-    const auto allowedRoot=(projectRoot/L"build"/L"smoke"/L"main-menu-music-clock").lexically_normal().native()+L"\\";
-    if(!fs::is_regular_file(projectRoot/L"CMakeLists.txt")||!directory.is_absolute()||!directory.lexically_normal().native().starts_with(allowedRoot)||fs::exists(directory)){std::cerr<<"run from the project root and use a new build/smoke/main-menu-music-clock output directory\n";return 1;}
+    const auto allowedRoot=(projectRoot/L"build"/L"smoke"/L"main-menu-music-clock").lexically_normal().wstring()+L"\\";
+    if(!fs::is_regular_file(projectRoot/L"CMakeLists.txt")||!directory.is_absolute()||!directory.lexically_normal().wstring().starts_with(allowedRoot)||fs::exists(directory)){std::cerr<<"run from the project root and use a new build/smoke/main-menu-music-clock output directory\n";return 1;}
     fs::create_directories(directory);const auto previous=fs::current_path();
     struct RestoreDirectory {fs::path path;~RestoreDirectory(){std::error_code error;fs::current_path(path,error);}} restore{previous};fs::current_path(directory);
     const auto writeWave=[](const fs::path& file){

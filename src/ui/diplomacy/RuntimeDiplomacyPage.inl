@@ -269,7 +269,7 @@ void drawRuntimeDiplomacyPage(HDC dc,const RECT& client,RuntimeWindowState& stat
         const auto label=runtimeMenuLabel(state,"GUI:TauntsOn",L"叫嚣开启");fallback.drawText(dc,concord::ui::HudSystemWideTextRequest{label.c_str(),-1,{taunt.left,taunt.top,taunt.right,taunt.bottom},DT_SINGLELINE|DT_VCENTER});SelectObject(dc,old);}
     const RECT button=runtimeDiplomacyControlRect(client,1059);
     const std::string prefix=ui.diplomacyPressedControl==1059?"bde_":"bue_";
-    const LONG cap=std::max(1L,(button.right-button.left)*8/108);
+    const LONG cap=std::max<LONG>(1L,(button.right-button.left)*8/108);
     pcx(prefix+"li24",RECT{button.left,button.top,button.left+cap,button.bottom});
     pcx(prefix+"mi24",RECT{button.left+cap,button.top,button.right-cap,button.bottom});
     pcx(prefix+"ri24",RECT{button.right-cap,button.top,button.right,button.bottom});
