@@ -4,7 +4,6 @@
 #include "assets/codecs/PalDecoder.h"
 
 #include "data/art/ArtDatabase.h"
-#include "data/art/TheaterResourceLetters.h"
 #include "assets/archive/MixArchive.h"
 #include "data/rules/RulesDatabase.h"
 
