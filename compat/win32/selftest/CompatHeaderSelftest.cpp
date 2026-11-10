@@ -322,7 +322,7 @@ void concordCompatDeclareAll(HWND hwnd, HDC hdc, RECT* rect, MSG* msg) {
     GetSystemTimeAsFileTime(&ft);
     SYSTEMTIME st{};
     GetLocalTime(&st);
-    volatile long counter = 0;
+    volatile LONG counter = 0;  // LP64 下 long=8B，而 Interlocked 族声明的是 volatile LONG*（4B）；见 windows.h:1563
     InterlockedIncrement(&counter);
     InterlockedDecrement(&counter);
     InterlockedExchange(&counter, 1);

@@ -584,6 +584,9 @@ using WNDPROC = LRESULT (*)(HWND, UINT, WPARAM, LPARAM);
 #define ERROR_NOT_ENOUGH_MEMORY 8L
 #define ERROR_NO_MORE_FILES 18L
 #define ERROR_IO_PENDING 997L
+// S8b：等待类 API 的超时码。1460 是 Windows 的真实取值——调用点会拿它做相等比较
+// （`if (GetLastError() == ERROR_TIMEOUT)`），取值写错不会报错、只会让重试分支失效。
+#define ERROR_TIMEOUT 1460L
 // S10：文件 / 编码 / 模块族的错误码。取值必须与 Win32 一致——调用点拿它们做
 // **相等比较**（`result.error == ERROR_FILE_EXISTS`、`== ERROR_ACCESS_DENIED`），
 // 数值错了不会报错，只会让"文件已存在→换个名字重试"的分支永远走不到。
@@ -734,6 +737,29 @@ using WNDPROC = LRESULT (*)(HWND, UINT, WPARAM, LPARAM);
 #define WM_SYSKEYUP 0x0105
 #define WM_COMMAND 0x0111
 #define WM_TIMER 0x0113
+// S8：同步对象与内存映射的访问位。取值与 Windows SDK 一致；写错不会编译失败，
+// 只会让"我要求了写权限"变成一句空话（本层不校验访问位，但探针会断言它们存在）。
+#ifndef SYNCHRONIZE
+#define SYNCHRONIZE 0x00100000L
+#endif
+#ifndef EVENT_MODIFY_STATE
+#define EVENT_MODIFY_STATE 0x0002
+#endif
+#ifndef FILE_MAP_WRITE
+#define FILE_MAP_WRITE 0x0002
+#endif
+#ifndef FILE_MAP_READ
+#define FILE_MAP_READ 0x0004
+#endif
+#ifndef FILE_MAP_ALL_ACCESS
+#define FILE_MAP_ALL_ACCESS 0x000F001FL
+#endif
+#ifndef CREATE_NO_WINDOW
+#define CREATE_NO_WINDOW 0x08000000
+#endif
+#ifndef JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+#define JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 0x00002000
+#endif
 // S11：SetTimer 的间隔夹紧边界。真实 user32 把 <10ms 抬到最小值（不是失败），
 // 超过上限同样夹紧。缺这两个常量时调用方只能用魔数 10，且写错没人发现。
 #define USER_TIMER_MINIMUM 0x0000000A
@@ -1455,6 +1481,57 @@ BOOL CreateProcessW(LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
                     LPCWSTR lpCurrentDirectory, STARTUPINFOW* lpStartupInfo,
                     PROCESS_INFORMATION* lpProcessInformation);
 void ExitProcess(UINT uExitCode);
+
+// S8：Job 对象。本轮**只声明不实现**（CreateJobObjectW 等由 S7 之后按进程组/信号重新设计：
+// macOS 没有内核 Job，"子进程随父进程退出"要靠进程组 + 信号或 kqueue 监视，语义不能糊）。
+// 结构体必须按真实布局给全，否则 SetInformationJobObject 的 Size 参数与字段偏移都会错。
+struct IO_COUNTERS {
+    ULONGLONG ReadOperationCount;
+    ULONGLONG WriteOperationCount;
+    ULONGLONG OtherOperationCount;
+    ULONGLONG ReadTransferCount;
+    ULONGLONG WriteTransferCount;
+    ULONGLONG OtherTransferCount;
+};
+
+struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    LARGE_INTEGER PerProcessUserTimeLimit;
+    LARGE_INTEGER PerJobUserTimeLimit;
+    DWORD LimitFlags;
+    SIZE_T MinimumWorkingSetSize;
+    SIZE_T MaximumWorkingSetSize;
+    DWORD ActiveProcessLimit;
+    ULONG_PTR Affinity;
+    DWORD PriorityClass;
+    DWORD SchedulingClass;
+};
+
+struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+    IO_COUNTERS IoInfo;
+    SIZE_T ProcessMemoryLimit;
+    SIZE_T JobMemoryLimit;
+    SIZE_T PeakProcessMemoryUsed;
+    SIZE_T PeakJobMemoryUsed;
+};
+
+enum JOBOBJECTINFOCLASS {
+    JobObjectBasicLimitInformation = 2,
+    JobObjectExtendedLimitInformation = 9
+};
+
+HANDLE CreateJobObjectW(SECURITY_ATTRIBUTES* lpJobAttributes, LPCWSTR lpName);
+BOOL AssignProcessToJobObject(HANDLE hJob, HANDLE hProcess);
+BOOL TerminateJobObject(HANDLE hJob, UINT uExitCode);
+BOOL SetInformationJobObject(HANDLE hJob, JOBOBJECTINFOCLASS JobObjectInformationClass,
+                             LPVOID lpJobObjectInformation, DWORD cbJobObjectInformationLength);
+
+// S8：strncpy_s 的"截断而不是报错"哨兵。真实值是 (size_t)-1。
+// 写成 0 会让调用点以为"目标容量为 0"从而走失败分支，而失败分支往往只把 message 设成
+// "unknown error"——于是截断变成了一个看不出原因的空错误。
+#ifndef _TRUNCATE
+#define _TRUNCATE ((size_t)-1)
+#endif
 UINT SetErrorMode(UINT uMode);
 BOOL SetConsoleCtrlHandler(BOOL (*HandlerRoutine)(DWORD), BOOL Add);
 HANDLE CreateEventW(SECURITY_ATTRIBUTES* lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCWSTR lpName);
@@ -1481,14 +1558,20 @@ BOOL GetProcessInformation(HANDLE hProcess, PROCESS_INFORMATION_CLASS ProcessInf
                            LPVOID ProcessInformation, DWORD ProcessInformationSize);
 BOOL GetSystemInfo(LPVOID /*SYSTEM_INFO**/ lpSystemInfo);
 BOOL GlobalMemoryStatusEx(MEMORYSTATUSEX* lpBuffer);
-long InterlockedIncrement(volatile long* lpAddend);
-long InterlockedDecrement(volatile long* lpAddend);
-long InterlockedExchange(volatile long* Target, long Value);
-long InterlockedCompareExchange(volatile long* Destination, long Exchange, long Comperand);
+// S8：形参必须是 LONG（32 位），不能写 long——本平台的 long 是 64 位，
+// 而产品与探针里的字段是 `volatile LONG`（int32_t）。写成 long* 的后果不是"精度问题"，
+// 而是**根本匹配不上**（no matching function），或者更糟：调用点用 reinterpret_cast
+// 硬转过去，然后按 8 字节读写一个 4 字节字段，踩掉相邻字段。
+// 这四条在 Windows 上签名完全等价（LONG == long），所以改动对 Windows 零影响。
+LONG InterlockedIncrement(volatile LONG* lpAddend);
+LONG InterlockedDecrement(volatile LONG* lpAddend);
+LONG InterlockedExchange(volatile LONG* Target, LONG Value);
+LONG InterlockedCompareExchange(volatile LONG* Destination, LONG Exchange, LONG Comperand);
 void* InterlockedCompareExchangePointer(void* volatile* Destination, void* Exchange, void* Comperand);
 void* InterlockedExchangePointer(void* volatile* Target, void* Value);
 HANDLE CreateFileMappingW(HANDLE hFile, SECURITY_ATTRIBUTES* lpAttributes, DWORD flProtect,
                           DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow, LPCWSTR lpName);
+HANDLE OpenFileMappingW(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCWSTR lpName);
 void* MapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAccess, DWORD dwFileOffsetHigh,
                     DWORD dwFileOffsetLow, SIZE_T dwNumberOfBytesToMap);
 BOOL UnmapViewOfFile(const void* lpBaseAddress);
@@ -2373,6 +2456,14 @@ errno_t _wgetenv_s(std::size_t* pReturnValue, wchar_t* buffer, std::size_t numbe
 errno_t getenv_s(std::size_t* pReturnValue, char* buffer, std::size_t numberOfElements,
                  const char* varname);
 errno_t gmtime_s(struct tm* tmDest, const std::time_t* sourceTime);
+// S8：strncpy_s。调用点用的是 MSVC 的**数组重载**（三参：dest/src/count，容量由数组推出来），
+// 所以这里必须既有四参基础版本、又有按数组长度推导的模板版本；只给四参版本的话，
+// 产品里 `strncpy_s(buf, src, _TRUNCATE)` 这条会报 "no matching function"。
+errno_t strncpy_s(char* dest, std::size_t destSize, const char* src, std::size_t count);
+template <std::size_t N>
+inline errno_t strncpy_s(char (&dest)[N], const char* src, std::size_t count) {
+    return strncpy_s(dest, N, src, count);
+}
 
 // --- 窄路径入口重载
 //

@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <deque>
@@ -724,9 +725,107 @@ HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint) {
     return w->dc;
 }
 
+// ---------------------------------------------------------------------------
+// Q-05（诊断）：把窗口客户区位图导出成 BMP。
+//
+// 为什么需要它：macOS 侧是"纯离屏"后端——`ShowWindow` 只翻一个 bool，进程里没有
+// 任何 NSWindow，所以产品跑起来**只有声音、屏幕上什么都没有**（本文件顶部那条
+// 设计立场就是原因）。在真正叠上 Cocoa 呈现层之前，这个钩子是唯一能看见"到底
+// 画了什么"的手段：它读的就是 CompatWindow::surface——将来若有 NSView 贴图，
+// 贴的正是这块像素。
+//
+// 关掉时零开销：getenv 只查一次并缓存；未设置直接返回。
+// 用法：CONCORD_MENU_DUMP=/tmp/frame.bmp [CONCORD_MENU_DUMP_FRAME=4]
+// ---------------------------------------------------------------------------
+void maybeDumpClientFrame(CompatWindow* w) {
+    static const char* const dumpPath = []() -> const char* {
+        const char* value = std::getenv("CONCORD_MENU_DUMP");
+        return (value != nullptr && value[0] != '\0') ? value : nullptr;
+    }();
+    static const int targetFrame = []() {
+        const char* value = std::getenv("CONCORD_MENU_DUMP_FRAME");
+        return value != nullptr ? std::atoi(value) : 4;
+    }();
+    static int paintCount = 0;
+    static bool alreadyDumped = false;
+
+    if (dumpPath == nullptr || alreadyDumped || w == nullptr || w->surface == nullptr) {
+        return;
+    }
+    if (++paintCount < targetFrame) {
+        return;
+    }
+    alreadyDumped = true;
+
+    DIBSECTION section{};
+    if (GetObjectW(w->surface, static_cast<int>(sizeof(section)), &section) == 0) {
+        return;
+    }
+    const int width = section.dsBm.bmWidth;
+    const int height = section.dsBm.bmHeight;
+    const int bitsPerPixel = section.dsBm.bmBitsPixel;
+    const auto* base = static_cast<const unsigned char*>(section.dsBm.bmBits);
+    if (base == nullptr || width <= 0 || height <= 0 || bitsPerPixel != 32) {
+        return;
+    }
+
+    const int sourceStride = width * 4;
+    const int rowBytes = width * 3;
+    const int paddedRowBytes = (rowBytes + 3) & ~3;
+    const std::uint32_t pixelBytes =
+        static_cast<std::uint32_t>(paddedRowBytes) * static_cast<std::uint32_t>(height);
+    const std::uint32_t headerBytes = 54;
+    const std::uint32_t fileBytes = headerBytes + pixelBytes;
+
+    std::vector<unsigned char> blob(fileBytes, 0);
+    const auto putLe32 = [&blob](std::size_t offset, std::uint32_t value) {
+        blob[offset + 0] = static_cast<unsigned char>(value & 0xFFu);
+        blob[offset + 1] = static_cast<unsigned char>((value >> 8) & 0xFFu);
+        blob[offset + 2] = static_cast<unsigned char>((value >> 16) & 0xFFu);
+        blob[offset + 3] = static_cast<unsigned char>((value >> 24) & 0xFFu);
+    };
+    const auto putLe16 = [&blob](std::size_t offset, std::uint16_t value) {
+        blob[offset + 0] = static_cast<unsigned char>(value & 0xFFu);
+        blob[offset + 1] = static_cast<unsigned char>((value >> 8) & 0xFFu);
+    };
+
+    blob[0] = 'B';
+    blob[1] = 'M';
+    putLe32(2, fileBytes);
+    putLe32(10, headerBytes);
+    putLe32(14, 40);  // BITMAPINFOHEADER
+    putLe32(18, static_cast<std::uint32_t>(width));
+    putLe32(22, static_cast<std::uint32_t>(height));  // 正数 = 自底向上
+    putLe16(26, 1);                                   // planes
+    putLe16(28, 24);                                  // bpp
+    putLe32(34, pixelBytes);
+
+    for (int row = 0; row < height; ++row) {
+        // 源是 32bpp 自顶向下（DIB 像素 0 = 顶行）；BMP 24bpp 是自底向上。
+        const unsigned char* src =
+            base + static_cast<std::size_t>(height - 1 - row) * sourceStride;
+        unsigned char* dst = blob.data() + headerBytes +
+            static_cast<std::size_t>(row) * paddedRowBytes;
+        for (int x = 0; x < width; ++x) {
+            dst[x * 3 + 0] = src[x * 4 + 0];  // B
+            dst[x * 3 + 1] = src[x * 4 + 1];  // G
+            dst[x * 3 + 2] = src[x * 4 + 2];  // R
+        }
+    }
+
+    if (std::FILE* out = std::fopen(dumpPath, "wb")) {
+        std::fwrite(blob.data(), 1, blob.size(), out);
+        std::fclose(out);
+        std::fprintf(stderr,
+            "[q05] client frame dumped %dx%d -> %s (%u bytes)\n",
+            width, height, dumpPath, fileBytes);
+    }
+}
+
 BOOL EndPaint(HWND hWnd, const PAINTSTRUCT* lpPaint) {
-    (void)hWnd;
     (void)lpPaint;
+    // Q-05：一帧画完（EndPaint）之后才导出，保证拿到的是完整帧。
+    maybeDumpClientFrame(asWindow(hWnd));
     return TRUE;
 }
 

@@ -187,6 +187,9 @@ set(
     # 一次都不派发；这一份 TU 持有真正的定时器表，User.cpp 在取消息时合成
     # WM_TIMER / WM_PAINT（两者都是"检索时生成"，不进队列）。
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatTimer.cpp"
+    # S8：Interlocked 族。这一族**必须真实现**（两进程 smoke 靠它轮询共享内存），
+    # 映射到 __atomic_* 内建；空实现只会在 ARM 上暴露成"偶发读到旧值"。
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatAtomic.cpp"
     # P4-02：XAudio2 的真引擎。P4-01b 时这里只是"诚实的 E_NOTIMPL"（未实现多路
     # 混音，返回成功会变成"每条语音都播放成功但不出声"）；现在它是一台真正的
     # 软件混音器：多条 source voice 在 48kHz 立体声浮点缓冲里相加、按音量/输出
@@ -194,6 +197,11 @@ set(
     # 这个 TU 因此需要 AudioToolbox —— 框架清单就在下面那份 sets 里，随源清单
     # 一起走，任何编译它的目标都不会漏链接。
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatAudio.cpp"
+    # S8b: 跨进程事件族（CreateEventW / OpenEventW / SetEvent / ResetEvent /
+    # WaitForSingleObject / WaitForMultipleObjects）+ strncpy_s。这些在 windows.h 里
+    # 只有声明、compat/src 下 0 实现；tests/multiplayer 的 smoke 是唯一没有 #if
+    # 保护的调用方，所以不加进来就是"能 -fsyntax-only、链接必失败"。
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatKernel.cpp"
     CACHE INTERNAL
     "Win32 compatibility implementations compiled into Apple builds"
 )

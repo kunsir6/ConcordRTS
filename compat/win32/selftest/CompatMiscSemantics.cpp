@@ -239,6 +239,48 @@ void testCom() {
     check(true, "CoUninitialize 可重复调用");
 }
 
+// S8：Interlocked 族。判据里最要紧的不是"加减法对不对"，而是**宽度**：
+// 这四条的形参曾经写成 `volatile long*`（本平台 64 位），而字段是 `volatile LONG`（32 位）。
+// 硬转过去之后每次交换会写 8 字节，把紧挨着的字段一起改掉——而"返回值对不对"完全看不出来。
+void testInterlocked() {
+    std::printf("[8] Interlocked 族\n");
+
+    volatile LONG counter = 0;
+    checkEqual(InterlockedIncrement(&counter), 1, "InterlockedIncrement 返回**新值** 1");
+    checkEqual(InterlockedIncrement(&counter), 2, "InterlockedIncrement 返回**新值** 2");
+    checkEqual(InterlockedDecrement(&counter), 1, "InterlockedDecrement 返回**新值** 1");
+
+    checkEqual(InterlockedExchange(&counter, 42), 1, "InterlockedExchange 返回**旧值** 1");
+    checkEqual(counter, 42, "InterlockedExchange 写入新值 42");
+
+    // 成功：返回原值，写入交换值。
+    checkEqual(InterlockedCompareExchange(&counter, 7, 42), 42,
+               "InterlockedCompareExchange 命中时返回原值 42");
+    checkEqual(counter, 7, "命中时写入交换值 7");
+    // 失败：返回值是**当前值**（不是 0、也不是比较值），而且一个字都不写。
+    checkEqual(InterlockedCompareExchange(&counter, 99, 12345), 7,
+               "未命中时返回当前值 7");
+    checkEqual(counter, 7, "未命中时不写入");
+
+    // 宽度：两个相邻的 LONG，只动第一个，第二个必须逐字节不变。
+    struct Pair {
+        volatile LONG first;
+        volatile LONG second;
+    } pair{5, 1234567};
+    InterlockedExchange(&pair.first, 9);
+    checkEqual(pair.second, 1234567,
+               "交换只写 4 字节（相邻字段 1234567 未被踩）");
+    checkEqual(sizeof(LONG), 4, "LONG 是 4 字节——写成 long 就是 8 字节，这才是根因");
+
+    // 指针版本：同样返回旧值。
+    void* slot = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x11));
+    void* previous = InterlockedExchangePointer(&slot, reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x22)));
+    check(previous == reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x11)),
+          "InterlockedExchangePointer 返回旧指针");
+    check(slot == reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x22)),
+          "InterlockedExchangePointer 写入新指针");
+}
+
 }  // namespace
 
 int main() {
@@ -250,6 +292,7 @@ int main() {
     testTimerResolution();
     testMci();
     testCom();
+    testInterlocked();
 
     std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;

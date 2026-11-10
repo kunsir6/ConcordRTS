@@ -263,6 +263,14 @@ elseif(APPLE)
     include("${CMAKE_CURRENT_LIST_DIR}/AppleAudioContracts.cmake")
     # T-03：宽字符运行期语义（含 BMP 外码点不丢字符）。
     include("${CMAKE_CURRENT_LIST_DIR}/AppleTextContracts.cmake")
+    # S8b：两进程 smoke 是**唯一没有 #if 保护**的 Win32 调用方（产品路径全在
+    # #ifdef _WIN32 里），它需要的 24 个 Win32 函数全由 compat 层提供。
+    # 必须挂在这条 APPLE 分支里：DevelopmentTargets.cmake 在 CompilerAndPlatform
+    # 之前执行，在那里调用 concord_apple_add_win32_compat_sources 会因为"函数
+    # 尚未定义"被 if(COMMAND) 静默跳过——症状是 smoke 永远只能 -fsyntax-only。
+    if(TARGET concord_multiplayer_two_process_smoke)
+        concord_apple_add_win32_compat_sources(concord_multiplayer_two_process_smoke)
+    endif()
 endif()
 
 
