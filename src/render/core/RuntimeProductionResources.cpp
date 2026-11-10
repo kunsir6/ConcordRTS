@@ -17,6 +17,7 @@
 #include "data/maps/MapDatabase.h"
 #include "render/core/RuntimeRendererEnvironment.h"
 
+#include "data/art/TheaterResourceLetters.h"
 #include "render/core/detail/RuntimeProductionResources.h"
 
 RuntimeMapRenderContext::RuntimeMapRenderContext() = default;
@@ -974,44 +975,13 @@ void addUniqueCandidate(std::vector<std::string>& candidates, const std::string&
 }
 
 char newTheaterCharForExtension(const std::string& tileExtension) {
-    const std::string extension = toLowerAscii(tileExtension);
-    if (extension == ".tem") {
-        return 't';
-    }
-    if (extension == ".urb") {
-        return 'u';
-    }
-    if (extension == ".ubn") {
-        return 'n';
-    }
-    if (extension == ".des") {
-        return 'd';
-    }
-    if (extension == ".lun") {
-        return 'l';
-    }
-    if (extension == ".sno") {
-        return 'a';
-    }
-    return '\0';
+    // Q-03：表在 data/art/TheaterResourceLetters.h，与预览/对象图共用同一份实现。
+    // 剧场字母（温带 = 'T'）；通用图 'G' 由序列的第二项负责，不是这里。
+    return concord::data::art::theaterResourceLetter(tileExtension);
 }
 
 bool artIdSupportsNewTheater(const std::string& artId) {
-    if (artId.size() < 2) {
-        return false;
-    }
-
-    const char first =
-        static_cast<char>(std::toupper(static_cast<unsigned char>(artId[0])));
-    const char second =
-        static_cast<char>(std::toupper(static_cast<unsigned char>(artId[1])));
-    return (first == 'G' || first == 'N' || first == 'C' || first == 'Y')
-        && (second == 'A'
-            || second == 'T'
-            || second == 'U'
-            || second == 'D'
-            || second == 'L'
-            || second == 'N');
+    return concord::data::art::isTheaterVariantResourceName(artId);
 }
 
 std::vector<std::string> resolveAuxiliarySpriteImageIdCandidates(
@@ -1069,16 +1039,14 @@ std::vector<std::string> resolveAuxiliarySpriteImageIdCandidates(
         && context.theater != nullptr
         && artIdSupportsNewTheater(baseName)
         && lowerBaseName.size() >= 2) {
-        const char newTheaterChar =
-            newTheaterCharForExtension(context.theater->getTileExtension());
-        if (newTheaterChar != '\0') {
-            std::string newTheaterName = lowerBaseName;
-            newTheaterName[1] = newTheaterChar;
-            addUniqueCandidate(candidates, newTheaterName);
-
-            std::string genericName = lowerBaseName;
-            genericName[1] = 'g';
-            addUniqueCandidate(candidates, genericName);
+        // Q-03：候选序列由共享表生成，与 MapPreviewExporter 逐字相同
+        // （温带 -> gg* 直命中，其它剧场 -> 剧场字母 + 通用 g 回退）。
+        for (const std::string& theaterName :
+            concord::data::art::theaterResourceNameCandidates(
+                lowerBaseName,
+                context.theater->getTileExtension()
+            )) {
+            addUniqueCandidate(candidates, theaterName);
         }
     }
 

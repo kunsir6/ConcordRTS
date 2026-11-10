@@ -17,6 +17,7 @@
 #include "simulation/buildings/RuntimeStructureRepack.h"
 #include "render/units/RuntimeArcticArt.h"
 #include "simulation/combat/projectiles/RuntimeMissileExhaust.h"
+#include "data/art/TheaterResourceLetters.h"
 #include "data/maps/MapDatabase.h"
 #include "data/rules/RulesDatabase.h"
 #include "simulation/economy/RuntimeBuildingPower.h"
@@ -1340,16 +1341,13 @@ std::vector<std::string> resolveObjectSpriteImageIdCandidates(
         && context.theater != nullptr
         && artIdSupportsNewTheater(artId)
         && lowerBaseName.size() >= 2) {
-        const char newTheaterChar =
-            newTheaterCharForExtension(context.theater->getTileExtension());
-        if (newTheaterChar != '\0') {
-            std::string newTheaterName = lowerBaseName;
-            newTheaterName[1] = newTheaterChar;
-            addUniqueCandidate(candidates, newTheaterName);
-
-            std::string genericName = lowerBaseName;
-            genericName[1] = 'g';
-            addUniqueCandidate(candidates, genericName);
+        // Q-03：与产品资源解析、预览导出共用同一张表，候选序列逐字相同。
+        for (const std::string& theaterName :
+            concord::data::art::theaterResourceNameCandidates(
+                lowerBaseName,
+                context.theater->getTileExtension()
+            )) {
+            addUniqueCandidate(candidates, theaterName);
         }
     }
 

@@ -4,6 +4,7 @@
 #include "assets/codecs/PalDecoder.h"
 
 #include "data/art/ArtDatabase.h"
+#include "data/art/TheaterResourceLetters.h"
 #include "assets/archive/MixArchive.h"
 #include "data/rules/RulesDatabase.h"
 
@@ -687,75 +688,26 @@ std::vector<IndexedMixArchive> buildMixArchiveIndex(
 //   地表：温带在 art/temperat/gtsand.shp + gtwall.shp + ntwall.shp，雪地在
 //         art/snow/gasand.shp，城市 gu*，沙漠 gd*，月球 gl*，新城市 gn*。
 //         → 温带 = 'T'
-// 也就是说 "gt" 只对地表成立、对建筑不成立；"gg" 只对建筑成立、对地表不成立。
-// 上一版把这个函数写成 .tem → 't' 并让两条路径共用：建筑侧的第一个候选名永远是
-// 一个不存在的 gt*.shp，只是因为后面还有一个 'g' 兜底候选才没有变成"缺图"。
+// Q-03/Q-04：实现搬到 data/art/TheaterResourceLetters.h，产品渲染、生产资源解析与本文件
+// 现在调**同一张表**。这里的三个函数只保留名字（调用点不动），语义全部来自那张表：
+//   structureTheaterCharForExtension -> theaterResourceLetter()        （.tem = 'T'）
+//   overlayTheaterCharForExtension   -> overlayTheaterResourceLetter() （.tem = 'T'）
+//   artIdSupportsNewTheater          -> isTheaterVariantResourceName()
+//
+// 别再按"建筑用 G、地表用 T"去理解：Q-04 用真实数据推翻了这个说法。温带字符取决于
+// **建筑家族**——玩家建筑 GATECH 温带是 art/base/ggtech.shp（gttech.shp 不存在），
+// 民用建筑 CAHOSP 温带是 art/temperat/cthosp.shp（cghosp.shp 不存在）。所以候选必须是
+// 一条序列 [剧场字母, 通用 'G', 字面名]：先试本剧场，再退通用图，最后退回原名字。
 char structureTheaterCharForExtension(const std::string& tileExtension) {
-    if (tileExtension == ".tem") {
-        return 'g'; // 温带建筑在 art/base/gg*.shp
-    }
-    if (tileExtension == ".urb") {
-        return 'u';
-    }
-    if (tileExtension == ".ubn") {
-        return 'n';
-    }
-    if (tileExtension == ".des") {
-        return 'd';
-    }
-    if (tileExtension == ".lun") {
-        return 'l';
-    }
-    if (tileExtension == ".sno") {
-        return 'a';
-    }
-
-    return '\0';
+    return concord::data::art::theaterResourceLetter(tileExtension);
 }
 
 char overlayTheaterCharForExtension(const std::string& tileExtension) {
-    if (tileExtension == ".tem") {
-        return 't'; // 温带地表在 art/temperat/gt*.shp
-    }
-    if (tileExtension == ".urb") {
-        return 'u';
-    }
-    if (tileExtension == ".ubn") {
-        return 'n';
-    }
-    if (tileExtension == ".des") {
-        return 'd';
-    }
-    if (tileExtension == ".lun") {
-        return 'l';
-    }
-    if (tileExtension == ".sno") {
-        return 'a';
-    }
-
-    return '\0';
+    return concord::data::art::overlayTheaterResourceLetter(tileExtension);
 }
 
 bool artIdSupportsNewTheater(const std::string& artId) {
-    if (artId.size() < 2) {
-        return false;
-    }
-
-    const char first = static_cast<char>(std::toupper(static_cast<unsigned char>(artId[0])));
-    const char second = static_cast<char>(std::toupper(static_cast<unsigned char>(artId[1])));
-    // Q-02：第二个字符里必须有 'G'——温带建筑的 art id 自己就长这样（GGPOWR / NGYARD）。
-    // 少了 'G'，这些 id 会被判成"不支持新剧场"，于是温带 id 只能靠"原名直查"命中；
-    // 一旦 Image= 指向别的 id，替代候选就整条不生成。
-    return (first == 'G' || first == 'N' || first == 'C' || first == 'Y')
-        && (
-            second == 'A'
-            || second == 'G'
-            || second == 'T'
-            || second == 'U'
-            || second == 'D'
-            || second == 'L'
-            || second == 'N'
-        );
+    return concord::data::art::isTheaterVariantResourceName(artId);
 }
 
 void addUniqueCandidate(std::vector<std::string>& candidates, const std::string& candidate) {
@@ -974,19 +926,19 @@ std::vector<std::string> structureAssetFileCandidates(
     }
 
     const std::string lowerBaseName = toLowerAscii(baseName);
-    const char newTheaterChar = structureTheaterCharForExtension(theaterDatabase.getTileExtension());
     if (link.newTheater
-        && newTheaterChar != '\0'
         && artIdSupportsNewTheater(link.artId)
         && lowerBaseName.size() >= 2
     ) {
-        std::string newTheaterName = lowerBaseName;
-        newTheaterName[1] = newTheaterChar;
-        addUniqueCandidate(candidates, newTheaterName + ".shp");
-
-        std::string genericName = lowerBaseName;
-        genericName[1] = 'g';
-        addUniqueCandidate(candidates, genericName + ".shp");
+        // Q-03：候选序列由共享表生成。产品渲染（RuntimeProductionResources /
+        // RuntimeMapRenderer）调的是同一个函数，所以两侧的候选名逐字相同。
+        for (const std::string& theaterName :
+            concord::data::art::theaterResourceNameCandidates(
+                lowerBaseName,
+                theaterDatabase.getTileExtension()
+            )) {
+            addUniqueCandidate(candidates, theaterName + ".shp");
+        }
     }
 
     addUniqueCandidate(candidates, lowerBaseName + ".shp");
