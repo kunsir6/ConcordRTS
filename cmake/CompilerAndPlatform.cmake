@@ -257,6 +257,10 @@ elseif(APPLE)
         concord_apple_add_win32_compat_sources(concord_runtime)
     endif()
     concord_apple_add_win32_compat_selftest()
+    # P4-01a：macOS 原生音频底座（WAVE 解码 + AudioQueue 输出流）。
+    # 放在 APPLE 分支末尾，既不触碰上面的 if(WIN32) 分支，也不影响 Windows 的
+    # 任何目标——Windows 侧这个文件根本不会被 include。
+    include("${CMAKE_CURRENT_LIST_DIR}/AppleAudioContracts.cmake")
 endif()
 
 

@@ -183,6 +183,11 @@ set(
     # startup/shutdown token bookkeeping, a one-codec (PNG) encoder report, and
     # a Bitmap that holds a pixel buffer and saves it via ImageIO.
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatGdiplus.cpp"
+    # P4-01b: XAudio2Create.  xaudio2.h 一直是"声明层"（S1 的 windows.h 覆盖不到
+    # DirectX 的 COM 接口），它刻意留下的那一个链接缺口由这里兑现。兑现的方式是
+    # 明确的 E_NOTIMPL，不是空壳引擎：多路语音混音在 macOS 上还没实现，假装成功
+    # 会变成"每条语音都播放成功但不出声"。详见该文件头。
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatAudio.cpp"
     CACHE INTERNAL
     "Win32 compatibility implementations compiled into Apple builds"
 )
