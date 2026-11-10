@@ -112,6 +112,169 @@ struct HookEntry {
 std::vector<HookEntry>& hookTable() { static std::vector<HookEntry> v; return v; }
 int& nextHookId() { static int v = 1; return v; }
 
+// ---------------------------------------------------------------------------
+// ON-2-02a：呈现节奏计数（只计数，不改任何呈现行为）
+//
+// 为什么先计数再谈"脏帧合并"：ON-2-02 的原始 detail 里有两句是**假设**——
+// 「每个 EndPaint 都直接 present」「同一帧可能被贴多次」。2026-11-11 06:44 的
+// 读码诊断认为两句都不成立（present 全仓只有一个调用点，失效层已经用 dirty
+// 标志合并），但那也是读码结论、不是实测。这里把两件事变成可复算的数字：
+//   · paints 按**来源**分类：队列合成 / UpdateWindow / RedrawWindow(RDW_UPDATENOW)
+//     / 应用直投（SendMessageW）。四类之和必须等于 paintCalls，否则口径错了。
+//   · submits 与 redundant 的比值：同一窗口、同尺寸、同可见性、采样签名相同的
+//     连续提交，就是"同一帧被贴两次"的直接证据；反之 redundant==0 就是
+//     "present 层不需要再合并"的反证。
+//
+// 零开销约束：CONCORD_PRESENT_STATS 未设时每个钩子只多一次 bool 读，且不产生
+// 任何输出、不写文件（stderr 一条汇总行即够对账，不引入新的磁盘依赖）。
+//
+// 采样签名的局限：签名只取每 4 行 × 每 8 列（1/32 像素），所以 redundant 是
+// **上界**——小于采样格的局部变化会被算成"没变"。反向不会发生（变了绝不可能
+// 被算成没变），用它判"存不存在重复提交"是安全的；用它判"具体重复了几帧"会偏低。
+// ---------------------------------------------------------------------------
+struct PresentStatsCounters {
+    long long paintCalls = 0;              // callWindowProc(WM_PAINT) 总数（分发口径）
+    long long paintViaQueue = 0;           // 经 DispatchMessageW（含 popMessage 合成）
+    long long paintFromUpdateWindow = 0;   // UpdateWindow 的同步旁路
+    long long paintFromRedrawNow = 0;      // RedrawWindow(RDW_UPDATENOW) 的同步旁路
+    long long endPaintCalls = 0;
+    long long dirtyMarks = 0;              // InvalidateRect / RedrawWindow 置脏次数
+    long long dirtyMarksMerged = 0;        // 置脏时**已经是脏的** → 被失效层合并
+    long long presentAttempts = 0;         // 进入 maybePresentClientFrame 的次数
+    long long skippedBlank = 0;            // ON-2-05 的空白首绘过滤
+    long long skippedTakeover = 0;         // 抢位规则拒绝（小控件 / 非主人窗口）
+    long long skippedTakeoverSelf = 0;     // 其中：拒的是**当前呈现主人自己**（画了但不让上屏）
+    long long skippedTakeoverOther = 0;    // 其中：拒的是别的窗口（小控件 / 并列窗口）
+    long long submits = 0;                 // 真正调用 apple::present 的次数
+    long long redundantSubmits = 0;        // 与上一次提交完全相同（窗口/尺寸/可见性/签名）
+};
+
+// 第一次见到某个窗口重绘时打一行（上限 8 个）：只有知道"谁在画、多大"，
+// 才能判断被抢位规则拒掉的是主人自己还是旁边的小控件。两者后果完全不同：
+// 前者=屏幕冻在第一帧，后者=完全正常。
+std::vector<HWND>& presentStatsSeenWindows() { static std::vector<HWND> v; return v; }
+
+bool presentStatsEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("CONCORD_PRESENT_STATS");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+void presentStatsNoteWindow(HWND handle, int width, int height) {
+    if (!presentStatsEnabled()) return;
+    std::vector<HWND>& seen = presentStatsSeenWindows();
+    for (HWND entry : seen) {
+        if (entry == handle) return;
+    }
+    if (seen.size() >= 8) return;
+    seen.push_back(handle);
+    std::fprintf(stderr, "[present-stats] paint-window #%zu hwnd=%p size=%dx%d\n",
+                 seen.size(), static_cast<void*>(handle), width, height);
+    std::fflush(stderr);
+}
+
+int presentStatsUntilSec() {
+    static const int seconds = [] {
+        const char* value = std::getenv("CONCORD_PRESENT_STATS_UNTIL_SEC");
+        return value != nullptr ? std::atoi(value) : 0;
+    }();
+    return seconds;
+}
+
+PresentStatsCounters& presentStats() { static PresentStatsCounters counters; return counters; }
+
+// 计时起点取**第一次取消息**的时刻（也就是主循环真正起来的时候），而不是静态
+// 初始化时刻——后者会把动态链接/静态构造的时间也算进"运行时长"。
+std::chrono::steady_clock::time_point& presentStatsStart() {
+    static std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    return start;
+}
+
+double presentStatsElapsedSeconds() {
+    const auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(now - presentStatsStart()).count();
+}
+
+// 当前上屏那一幅画的尺寸。与后面的 gPresentedArea 同源，单独留一份是为了让
+// 汇总行能直接打出"屏幕上是多大的一幅"，而不用反算面积。
+int gPresentedWidth = 0;
+int gPresentedHeight = 0;
+
+void presentStatsPrint(const char* reason) {
+    if (!presentStatsEnabled()) return;
+    const PresentStatsCounters& s = presentStats();
+    // 应用直投 = 总数减去三条已知路径；负数说明某个入口被重复计数，直接报 -1 让人看见。
+    const long long known = s.paintViaQueue + s.paintFromUpdateWindow + s.paintFromRedrawNow;
+    const long long appDirect = s.paintCalls >= known ? s.paintCalls - known : -1;
+    const double elapsed = presentStatsElapsedSeconds();
+    std::fprintf(stderr,
+        "[present-stats] reason=%s elapsed=%.2fs paints=%lld"
+        " {queue=%lld update=%lld redraw=%lld app=%lld}"
+        " endpaint=%lld dirtyMarks=%lld merged=%lld"
+        " attempts=%lld blank=%lld takeover=%lld {self=%lld other=%lld}"
+        " submits=%lld redundant=%lld owner=%dx%d rate=%.2f/s\n",
+        reason, elapsed, s.paintCalls,
+        s.paintViaQueue, s.paintFromUpdateWindow, s.paintFromRedrawNow, appDirect,
+        s.endPaintCalls, s.dirtyMarks, s.dirtyMarksMerged,
+        s.presentAttempts, s.skippedBlank, s.skippedTakeover,
+        s.skippedTakeoverSelf, s.skippedTakeoverOther,
+        s.submits, s.redundantSubmits, gPresentedWidth, gPresentedHeight,
+        elapsed > 0.0005 ? static_cast<double>(s.submits) / elapsed : 0.0);
+    std::fflush(stderr);
+}
+
+void presentStatsAtExit() { presentStatsPrint("atexit"); }
+
+// 到点即退出：世界视图的主循环是 `while (PeekMessageW(...))` + 自己 sleep，
+// 既没有 atexit 时机也没有稳定退出路径，_Exit 是唯一确定性的收尾方式
+// （与 ON-3-01 的 attest 同一取舍：先 fflush，不跑静态析构）。
+void presentStatsMaybeExit() {
+    if (!presentStatsEnabled()) return;
+    static const bool registered = [] {
+        std::atexit(&presentStatsAtExit);
+        return true;
+    }();
+    (void)registered;
+    const int until = presentStatsUntilSec();
+    if (until <= 0) return;
+    if (presentStatsElapsedSeconds() < static_cast<double>(until)) return;
+    presentStatsPrint("until-sec");
+    std::_Exit(0);
+}
+
+// 1/32 像素采样签名。不要拿它当"画面有没有变"的判据（见上面的局限说明），
+// 它只服务于 redundant 这个端口。
+std::uint64_t sampleFrameSignature(const unsigned char* bits, int width, int height, int stride) {
+    std::uint64_t hash = 1469598103934665603ull;
+    hash = (hash ^ static_cast<std::uint64_t>(width)) * 1099511628211ull;
+    hash = (hash ^ static_cast<std::uint64_t>(height)) * 1099511628211ull;
+    const int rowStep = height >= 8 ? 4 : 1;
+    const int colStep = width >= 16 ? 8 : 1;
+    for (int y = 0; y < height; y += rowStep) {
+        const unsigned char* row = bits + static_cast<std::size_t>(y) * static_cast<std::size_t>(stride);
+        for (int x = 0; x < width; x += colStep) {
+            const unsigned char* px = row + static_cast<std::size_t>(x) * 4u;
+            hash = (hash ^ px[0]) * 1099511628211ull;
+            hash = (hash ^ px[1]) * 1099511628211ull;
+            hash = (hash ^ px[2]) * 1099511628211ull;
+        }
+    }
+    return hash;
+}
+
+struct PresentStatsLastSubmit {
+    const void* bits = nullptr;
+    int width = 0;
+    int height = 0;
+    bool visible = false;
+    std::uint64_t signature = 0;
+    bool valid = false;
+};
+
+PresentStatsLastSubmit& presentStatsLast() { static PresentStatsLastSubmit last; return last; }
+
 // 本线程 id（SetWindowsHookExW 判定"本线程"用）。懒初始化。
 DWORD currentThreadId() {
     static thread_local DWORD id = [] {
@@ -216,6 +379,9 @@ LRESULT fireCbtHook(int code, HWND window) {
 LRESULT callWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     CompatWindow* w = asWindow(window);
     if (w == nullptr || w->wndProc == nullptr) return 0;
+    // ON-2-02a：分发口径的总数。放在句柄校验之后——发给已销毁窗口的 WM_PAINT
+    // 一次都不会真的执行窗口过程，计入就会让"四类之和 == 总数"这条恒等式失真。
+    if (message == WM_PAINT && presentStatsEnabled()) ++presentStats().paintCalls;
     WNDPROC proc = w->wndProc;
     return proc(window, message, wParam, lParam);
 }
@@ -628,6 +794,7 @@ BOOL UpdateWindow(HWND hWnd) {
     if (w == nullptr) return FALSE;
     // 纯离屏无真正的同步重绘：直接把脏区画成 WM_PAINT 派发。
     if (w->dirty) {
+        if (presentStatsEnabled()) ++presentStats().paintFromUpdateWindow;
         callWindowProc(hWnd, WM_PAINT, 0, 0);
     }
     return TRUE;
@@ -959,6 +1126,7 @@ bool surfaceLooksBlank(const unsigned char* bits, int width, int height, int str
 
 void maybePresentClientFrame(CompatWindow* w) {
     if (w == nullptr || w->surface == nullptr) return;
+    if (presentStatsEnabled()) ++presentStats().presentAttempts;
     DIBSECTION section{};
     if (::GetObjectW(w->surface, static_cast<int>(sizeof(section)), &section) == 0) return;
     const auto* bits = static_cast<const unsigned char*>(section.dsBm.bmBits);
@@ -970,13 +1138,27 @@ void maybePresentClientFrame(CompatWindow* w) {
     // 放在抢位判定之前是关键：先抢位再过滤，等于黑帧先把位置占了。
     if (surfaceLooksBlank(bits, section.dsBm.bmWidth, section.dsBm.bmHeight,
                           section.dsBm.bmWidth * 4)) {
+        if (presentStatsEnabled()) ++presentStats().skippedBlank;
         return;
+    }
+    if (presentStatsEnabled()) {
+        presentStatsNoteWindow(toHwnd(w), section.dsBm.bmWidth, section.dsBm.bmHeight);
     }
     {
         const long long area = static_cast<long long>(clientWidth(w))
             * static_cast<long long>(clientHeight(w));
         CompatWindow* owner = asWindow(gPresentedWindow);
         const bool takeOver = [&]() {
+            // ON-2-02a（实测发现）：**主人自己的后续帧必须无条件上屏**。
+            //
+            // 原规则只有"严格更大者才能接管"，而主人自己与主人面积相等，
+            // `area > gPresentedArea` 恒假 → 第一次呈现之后，这个窗口**每一次**
+            // 重绘都被拒。实测（主菜单挂机 15s，CONCORD_PRESENT_STATS=1）：
+            //     paints=201 submissions=1 takeover={self=200 other=0}
+            // 也就是进程内部画了 201 帧、屏幕只看得到第 1 帧——"菜单冻住"
+            // 不是 CGImage 缓存（ON-2-01 已排除）、不是没有失效、不是没有 present，
+            // 而是 present 前的这道门把自己人挡住了。
+            if (gPresentedWindow != nullptr && toHwnd(w) == gPresentedWindow) return true;
             if (gPresentedWindow == nullptr || gPresentedArea <= 0) return true;  // 首个窗口
             if (owner != nullptr) return area > gPresentedArea;   // 主人还在：只能被更大者接管
             // 主人已销毁：允许接手，但门槛是"不小于历史面积的一半"。
@@ -984,9 +1166,20 @@ void maybePresentClientFrame(CompatWindow* w) {
             // 又不会因为"新界面比旧界面小一点"就白屏。
             return area * 2 >= gPresentedArea;
         }();
-        if (!takeOver) return;
+        if (!takeOver) {
+            if (presentStatsEnabled()) {
+                ++presentStats().skippedTakeover;
+                // 区分"拒的是主人自己"还是"拒的是旁边的小控件"——前者会让屏幕
+                // 永久停在这一帧，后者完全正常。混成一个数就分不出是哪种。
+                if (toHwnd(w) == gPresentedWindow) ++presentStats().skippedTakeoverSelf;
+                else ++presentStats().skippedTakeoverOther;
+            }
+            return;
+        }
         gPresentedWindow = toHwnd(w);
         gPresentedArea = area;
+        gPresentedWidth = clientWidth(w);
+        gPresentedHeight = clientHeight(w);
     }
     concord_compat::apple::Surface surface;
     surface.pixels = bits;
@@ -996,6 +1189,25 @@ void maybePresentClientFrame(CompatWindow* w) {
     const std::string title = concord_compat::utf8FromWideText(w->title.c_str());
     surface.titleUtf8 = title.c_str();
     surface.visible = w->visible && !w->iconic;
+    if (presentStatsEnabled()) {
+        // "同一帧被贴两次"的判据：同窗口（同一块 DIB 指针）、同尺寸、同可见性，
+        // 且采样签名相同。任何一项不同都算新帧——那也可能是别的窗口接管了画面。
+        PresentStatsCounters& counters = presentStats();
+        PresentStatsLastSubmit& last = presentStatsLast();
+        const std::uint64_t signature = sampleFrameSignature(
+            bits, surface.width, surface.height, surface.bytesPerRow);
+        const bool sameFrame = last.valid && last.bits == surface.pixels
+            && last.width == surface.width && last.height == surface.height
+            && last.visible == surface.visible && last.signature == signature;
+        ++counters.submits;
+        if (sameFrame) ++counters.redundantSubmits;
+        last.bits = surface.pixels;
+        last.width = surface.width;
+        last.height = surface.height;
+        last.visible = surface.visible;
+        last.signature = signature;
+        last.valid = true;
+    }
     concord_compat::apple::present(surface);
     // 第一次（也是唯一一次）把输入目标绑到这个窗口，并注册翻译回调。
     // 放在 present 之后：present 已经完成了 NSApp/NSWindow 的初始化，
@@ -1010,6 +1222,7 @@ void maybePresentClientFrame(CompatWindow* w) {
 BOOL EndPaint(HWND hWnd, const PAINTSTRUCT* lpPaint) {
     (void)lpPaint;
     CompatWindow* window = asWindow(hWnd);
+    if (presentStatsEnabled()) ++presentStats().endPaintCalls;
     // Q-05：一帧画完（EndPaint）之后才导出/贴图，保证拿到的是完整帧。
     maybeDumpClientFrame(window);
     maybePresentClientFrame(window);
@@ -1021,6 +1234,12 @@ BOOL InvalidateRect(HWND hWnd, const RECT* lpRect, BOOL bErase) {
     (void)bErase;
     CompatWindow* w = asWindow(hWnd);
     if (w == nullptr) return FALSE;
+    // ON-2-02a：置脏时**已经脏**说明这次失效不会产生新的 WM_PAINT —— 这就是
+    // "同一帧被贴多次"的抑制机制发生的地方（失效层，不是呈现层）。
+    if (presentStatsEnabled()) {
+        if (w->dirty) ++presentStats().dirtyMarksMerged;
+        else ++presentStats().dirtyMarks;
+    }
     w->dirty = true;
     return TRUE;
 }
@@ -1051,8 +1270,13 @@ BOOL RedrawWindow(HWND hWnd, const RECT* lprcUpdate, HRGN hrgnUpdate, UINT flags
     (void)hrgnUpdate;
     CompatWindow* w = asWindow(hWnd);
     if (w == nullptr) return FALSE;
+    if (presentStatsEnabled()) {
+        if (w->dirty) ++presentStats().dirtyMarksMerged;
+        else ++presentStats().dirtyMarks;
+    }
     w->dirty = true;
     if ((flags & RDW_UPDATENOW) != 0) {
+        if (presentStatsEnabled()) ++presentStats().paintFromRedrawNow;
         callWindowProc(hWnd, WM_PAINT, 0, 0);
     }
     return TRUE;
@@ -1091,6 +1315,9 @@ void PostQuitMessage(int nExitCode) {
 // 不可消费的 WM_PAINT 会让调用方的 `while (PeekMessageW(..., PM_NOREMOVE)) { ... }`
 // 变成死循环。
 bool popMessage(LPMSG lpMsg, HWND hWnd, UINT filterMin, UINT filterMax, bool remove) {
+    // ON-2-02a：所有消息取用（菜单的 GetMessageW 与世界主循环的 PeekMessageW）
+    // 都经过这里，是检查"到点收尾"的唯一共同点。
+    presentStatsMaybeExit();
     {
         std::lock_guard<std::mutex> lock(userMutex());
         auto& q = messageQueue();
@@ -1225,6 +1452,7 @@ BOOL TranslateMessage(const MSG* lpMsg) {
 LRESULT DispatchMessageW(const MSG* lpMsg) {
     if (lpMsg == nullptr) return 0;
     if (lpMsg->hwnd == nullptr) return 0;
+    if (lpMsg->message == WM_PAINT && presentStatsEnabled()) ++presentStats().paintViaQueue;
     return callWindowProc(lpMsg->hwnd, lpMsg->message, lpMsg->wParam, lpMsg->lParam);
 }
 
