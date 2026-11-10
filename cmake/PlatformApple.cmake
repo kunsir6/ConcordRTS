@@ -178,6 +178,11 @@ set(
     # a Cocoa shell can present the offscreen frame later without changing this
     # object model.
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatUser.cpp"
+    # S6: GDI+ PNG export.  The product only ever uses GDI+ to write a 32bpp
+    # pixel buffer out as a PNG diagnostic image, so this is the whole surface:
+    # startup/shutdown token bookkeeping, a one-codec (PNG) encoder report, and
+    # a Bitmap that holds a pixel buffer and saves it via ImageIO.
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatGdiplus.cpp"
     CACHE INTERNAL
     "Win32 compatibility implementations compiled into Apple builds"
 )
@@ -192,6 +197,9 @@ set(
     CoreText
     CoreGraphics
     CoreFoundation
+    # ImageIO is only needed by the GDI+ PNG export (S6), but it travels with the
+    # list so every target that compiles that translation unit links it.
+    ImageIO
     CACHE INTERNAL
     "Apple frameworks required by the Win32 compatibility layer"
 )
@@ -424,6 +432,22 @@ function(concord_apple_add_win32_compat_selftest)
         target_include_directories(
             concord_win32_compat_user_selftest
             BEFORE PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src"
+        )
+    endif()
+
+    # S6: GDI+ PNG export.  The assertions are about the one real chain the
+    # product uses — startup, one PNG codec, and a Bitmap::Save that actually
+    # writes a PNG whose decoded pixels keep their R/G/B order (no silent BGR
+    # swap).  The colour read-back uses ImageIO + CoreGraphics directly.
+    if(NOT TARGET concord_win32_compat_gdiplus_selftest)
+        add_executable(
+            concord_win32_compat_gdiplus_selftest
+            "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/selftest/CompatGdiplusSemantics.cpp"
+            ${CONCORD_APPLE_WIN32_COMPAT_SOURCES}
+        )
+        target_include_directories(
+            concord_win32_compat_gdiplus_selftest
+            BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
         )
     endif()
 
