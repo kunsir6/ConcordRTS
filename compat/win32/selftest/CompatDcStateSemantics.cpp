@@ -295,12 +295,21 @@ void testClipBox() {
     checkInt(Surface::width, clip.right, "裁剪框 right=位图宽");
     checkInt(Surface::height, clip.bottom, "裁剪框 bottom=位图高");
 
-    // 没有位图的内存 DC：没有像素表面，只能报错——编一个矩形更有害。
+    // S4-3 更正：新建兼容 DC **不是**"没有像素表面"——Win32 语义里它自带一块
+    // 1×1 单色位图，所以 GetClipBox 必须给出这块表面的外接框，而不是 ERROR。
+    // 旧断言（期望 ERROR(0)）钉的其实是本层以前的偏离：那时 device->bitmap 为空，
+    // 于是顺带把"首次 SelectObject 返回 nullptr"一起掩盖了（见
+    // rules.compatible_dc_needs_initial_bitmap）。真 Windows 上这里同样是
+    // SIMPLEREGION + {0,0,1,1}。真正"没有表面"的只有录制型 DC，见下一条。
     HDC bare = CreateCompatibleDC(nullptr);
     check(bare != nullptr, "空内存 DC 创建成功");
     if (bare != nullptr) {
-        RECT none{};
-        checkInt(0, GetClipBox(bare, &none), "未选位图的 DC 的 GetClipBox 返回 ERROR(0)");
+        RECT none{-9, -9, -9, -9};
+        checkInt(2, GetClipBox(bare, &none), "新建 DC 的 GetClipBox 返回 SIMPLEREGION(2)（自带 1×1 位图）");
+        checkInt(0, none.left, "初始位图裁剪框 left=0");
+        checkInt(0, none.top, "初始位图裁剪框 top=0");
+        checkInt(1, none.right, "初始位图裁剪框 right=1（位图宽）");
+        checkInt(1, none.bottom, "初始位图裁剪框 bottom=1（位图高）");
         DeleteDC(bare);
     }
 

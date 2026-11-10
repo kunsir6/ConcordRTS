@@ -106,6 +106,33 @@ void testObjectLifecycle() {
     Dib target;
     check(target.create(8, 8, true), "创建 8x8 顶向下 DIB");
 
+    // S4-3：新建兼容 DC 自带一块 1×1 单色位图并已选中。这条语义很关键——调用点
+    // 普遍用"SelectObject 的返回值是否为空"判断成败（最常见的 Win32 写法），
+    // 初值位图缺失会让"选中成功"被判成失败，而本层其它断言看不出来。
+    {
+        const DWORD beforeObjects = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        HDC fresh = CreateCompatibleDC(nullptr);
+        check(fresh != nullptr, "CreateCompatibleDC 返回非空");
+        HGDIOBJ initial = GetCurrentObject(fresh, OBJ_BITMAP);
+        check(initial != nullptr, "新建 DC 的 GetCurrentObject(OBJ_BITMAP) 非空（自带初始位图）");
+        BITMAP initialBits{};
+        checkEqual(static_cast<std::uint32_t>(sizeof(BITMAP)),
+                   static_cast<std::uint32_t>(GetObjectW(initial, sizeof(initialBits), &initialBits)),
+                   "初始位图可用 GetObject 读出 BITMAP");
+        checkEqual(1, static_cast<std::uint32_t>(initialBits.bmWidth), "初始位图宽 1");
+        checkEqual(1, static_cast<std::uint32_t>(initialBits.bmHeight), "初始位图高 1");
+        checkEqual(1, static_cast<std::uint32_t>(initialBits.bmBitsPixel),
+                   "初始位图报单色（bmBitsPixel == 1，与 Win32 一致）");
+        HBITMAP probe = CreateCompatibleBitmap(fresh, 4, 4);
+        check(probe != nullptr, "探针兼容位图创建成功");
+        HGDIOBJ replaced = SelectObject(fresh, reinterpret_cast<HGDIOBJ>(probe));
+        check(replaced == initial, "首次 SelectObject 返回初始 1×1 位图，而不是 nullptr");
+        check(DeleteDC(fresh) != FALSE, "DeleteDC 成功");
+        check(DeleteObject(reinterpret_cast<HGDIOBJ>(probe)) == TRUE, "探针位图可删除（选中计数已摘）");
+        checkEqual(beforeObjects, GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS),
+                   "DC 生命周期内 GDI 对象计数平衡（初始位图没有泄漏）");
+    }
+
     HGDIOBJ previousBrush = SelectObject(target.dc, reinterpret_cast<HGDIOBJ>(brush));
     check(previousBrush == white, "SelectObject(brush) 返回先前的库存白刷");
     HGDIOBJ previousPen = SelectObject(target.dc, reinterpret_cast<HGDIOBJ>(pen));

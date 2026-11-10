@@ -152,6 +152,10 @@ struct CompatObject {
     // 否则将来有人照着 GetObject 的结果去 memcpy 就会读到不该暴露的地址。
     bool dibSection = false;
     BITMAPINFOHEADER header{};  // 仅 DIBSection 有效，逐字节保留创建时的入参
+    // 单色位图（S4-3）。本层只有 32bpp 一条存储路径，唯一会标成单色的是
+    // CreateCompatibleDC 自带的那块 1×1 初值位图；这个标志只影响 GetObject
+    // 报出的 bmBitsPixel（Win32 报 1），不改变像素布局。
+    bool monochrome = false;
 
     // 笔
     int penStyle = PS_SOLID;
@@ -234,6 +238,10 @@ struct EmfMetafile {
 struct CompatDevice {
     std::uint32_t magic = kDeviceMagic;
     CompatObject* bitmap = nullptr;  // 借用，不拥有
+    // CreateCompatibleDC 自带的 1×1 单色位图（S4-3）。与 bitmap 的区别是**拥有**：
+    // 由 DeleteDC 释放。Win32 里这块位图是新 DC 的初值，也是首个 SelectObject
+    // 的返回值来源——它为空会让"用 SelectObject 返回值判成败"的调用点全部误判。
+    CompatObject* ownedBitmap = nullptr;
     EmfRecording* recording = nullptr;  // 非空即为录制型 DC；拥有
     HGDIOBJ pen = nullptr;
     HGDIOBJ brush = nullptr;
@@ -1542,7 +1550,18 @@ void compositeGlyphRun(PixelSink& sink, int left, int top, const text::GlyphMask
 // 前进宽度；clip 非空时（ETO_CLIPPED）只画矩形内部。
 void drawTextRun(CompatDevice* device, int x, int y, const wchar_t* text, int count,
                  const int* dx, const RECT* clip) {
-    if (device == nullptr || device->bitmap == nullptr || text == nullptr || count <= 0) return;
+    if (device == nullptr || text == nullptr || count <= 0) return;
+    if (device->bitmap == nullptr) {
+        // S4-3：录制型 DC 没有像素表面。图元族在这里显式 reportUnsupported，文本族
+        // 原本是静默丢弃（返回 TRUE、不画、不记录、不打日志），两者不一致。行为不变，
+        // 只把"静默"变成"显式"——产品三处录制点都是先合成到 memory DC 再 BitBlt，
+        // 一旦有路径真把文本画进录制 DC，审计不该静默通过而文本消失。
+        if (device->recording != nullptr) {
+            reportUnsupported("drawTextRun",
+                              "recording DC has no pixel surface (EMR_EXTTEXTOUTW is not recorded)");
+        }
+        return;
+    }
     const CompatObject* font = asObject(device->font);
     const FontMetrics m = fontMetricsFor(font);
     const text::FaceSpec spec = faceSpecFor(font);
@@ -1600,6 +1619,17 @@ HDC CreateCompatibleDC(HDC hdc) {
     device->pen = toHandle(&stockTable()[BLACK_PEN]);
     device->brush = toHandle(&stockTable()[WHITE_BRUSH]);
     device->font = toHandle(&stockTable()[DEFAULT_GUI_FONT]);
+    // S4-3：Win32 语义里新建兼容 DC 自带一块 **1×1 单色位图**并已选中。缺了它，
+    // 首次 SelectObject(dc, 任意位图) 返回 nullptr——而"用返回值判成败"是最常见的
+    // Win32 写法（S4-3 的测试正是这么写，于是"位图其实选中了"被判成失败，进而
+    // 回读缓冲没建成、连 PNG 都走不到）。分配失败不拖垮整个 DC：Win32 也不会为此
+    // 让 CreateCompatibleDC 返回失败，只是退化成"首次 SelectObject 仍返回空"。
+    if (CompatObject* initial = allocateBitmap(1, 1, true)) {
+        initial->monochrome = true;
+        initial->selectedCount = 1;
+        device->bitmap = initial;
+        device->ownedBitmap = initial;
+    }
     return reinterpret_cast<HDC>(device);
 }
 
@@ -1730,6 +1760,15 @@ BOOL DeleteDC(HDC hdc) {
     device->recording = nullptr;
     // 有意偏离：真实 Windows 在仍有非库存对象被选入时返回 FALSE。这里选宽容——
     // 摘掉位图并释放 DC，避免调用方漏写还原时整块帧缓冲泄漏。
+    // S4-3：初始 1×1 位图归 DC 所有，必须在这里释放。先把自己从 bitmap 槽摘掉，
+    // 否则下面那段"摘掉选中计数"会重复减一次；不动的话每个 DC 泄漏一个 GDI 对象，
+    // 而产品侧十几处 GetGuiResources 平衡断言正好会因此变红。
+    if (CompatObject* initial = device->ownedBitmap) {
+        device->ownedBitmap = nullptr;
+        if (device->bitmap == initial) device->bitmap = nullptr;
+        if (initial->selectedCount > 0) initial->selectedCount -= 1;
+        releaseObject(initial);
+    }
     if (device->bitmap != nullptr && device->bitmap->selectedCount > 0) {
         device->bitmap->selectedCount -= 1;
     }
@@ -2391,7 +2430,9 @@ int GetObjectW(HGDIOBJ h, int c, LPVOID pv) {
             bitmap.bmHeight = object->height;
             bitmap.bmWidthBytes = object->stride;
             bitmap.bmPlanes = 1;
-            bitmap.bmBitsPixel = 32;
+            // 单色位图如实报 1：Win32 的 CreateCompatibleDC 初值位图是 1bpp，
+            // 调用点若按 bmBitsPixel 判"这块表面能不能直接写 32bpp"会看到正确答案。
+            bitmap.bmBitsPixel = object->monochrome ? 1 : 32;
             // DDB 没有可寻址像素数组：Win32 文档明写 bmBits 为 NULL。本层内部
             // 两种位图共用一块内存，但对外必须区分，否则
             // CampaignDeviceBitmapContract 的 `bmBits==nullptr` 判据失效。
