@@ -11,6 +11,7 @@
 
 #include <iostream>
 #include <charconv>
+#include <cstdlib>
 #include <string>
 
 #ifdef _WIN32
@@ -27,6 +28,15 @@ int runRuntimeLanMenuHostLifecycleSmoke(const RuntimeConfig&, const std::string&
 
 #ifdef _WIN32
 int runRuntimeInternetMenuHostLifecycleSmoke(const RuntimeConfig&, const std::string&);
+#endif
+
+#ifdef __APPLE__
+// ON-3-01 上屏自证的计数（实现见 compat/win32/src/RuntimeAppleWindowSurface.mm）。
+// 只前向声明不 include：那个头属于 APPLE 侧，保持本 TU 的平台依赖最少。
+namespace concord_compat::apple {
+int onscreenAttestRecords();
+int onscreenAttestFailures();
+}
 #endif
 
 namespace {
@@ -95,6 +105,8 @@ struct RuntimeCommandLine {
     bool skipSkirmishMenu = false;
     std::string mainMenuUiSmokeOutput;
     std::string skirmishUiSmokeOutput;
+    // ON-3-01：上屏自证的输出目录；非空时走 --onscreen-attest-smoke。
+    std::string onscreenAttestDir;
     std::string campaignUiSmokeOutput;
     std::string internetMenuSkinSmokeOutput;
     std::string vxlAtlasObjects;
@@ -368,6 +380,20 @@ RuntimeCommandLine parseRuntimeCommandLine(int argc, char** argv) {
                     index,
                     "--main-menu-ui-smoke-test",
                     commandLine.mainMenuUiSmokeOutput,
+                    commandLine.errorMessage
+                )) {
+                return commandLine;
+            }
+            continue;
+        }
+
+        if (argument == "--onscreen-attest-smoke") {
+            if (!readRequiredValue(
+                    argc,
+                    argv,
+                    index,
+                    "--onscreen-attest-smoke",
+                    commandLine.onscreenAttestDir,
                     commandLine.errorMessage
                 )) {
                 return commandLine;
@@ -989,6 +1015,30 @@ int runRuntimeApplication(int argc, char** argv) {
 
     if (!commandLine.vxlAtlasObjects.empty()) {
         return runRuntimeVoxelAtlasDump(config, commandLine.vxlAtlasObjects);
+    }
+
+    if (!commandLine.onscreenAttestDir.empty()) {
+#ifdef __APPLE__
+        // ON-3-01：走**真实启动**，不借离屏 smoke。
+        // 本轮实测：main-menu / skirmish / interaction 三条 smoke 全都只画到 DIB
+        // （日志里没有 [cocoa] NSWindow created），present 一次都没被调用，
+        // 拿它们做上屏取证只会得到 0 条记录。取证必须挂在真实呈现路径上。
+        ::setenv("CONCORD_ONSCREEN_ATTEST_DIR", commandLine.onscreenAttestDir.c_str(), 1);
+        // 自动退出由 .mm 侧的 CONCORD_ONSCREEN_ATTEST_LIMIT 控制（默认拿 1 帧即终止）。
+        // 不用 Cmd+Q：世界视图的窗口不是 key window，键等价物收不到，实测会一直挂着。
+        std::cout << "Onscreen attest: dir=" << commandLine.onscreenAttestDir
+                  << " (real startup, not offscreen smoke)\n";
+        const int windowExit =
+            runRuntimeWindowWithMultiplayerFailureRecovery(config, commandLine.presentation);
+        const int records = concord_compat::apple::onscreenAttestRecords();
+        const int failures = concord_compat::apple::onscreenAttestFailures();
+        std::cout << "Onscreen attest: windowExit=" << windowExit
+                  << " records=" << records << " failures=" << failures << "\n";
+        return failures == 0 && records >= 1 ? 0 : 1;
+#else
+        std::cerr << "Onscreen attest requires the Apple Cocoa window surface\n";
+        return 1;
+#endif
     }
 
     if (commandLine.skirmishWindow == "sdl3") {

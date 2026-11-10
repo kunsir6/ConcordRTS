@@ -33,6 +33,13 @@ void present(const Surface& surface);
 // 关窗口时调用。可重复调用。
 void shutdown();
 
+// ON-3-01 上屏自证（CONCORD_ONSCREEN_ATTEST_DIR=<dir> 开启）。
+// 每次 present 之后把 layer.contents 的图像读回、重画成位图，与同一帧 DIB 的
+// RGB 24 位 FNV-1a 对账，逐条写入 <dir>/onscreen-attest.log。
+// 这两个计数供 smoke 入口判定退出码；未开启时恒为 0。
+int onscreenAttestRecords();
+int onscreenAttestFailures();
+
 // ---------------------------------------------------------------------------
 // Q-06: 输入接入
 // ---------------------------------------------------------------------------

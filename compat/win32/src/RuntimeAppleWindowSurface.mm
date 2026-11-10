@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -60,6 +61,149 @@ bool gQuitSelfTestPosted = false;
 constexpr CGBitmapInfo kSurfaceBitmapInfo = static_cast<CGBitmapInfo>(
     static_cast<std::uint32_t>(kCGBitmapByteOrder32Little)
     | static_cast<std::uint32_t>(kCGImageAlphaNoneSkipFirst));
+
+// ---------------------------------------------------------------------------
+// ON-3-01 上屏自证
+//
+// "present 被调用" 不等于 "屏幕上有这幅画"（ON-2-05 就是贴了一张黑图而日志全绿）。
+// 在没有屏幕录制授权的环境里，唯一可信的证据是：把**刚从 layer.contents 读回来**
+// 的那张图重新画成位图，与同一帧 DIB 逐像素对账。它证明的是「贴上去的对象 ==
+// 渲染出来的帧」，不证明「显示器上真的亮了」——后者只能靠人眼或窗口级抓图
+// （ON-3-02 / ON-3-03）。两层证据分开记，别混成一句"上屏成功"。
+//
+// 两个必须做对的细节：
+//   · 只比 B,G,R 三个字节。32bpp BI_RGB 的第 4 字节不是 alpha（S14b 的教训）：
+//     GDI 写像素时保留目标原值，CGImage 用 NoneSkipFirst 直接跳过它，两边本来
+//     就不该相等，拿它参与 hash 会得到一条永远红的假断言。
+//   · **不要翻转 CTM**。CGImage 的数据第 0 行是图像顶行，DrawImage 到
+//     (0,0,w,h) 时 CG 会把顶行对齐到 rect 顶部，而 CGBitmapContext 的缓冲第 0
+//     行正是顶行——两者已经对齐。本轮实测：不翻转 hash == dibHash，
+//     翻转后 0x890043ac != 0x674d476c（整幅上下颠倒）。
+//     （别与 rules.cg_bitmap_row_zero_is_top 混淆：那条说的是"按底行解释缓冲
+//     会得到翻转的字形"，这里是"画进缓冲时不要额外翻转"。）
+int gAttestFailures = 0;
+int gAttestRecords = 0;
+int gAttestState = 0;  // 0=未探测 1=开 2=关
+int gAttestLimit = 1;
+std::string gAttestDir;
+std::FILE* gAttestLog = nullptr;
+
+std::uint32_t attestHash24(const void* pixels, int width, int height, int bytesPerRow) {
+    const auto* base = static_cast<const unsigned char*>(pixels);
+    std::uint32_t hash = 2166136261u;
+    for (int y = 0; y < height; ++y) {
+        const unsigned char* row = base
+            + static_cast<std::size_t>(y) * static_cast<std::size_t>(bytesPerRow);
+        for (int x = 0; x < width; ++x) {
+            const unsigned char* pixel = row + static_cast<std::size_t>(x) * 4u;
+            hash = (hash ^ pixel[0]) * 16777619u;
+            hash = (hash ^ pixel[1]) * 16777619u;
+            hash = (hash ^ pixel[2]) * 16777619u;
+        }
+    }
+    return hash;
+}
+
+void attestEnsureOpen() {
+    if (gAttestState != 0) return;
+    const char* dir = std::getenv("CONCORD_ONSCREEN_ATTEST_DIR");
+    if (dir == nullptr || dir[0] == '\0') { gAttestState = 2; return; }
+    gAttestDir = dir;
+    const std::string path = gAttestDir + "/onscreen-attest.log";
+    // 追加而不是覆盖：不同界面要分进程驱动（主菜单 / 世界 / 指针导航切页），
+    // 一个目录里的记录是这几次运行合起来的取证链。
+    gAttestLog = std::fopen(path.c_str(), "a");
+    if (gAttestLog == nullptr) {
+        gAttestState = 2;
+        std::fprintf(stderr, "[attest] cannot open %s\n", path.c_str());
+        return;
+    }
+    gAttestState = 1;
+    // 默认拿 1 帧就退出：主菜单与世界首帧各跑一次即能覆盖两档界面。
+    // 要看指针导航这类多帧序列时把 LIMIT 调大（例如 3 覆盖 首页→单人页→回程）。
+    if (const char* limit = std::getenv("CONCORD_ONSCREEN_ATTEST_LIMIT")) {
+        const int value = std::atoi(limit);
+        if (value > 0) gAttestLimit = value;
+    }
+    std::fseek(gAttestLog, 0, SEEK_END);
+    if (std::ftell(gAttestLog) == 0) {
+        std::fprintf(gAttestLog,
+            "# ON-3-01 present self-attestation: layer.contents re-read, RGB 24-bit FNV-1a vs same-frame DIB\n");
+    }
+    std::fprintf(stderr, "[attest] log=%s\n", path.c_str());
+}
+
+void attestPresent(const concord_compat::apple::Surface& surface) {
+    attestEnsureOpen();
+    if (gAttestState != 1) return;
+    @autoreleasepool {
+        CGImageRef attached = (__bridge CGImageRef)gView.layer.contents;
+        const bool attachedMatchesSurface = attached != nullptr
+            && CGImageGetWidth(attached) == static_cast<std::size_t>(surface.width)
+            && CGImageGetHeight(attached) == static_cast<std::size_t>(surface.height);
+        std::uint32_t layerHash = 0;
+        const std::uint32_t dibHash = attestHash24(
+            surface.pixels, surface.width, surface.height, surface.bytesPerRow);
+        // 重绘固定**不翻转** CTM（理由见文件头：翻转会让整幅上下颠倒，实测
+        // hash 由 0x674d476c 变成 0x890043ac）。另取一条不经重绘的交叉证据：
+        // CGImage 的 provider 数据本身。两条都与 dibHash 并列写进日志，
+        // 对不上时能立刻分辨是"重绘解释错"还是"贴的根本不是这帧"。
+        const auto drawHash = [&]() -> std::uint32_t {
+            std::vector<unsigned char> canvas(
+                static_cast<std::size_t>(surface.bytesPerRow) * static_cast<std::size_t>(surface.height), 0);
+            CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+            CGContextRef context = CGBitmapContextCreate(canvas.data(),
+                static_cast<std::size_t>(surface.width), static_cast<std::size_t>(surface.height),
+                8, static_cast<std::size_t>(surface.bytesPerRow), colorSpace, kSurfaceBitmapInfo);
+            CGColorSpaceRelease(colorSpace);
+            if (context == nullptr) return 0xFFFFFFFFu;
+            CGContextSetBlendMode(context, kCGBlendModeCopy);
+            CGContextDrawImage(context,
+                CGRectMake(0, 0, static_cast<CGFloat>(surface.width), static_cast<CGFloat>(surface.height)),
+                attached);
+            CGContextRelease(context);
+            return attestHash24(canvas.data(), surface.width, surface.height, surface.bytesPerRow);
+        };
+        std::uint32_t providerHash = 0;
+        if (attachedMatchesSurface) {
+            layerHash = drawHash();
+            if (CFDataRef data = CGDataProviderCopyData(CGImageGetDataProvider(attached))) {
+                providerHash = attestHash24(CFDataGetBytePtr(data), surface.width, surface.height,
+                    static_cast<int>(CGImageGetBytesPerRow(attached)));
+                CFRelease(data);
+            }
+        }
+        const bool match = attachedMatchesSurface && layerHash == dibHash;
+        // surface.visible=false 是 SW_HIDE 语义，此时窗口本就不该可见；
+        // 只在"要求可见"时断言可见，避免把隐藏帧记成失败。
+        const bool visibleOk = !surface.visible || gWindow.isVisible;
+        ++gAttestRecords;
+        if (!match || !visibleOk) ++gAttestFailures;
+        std::fprintf(gAttestLog,
+            "idx=%d size=%dx%d title=\"%s\" layerHash=0x%08x dibHash=0x%08x"
+            " providerHash=0x%08x match=%s"
+            " visible=%d key=%d scale=%.1f frame=%.0fx%.0f layerContents=%s\n",
+            gAttestRecords, surface.width, surface.height,
+            surface.titleUtf8 != nullptr ? surface.titleUtf8 : "",
+            layerHash, dibHash, providerHash, match ? "yes" : "no",
+            gWindow.isVisible ? 1 : 0, gWindow.isKeyWindow ? 1 : 0,
+            gWindow.backingScaleFactor,
+            gWindow.frame.size.width, gWindow.frame.size.height,
+            gView.layer.contents != nil ? "set" : "nil");
+        std::fflush(gAttestLog);
+        if (gAttestRecords >= gAttestLimit) {
+            // 就在 present 里退出，不排队等 pumpEvents：世界视图的主循环不经过
+            // 那条路径（实测首帧之后 pumpEvents 不再被调用，进程一直挂着）。
+            // _Exit 不跑 static 析构：本项目句柄表/菜单静态对象在退出期有自己的坑
+            // （rules.handle_table_outlives_process），取证轮不该引入 SIGABRT。
+            // 日志上面已 fflush，记录不会丢。
+            // 退出码必须带上失败数：_Exit(0) 会把 match=no 掩盖成"成功"。
+            std::fprintf(stderr, "[attest] done: records=%d failures=%d limit=%d\n",
+                gAttestRecords, gAttestFailures, gAttestLimit);
+            std::_Exit(gAttestFailures == 0 ? 0 : 1);
+        }
+    }
+}
 
 }  // namespace
 
@@ -270,6 +414,11 @@ void present(const Surface& surface) {
             if (gWindow.isVisible) [gWindow orderOut:nil];
         }
 
+        // ON-3-01：可见性状态已经更新，此时取证才拿到真实窗口状态。
+        // 放在 CGImageRelease 之后也没问题——attestPresent 从 layer.contents
+        // 读回图像对象，不复用这一帧的局部 image 引用。
+        attestPresent(surface);
+
         // ON-1-03 自测注入（见 gQuitSelfTestPosted 的注释）。只在窗口建好之后
         // 投一次：performKeyEquivalent 需要 windowNumber 才认键。
         if (!gQuitSelfTestPosted) {
@@ -294,8 +443,15 @@ void present(const Surface& surface) {
     }
 }
 
+int onscreenAttestFailures() { return gAttestFailures; }
+int onscreenAttestRecords() { return gAttestRecords; }
+
 void shutdown() {
     @autoreleasepool {
+        // 只 flush 不 close：一个 smoke 入口里可能连续跑多个界面，中间会
+        // shutdown/重建窗口；关掉文件会让后半个进程静默停止取证。
+        // 进程结束由 OS 回收这个 FILE*（与 compat 句柄表同样的取舍）。
+        if (gAttestLog != nullptr) std::fflush(gAttestLog);
         if (gWindow != nil) {
             [gWindow orderOut:nil];
             gWindow = nil;
