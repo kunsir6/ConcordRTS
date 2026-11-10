@@ -108,9 +108,13 @@ void present(const Surface& surface) {
             // 否则第二次 ShowWindow 会往一个已释放的对象发消息。
             gWindow.releasedWhenClosed = NO;
             const char* title = surface.titleUtf8;
+            // ON-2-05：空白首绘被过滤之后，**第一个真正有内容的窗口通常是主菜单的
+            // 子窗口**，而子窗口没有标题（titleUtf8 为空）。此时若退回进程名，用户
+            // 看到的就是"ConcordRTS"而不是游戏名——标题栏是唯一立刻可见的交付细节，
+            // 不该因为呈现顺序变化而退化。所以空标题时用游戏名兜底。
             gWindow.title = (title != nullptr && title[0] != '\0')
                 ? [NSString stringWithUTF8String:title]
-                : @"ConcordRTS";
+                : @"Command & Conquer: Yuri's Revenge";
 
             gView = [[NSView alloc] initWithFrame:contentRect];
             gView.wantsLayer = YES;
@@ -118,6 +122,11 @@ void present(const Surface& surface) {
             // "把客户区铺满"的语义，不是"按原始尺寸展示图片"。
             gView.layer.contentsGravity = kCAGravityResize;
             gView.layer.magnificationFilter = kCAFilterNearest;
+            // ON-2-03：contentsScale 必须跟随 backing scale，否则在 2x 屏上
+            // 一张 1024x640 的图像会被当 1x 内容放进 2048x1280 的 backing store，
+            // 由 CoreAnimation 再放大一倍——画面能看，但每个游戏像素糊成 4 个。
+            // （实测这台机器 backingScaleFactor=2.0 而 layer 默认 1.0。）
+            gView.layer.contentsScale = gWindow.backingScaleFactor;
             gWindow.contentView = gView;
 
             [gWindow center];
@@ -169,13 +178,85 @@ void present(const Surface& surface) {
             provider,
             nullptr, false, kCGRenderingIntentDefault);
         if (image != nullptr) {
+            // ON-2-05：显式包一层 CATransaction 并提交。
+            //
+            // 这是"窗口在、标题对、客户区全黑"的根因。Cocoa 的隐式事务提交挂在
+            // NSRunLoop 的 beforeWaiting/exit observer 上，而本项目**从不跑**
+            // [NSApp run]——主循环是 compat 自己的 GetMessageW，只在 pumpEvents
+            // 里用 2ms 有界超时调 nextEventMatchingMask。那个调用确实会进 run loop
+            // （S12 那次 distantPast 阻塞在 mach_msg 就是证据），但 2ms 常常还没
+            // 走到 beforeWaiting 就返回了，于是 layer 树改了一直没被提交到
+            // render server：日志打出 "first frame attached"，屏幕上一个像素都没有。
+            //
+            // 显式 commit 立刻把事务推给 render server，不依赖 run loop 的节奏。
+            // disableActions 是为了压掉 contents 变更的隐式 0.25s 淡入动画——
+            // 游戏每帧都要换内容，带动画会让画面持续落后一到两帧。
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
             gView.layer.contents = (__bridge id)image;
-            CGImageRelease(image);
-            static bool announcedFirstFrame = false;
-            if (!announcedFirstFrame) {
-                announcedFirstFrame = true;
-                std::fprintf(stderr, "[cocoa] first frame attached to layer.contents\n");
+            [CATransaction commit];
+
+            // 首帧诊断：一条日志就能区分三种"黑屏"——view 尺寸为 0（没布局）、
+            // layer 为 nil（wantsLayer 没生效）、contents 为 nil（事务没提交）。
+            // 注意必须在 CGImageRelease 之前读尺寸，否则是 use-after-free。
+            static long long presentIndex = 0;
+            ++presentIndex;
+            if (presentIndex <= 2 || presentIndex == 30) {
+                const NSRect viewBounds = gView.bounds;
+                const CGRect layerBounds = gView.layer.bounds;
+                std::fprintf(
+                    stderr,
+                    "[cocoa] frame %lld: view=%.0fx%.0f layer=%.0fx%.0f contents=%s"
+                    " scale=%.1f win=%.0fx%.0f img=%zux%zu\n",
+                    presentIndex,
+                    viewBounds.size.width, viewBounds.size.height,
+                    layerBounds.size.width, layerBounds.size.height,
+                    gView.layer.contents != nil ? "set" : "nil",
+                    gWindow.backingScaleFactor,
+                    gWindow.frame.size.width, gWindow.frame.size.height,
+                    CGImageGetWidth(image), CGImageGetHeight(image));
             }
+
+            // ON-2-05 二分诊断（CONCORD_PRESENT_DIAG=1 才开，生产零开销）：
+            //
+            // "客户区全黑"有三条互斥的可能，一条日志就能分开：
+            //   A. DIB 里本来就是黑的        → px0 全 0
+            //   B. CGImage 把 BGRA 解释错了   → px0 有值但 cgProbe 全 0
+            //   C. 图像正确但 layer 没被合成 → px0/cgProbe 都有值，屏幕仍黑
+            //
+            // 另外把 layer 底色刷成洋红：截图里出现洋红说明 layer 渲染链路是通的，
+            // 那黑的就是 contents 本身；仍然全黑则说明问题在 NSView/NSWindow 这一层。
+            static const bool presentDiag = []() {
+                const char* value = std::getenv("CONCORD_PRESENT_DIAG");
+                return value != nullptr && value[0] == '1';
+            }();
+            if (presentDiag && presentIndex <= 2) {
+                const auto* bytes = static_cast<const unsigned char*>(surface.pixels);
+                std::fprintf(stderr, "[cocoa] dib px0=%02x %02x %02x %02x\n",
+                             bytes[0], bytes[1], bytes[2], bytes[3]);
+                unsigned char probe[4] = {0, 0, 0, 0};
+                CGContextRef probeContext = CGBitmapContextCreate(
+                    probe, 1, 1, 8, 4, colorSpace, kSurfaceBitmapInfo);
+                if (probeContext != nullptr) {
+                    CGContextDrawImage(probeContext, CGRectMake(0, 0, 1, 1), image);
+                    CGContextRelease(probeContext);
+                    std::fprintf(stderr, "[cocoa] cg  px0=%02x %02x %02x %02x\n",
+                                 probe[0], probe[1], probe[2], probe[3]);
+                }
+                gView.layer.backgroundColor = [NSColor magentaColor].CGColor;
+                // 第二帧把 contents 摘掉，只留洋红底：截图上出现洋红就证明
+                // layer 渲染链路是通的，黑的是 contents 本身；仍然全黑则说明
+                // 问题在 NSView/NSWindow 这一层（view 没进窗口树 / 窗口没被合成）。
+                if (presentIndex == 2) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    gView.layer.contents = nil;
+                    [CATransaction commit];
+                    std::fprintf(stderr, "[cocoa] diag: contents cleared, magenta only\n");
+                }
+                std::fprintf(stderr, "[cocoa] diag: layer backgroundColor=magenta\n");
+            }
+            CGImageRelease(image);
         }
         CGDataProviderRelease(provider);
         CGColorSpaceRelease(colorSpace);

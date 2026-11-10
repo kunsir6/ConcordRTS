@@ -935,8 +935,43 @@ HWND gPresentedWindow = nullptr;
 // 一个小输入框。记住历史面积就能挡住这种"小控件捡漏"。
 long long gPresentedArea = 0;
 
+// ON-2-05：判断这一帧是不是"还没画内容的空白首绘"。
+//
+// 为什么必须挡：主窗口（1024x640）先于主菜单子窗口 EndPaint，那一次 surface
+// 里什么都没有（全 0）。它一抢到 gPresentedWindow，主菜单就再也上不来了——
+// 两边面积相等，而抢位规则要求"严格更大"。屏幕于是永久停在一张全黑帧上，
+// 而日志一切正常（`first frame attached`、`contents=set`、尺寸正确）。
+//
+// 采样 8x8 网格而不是全扫：1.9 MB 的 surface 逐像素检查每帧要 2 ms 以上，
+// 而空白帧的特征是"整幅全 0"，网格采样足够判定，且漏判只会退化成当前行为。
+bool surfaceLooksBlank(const unsigned char* bits, int width, int height, int stride) {
+    for (int gy = 0; gy < 8; ++gy) {
+        const int y = height > 1 ? (height - 1) * gy / 7 : 0;
+        const unsigned char* row = bits + static_cast<std::size_t>(y) * stride;
+        for (int gx = 0; gx < 8; ++gx) {
+            const int x = width > 1 ? (width - 1) * gx / 7 : 0;
+            const unsigned char* px = row + static_cast<std::size_t>(x) * 4;
+            if (px[0] != 0 || px[1] != 0 || px[2] != 0) return false;
+        }
+    }
+    return true;
+}
+
 void maybePresentClientFrame(CompatWindow* w) {
     if (w == nullptr || w->surface == nullptr) return;
+    DIBSECTION section{};
+    if (::GetObjectW(w->surface, static_cast<int>(sizeof(section)), &section) == 0) return;
+    const auto* bits = static_cast<const unsigned char*>(section.dsBm.bmBits);
+    if (bits == nullptr || section.dsBm.bmWidth <= 0 || section.dsBm.bmHeight <= 0
+        || section.dsBm.bmBitsPixel != 32) {
+        return;
+    }
+    // 空白帧既不呈现、也不参与抢位——它没有资格成为"屏幕上的那一幅画"。
+    // 放在抢位判定之前是关键：先抢位再过滤，等于黑帧先把位置占了。
+    if (surfaceLooksBlank(bits, section.dsBm.bmWidth, section.dsBm.bmHeight,
+                          section.dsBm.bmWidth * 4)) {
+        return;
+    }
     {
         const long long area = static_cast<long long>(clientWidth(w))
             * static_cast<long long>(clientHeight(w));
@@ -952,13 +987,6 @@ void maybePresentClientFrame(CompatWindow* w) {
         if (!takeOver) return;
         gPresentedWindow = toHwnd(w);
         gPresentedArea = area;
-    }
-    DIBSECTION section{};
-    if (::GetObjectW(w->surface, static_cast<int>(sizeof(section)), &section) == 0) return;
-    const auto* bits = static_cast<const unsigned char*>(section.dsBm.bmBits);
-    if (bits == nullptr || section.dsBm.bmWidth <= 0 || section.dsBm.bmHeight <= 0
-        || section.dsBm.bmBitsPixel != 32) {
-        return;
     }
     concord_compat::apple::Surface surface;
     surface.pixels = bits;
