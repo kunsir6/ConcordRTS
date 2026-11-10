@@ -261,6 +261,8 @@ elseif(APPLE)
     # 放在 APPLE 分支末尾，既不触碰上面的 if(WIN32) 分支，也不影响 Windows 的
     # 任何目标——Windows 侧这个文件根本不会被 include。
     include("${CMAKE_CURRENT_LIST_DIR}/AppleAudioContracts.cmake")
+    # T-03：宽字符运行期语义（含 BMP 外码点不丢字符）。
+    include("${CMAKE_CURRENT_LIST_DIR}/AppleTextContracts.cmake")
 endif()
 
 
