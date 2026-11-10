@@ -17,7 +17,10 @@
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cctype>
 #include <string>
 
 namespace {
@@ -25,6 +28,10 @@ namespace {
 NSWindow* gWindow = nil;
 NSView* gView = nil;
 bool gApplicationReady = false;
+
+concord_compat::apple::InputSink gInputSink = nullptr;
+void* gInputContext = nullptr;
+bool gInputTrace = false;  // CONCORD_INPUT_TRACE=1 时打一行/事件，取证用
 
 // 32bpp DIB 的字节序是 B,G,R,X（小端），所以 CGImage 用
 // kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst：
@@ -141,6 +148,127 @@ void shutdown() {
         }
         gView = nil;
         gApplicationReady = false;
+    }
+}
+
+void setInputSink(InputSink sink, void* context) {
+    gInputSink = sink;
+    gInputContext = context;
+    static const bool trace = []() {
+        const char* value = std::getenv("CONCORD_INPUT_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    gInputTrace = trace;
+}
+
+namespace {
+
+// macOS 的硬件键码 → Windows 虚拟键码。只覆盖站点实际会用到的键：
+// 菜单靠鼠标，键盘只需要 Esc / Enter / 方向 / 空格 这几个。
+// 字母和数字走 characters 分支（见下面），不在这张表里。
+int translateKeyCode(unsigned short macKeyCode) {
+    switch (macKeyCode) {
+        case 0x35: return 0x1B;  // Escape
+        case 0x24: return 0x0D;  // Return
+        case 0x30: return 0x09;  // Tab
+        case 0x33: return 0x08;  // Backspace
+        case 0x31: return 0x20;  // Space
+        case 0x7B: return 0x25;  // Left
+        case 0x7C: return 0x27;  // Right
+        case 0x7D: return 0x28;  // Down
+        case 0x7E: return 0x26;  // Up
+        case 0x73: return 0x24;  // Home
+        case 0x77: return 0x23;  // End
+        case 0x74: return 0x21;  // PageUp
+        case 0x79: return 0x22;  // PageDown
+        case 0x75: return 0x2E;  // Delete
+        default:   return 0;
+    }
+}
+
+void emit(NSEvent* event) {
+    if (gInputSink == nullptr || gView == nil) return;
+
+    concord_compat::apple::InputEvent out;
+    const NSEventType type = event.type;
+
+    switch (type) {
+        case NSEventTypeMouseMoved:
+        case NSEventTypeLeftMouseDragged:
+        case NSEventTypeRightMouseDragged:
+        case NSEventTypeOtherMouseDragged:
+            out.kind = concord_compat::apple::InputEvent::Kind::MouseMove;
+            break;
+        case NSEventTypeLeftMouseDown:   out.kind = concord_compat::apple::InputEvent::Kind::LeftDown; break;
+        case NSEventTypeLeftMouseUp:     out.kind = concord_compat::apple::InputEvent::Kind::LeftUp; break;
+        case NSEventTypeRightMouseDown:  out.kind = concord_compat::apple::InputEvent::Kind::RightDown; break;
+        case NSEventTypeRightMouseUp:    out.kind = concord_compat::apple::InputEvent::Kind::RightUp; break;
+        case NSEventTypeOtherMouseDown:  out.kind = concord_compat::apple::InputEvent::Kind::MiddleDown; break;
+        case NSEventTypeOtherMouseUp:    out.kind = concord_compat::apple::InputEvent::Kind::MiddleUp; break;
+        case NSEventTypeScrollWheel:     out.kind = concord_compat::apple::InputEvent::Kind::Wheel; break;
+        case NSEventTypeKeyDown:         out.kind = concord_compat::apple::InputEvent::Kind::KeyDown; break;
+        case NSEventTypeKeyUp:           out.kind = concord_compat::apple::InputEvent::Kind::KeyUp; break;
+        default: return;  // FlagsChanged / 窗口事件等一律忽略
+    }
+
+    // 坐标：AppKit 的原点在左下，客户区 DIB 的原点在左上，所以要翻 y。
+    // 不翻的话点击会落在垂直镜像的位置——菜单上点"单人游戏"会命中"退出"。
+    if (type != NSEventTypeKeyDown && type != NSEventTypeKeyUp) {
+        const NSPoint local = [gView convertPoint:event.locationInWindow fromView:nil];
+        out.x = static_cast<int>(std::lround(local.x));
+        out.y = static_cast<int>(std::lround(gView.bounds.size.height - local.y));
+    }
+
+    if (type == NSEventTypeScrollWheel) {
+        // WHEEL_DELTA 是 120。scrollingDeltaY 单位是行，正负与 Windows 相反。
+        out.wheelDelta = static_cast<int>(std::lround(-event.scrollingDeltaY * 120.0));
+        if (out.wheelDelta == 0) return;
+    }
+
+    if (type == NSEventTypeKeyDown || type == NSEventTypeKeyUp) {
+        out.keyCode = translateKeyCode(event.keyCode);
+        if (out.keyCode == 0) {
+            // 字母/数字：用 characters 取可打印字符，取大写 ASCII 当 VK。
+            // VK_A..VK_Z 与 VK_0..VK_9 正好等于大写 ASCII。
+            NSString* chars = event.charactersIgnoringModifiers;
+            if (chars.length > 0) {
+                const unichar c = [chars characterAtIndex:0];
+                if (c < 0x80) {
+                    const char upper = static_cast<char>(std::toupper(c));
+                    if ((upper >= 'A' && upper <= 'Z') || (upper >= '0' && upper <= '9')) {
+                        out.keyCode = upper;
+                    }
+                }
+            }
+        }
+        if (out.keyCode == 0) return;
+    }
+
+    if (gInputTrace) {
+        std::fprintf(stderr, "[input] kind=%d x=%d y=%d key=%d wheel=%d\n",
+                     static_cast<int>(out.kind), out.x, out.y, out.keyCode, out.wheelDelta);
+    }
+    gInputSink(out, gInputContext);
+}
+
+}  // namespace
+
+void pumpEvents() {
+    if (gInputSink == nullptr || gWindow == nil) return;
+    @autoreleasepool {
+        // distantPast 让调用立刻返回（不阻塞），把所有排队事件一次排空。
+        // 只在窗口是关键窗口/主窗口时取，否则会偷走别的 App 的事件焦点语义。
+        for (;;) {
+            NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                                untilDate:[NSDate distantPast]
+                                                   inMode:NSDefaultRunLoopMode
+                                                  dequeue:YES];
+            if (event == nil) break;
+            // 窗口关闭按钮走标准关闭路径：转成 quit，否则点了红叉没反应。
+            if (event.type == NSEventTypeAppKitDefined) continue;
+            if (event.window != nil && event.window != gWindow) continue;
+            emit(event);
+        }
     }
 }
 

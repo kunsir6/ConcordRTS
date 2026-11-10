@@ -1236,6 +1236,9 @@ using WNDPROC = LRESULT (*)(HWND, UINT, WPARAM, LPARAM);
 #define MK_RBUTTON 0x0002
 #define MK_SHIFT 0x0004
 #define MK_CONTROL 0x0008
+// Q-06: 中键。Windows 取值 0x0010；漏掉它会让 WM_MBUTTONDOWN 的 wParam
+// 变成一个未定义标识符——而中键在绝大多数菜单里根本用不到，很容易漏到运行时。
+#define MK_MBUTTON 0x0010
 
 #define SW_PARENTCLOSING 1
 #define SW_PARENTOPENING 3

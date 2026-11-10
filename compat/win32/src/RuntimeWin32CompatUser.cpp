@@ -831,6 +831,39 @@ void maybeDumpClientFrame(CompatWindow* w) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Q-06：AppKit 输入 → Win32 消息
+// ---------------------------------------------------------------------------
+// 只有显示层接管是不够的：窗口能看见，但点击进不了 compat 的消息队列，
+// 菜单就是"能看不能点"。这个回调把 .mm 翻译好的事件翻成 WM_* 投回队列，
+// 之后产品原有的窗口过程（hover、点按钮、键盘快捷键）全部照常工作。
+// 目标窗口通过 sink 的 context 传进来，不用全局变量：
+// 这样投递逻辑没有隐藏状态，也才能被自测直接驱动（见 tests 里的用法）。
+void appleInputDispatch(const concord_compat::apple::InputEvent& event, void* context) {
+    const HWND gInputTarget = reinterpret_cast<HWND>(context);
+    if (gInputTarget == nullptr) return;
+    using Kind = concord_compat::apple::InputEvent::Kind;
+    const LPARAM point = MAKELPARAM(static_cast<WORD>(event.x), static_cast<WORD>(event.y));
+    switch (event.kind) {
+    case Kind::MouseMove:  PostMessageW(gInputTarget, WM_MOUSEMOVE, 0, point); break;
+    case Kind::LeftDown:   PostMessageW(gInputTarget, WM_LBUTTONDOWN, MK_LBUTTON, point); break;
+    case Kind::LeftUp:     PostMessageW(gInputTarget, WM_LBUTTONUP, 0, point); break;
+    case Kind::RightDown:  PostMessageW(gInputTarget, WM_RBUTTONDOWN, MK_RBUTTON, point); break;
+    case Kind::RightUp:    PostMessageW(gInputTarget, WM_RBUTTONUP, 0, point); break;
+    case Kind::MiddleDown: PostMessageW(gInputTarget, WM_MBUTTONDOWN, MK_MBUTTON, point); break;
+    case Kind::MiddleUp:   PostMessageW(gInputTarget, WM_MBUTTONUP, 0, point); break;
+    case Kind::Wheel:
+        // WM_MOUSEWHEEL 的 delta 在高位字，且坐标是**屏幕**坐标——
+        // 但本层没有屏幕坐标系（纯离屏），产品只用 delta，所以低位置 0。
+        PostMessageW(gInputTarget, WM_MOUSEWHEEL,
+                     static_cast<WPARAM>(static_cast<unsigned>(event.wheelDelta) & 0xFFFFu) << 16,
+                     point);
+        break;
+    case Kind::KeyDown:    PostMessageW(gInputTarget, WM_KEYDOWN, static_cast<WPARAM>(event.keyCode), 0); break;
+    case Kind::KeyUp:      PostMessageW(gInputTarget, WM_KEYUP, static_cast<WPARAM>(event.keyCode), 0); break;
+    }
+}
+
 // Q-05：把一帧贴到真正的 NSWindow 上。与 maybeDumpClientFrame 走同一条取像素
 // 路径（GetObjectW + DIBSECTION），区别是这一个走**主路径**（无条件执行），
 // 那个是 getenv 开关下的取证工具。零配置是刻意的：屏幕上有没有画面不该取决于
@@ -853,6 +886,14 @@ void maybePresentClientFrame(CompatWindow* w) {
     surface.titleUtf8 = title.c_str();
     surface.visible = w->visible && !w->iconic;
     concord_compat::apple::present(surface);
+    // 第一次（也是唯一一次）把输入目标绑到这个窗口，并注册翻译回调。
+    // 放在 present 之后：present 已经完成了 NSApp/NSWindow 的初始化，
+    // 此时 AppKit 才可能开始产生事件。
+    static HWND boundTarget = nullptr;
+    if (boundTarget == nullptr) {
+        boundTarget = toHwnd(w);
+        concord_compat::apple::setInputSink(&appleInputDispatch, boundTarget);
+    }
 }
 
 BOOL EndPaint(HWND hWnd, const PAINTSTRUCT* lpPaint) {
@@ -1004,6 +1045,14 @@ BOOL GetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
     // 阻塞取消息：无消息时按"下一次定时器到期"睡眠（没有定时器就 1ms 轮询）。
     // 上限 8ms 是留给人手投递的跨线程消息：PostMessageW 不会唤醒这里的睡眠。
     for (;;) {
+        if (popMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, true)) {
+            if (lpMsg->message == WM_QUIT) return 0;
+            return 1;
+        }
+        // Q-06：主循环是 compat 自己的 GetMessageW，不跑 NSRunLoop，
+        // 所以必须在这里主动排空 AppKit 事件——否则事件永远躺在 AppKit 队列里，
+        // 窗口看得见、点不动。pumpEvents 内部不阻塞。
+        concord_compat::apple::pumpEvents();
         if (popMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, true)) {
             if (lpMsg->message == WM_QUIT) return 0;
             return 1;

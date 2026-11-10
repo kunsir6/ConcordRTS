@@ -33,6 +33,37 @@ void present(const Surface& surface);
 // 关窗口时调用。可重复调用。
 void shutdown();
 
+// ---------------------------------------------------------------------------
+// Q-06: 输入接入
+// ---------------------------------------------------------------------------
+// 为什么需要回调而不是让 .mm 直接调 PostMessageW：PostMessageW 的参数是
+// WPARAM/LPARAM 和 HWND，那些类型来自 compat 的 windows.h，而 .mm 里 include
+// windows.h 会和 Cocoa 的 BOOL 冲突（见文件头）。所以边界上定义一套自己的
+// 事件描述，由 compat 侧的回调翻译成 WM_* 消息。
+struct InputEvent {
+    enum class Kind {
+        MouseMove, LeftDown, LeftUp, RightDown, RightUp, MiddleDown, MiddleUp,
+        Wheel, KeyDown, KeyUp
+    };
+    Kind kind = Kind::MouseMove;
+    int x = 0;           // 客户区坐标，原点在**左上**（已从 AppKit 左下原点翻转过）
+    int y = 0;
+    int keyCode = 0;     // Windows 虚拟键码 VK_*
+    int wheelDelta = 0;  // 每格 120，与 WM_MOUSEWHEEL 的 WHEEL_DELTA 一致
+};
+
+using InputSink = void (*)(const InputEvent& event, void* context);
+
+// 注册接收方。context 由调用方定义（compat 侧传目标窗口）。
+void setInputSink(InputSink sink, void* context);
+
+// 把队列里攒下的 AppKit 事件全部取出来、翻译后交给 sink。
+// 必须由**消息循环**周期性调用（compat 的 GetMessageW 轮询里）：
+// NSApp 的事件分发依赖 NSRunLoop，而本项目的主循环是 compat 自己的
+// GetMessageW，不跑 NSRunLoop —— 不主动 nextEventMatchingMask 的话，
+// 事件永远待在 AppKit 队列里，窗口看得见但点不动。
+void pumpEvents();
+
 }  // namespace concord_compat::apple
 
 #endif  // CONCORD_COMPAT_APPLE_WINDOW_SURFACE_H
