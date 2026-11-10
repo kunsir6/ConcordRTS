@@ -3135,6 +3135,40 @@ BOOL Rectangle(HDC hdc, int left, int top, int right, int bottom) {
     rows.top = target.top;
     rows.rows.resize(static_cast<std::size_t>(target.bottom - target.top));
     for (RegionSpan& span : rows.rows) span = RegionSpan{target.left, target.right};
+
+    // 虚线描边不能走 paintShapeRows：那里的描边是"逐行色带"（哪一行、从哪到哪），
+    // 没有路径概念，PS_DOT 会被忠实画成**实线**。真 GDI 的 Rectangle 是一条闭合
+    // 路径，虚线沿路径推进。
+    //
+    // 这里按 RuntimeSelectedPathBatch 里 PolyPolyline 分量的同一顺序拆成 4 条边
+    // （右上 → 左上 → 左下 → 右下 → 右上），端点规则与 Polyline 一致（每段画首点、
+    // 末点留给下一段），于是"快路径"与"reference 逐条画"逐像素相同——这正是
+    // RuntimeSelectedPathBatchContract 那 300 个用例在比对的东西。
+    // 已知偏离（刻意保留）：真 GDI 的虚线相位跨边连续，这里每条边重启；两者视觉
+    // 上都是点线，且两条路径规则一致，不影响对拍结论。
+    if (pen.present && pen.style != PS_SOLID) {
+        if (!brush.hollow) {
+            const ShapeRows inner = erodeShapeRows(rows, pen.width);
+            PixelSink sink{device->bitmap, device};
+            if (!sink.ready()) return TRUE;
+            for (int index = 0; index < static_cast<int>(inner.rows.size()); ++index) {
+                const RegionSpan& span = inner.rows[static_cast<std::size_t>(index)];
+                sink.fillSpan(inner.top + index, span.left, span.right, brush.color, device->rop2);
+            }
+        }
+        const POINT corners[5] = {
+            {target.right - 1, target.top},
+            {target.left, target.top},
+            {target.left, target.bottom - 1},
+            {target.right - 1, target.bottom - 1},
+            {target.right - 1, target.top}
+        };
+        for (int index = 0; index < 4; ++index) {
+            strokeLine(*device, corners[index], corners[index + 1], true, false, pen, device->rop2);
+        }
+        return TRUE;
+    }
+
     paintShapeRows(*device, rows, pen, brush, device->rop2);
     return TRUE;
 }

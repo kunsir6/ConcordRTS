@@ -81,6 +81,27 @@ bool runRuntimeSelectedPathRasterPixelContract(std::string& error) {
         return left.x == right.x && left.y == right.y
             && std::equal(reference.pixels, reference.pixels + pixels, optimized.pixels);
     };
+    // 失败时只报"第 N 个用例不同"是不够的：像素差与"当前位置差"是两类完全不同的
+    // 缺陷，且首个差异坐标直接指向 stamp 的包围盒/裁剪边界。故把首个差异落成文本。
+    const auto firstDifference = [&]() -> std::string {
+        for (std::size_t index = 0; index < pixels; ++index) {
+            if (reference.pixels[index] == optimized.pixels[index]) continue;
+            char text[128]{};
+            std::snprintf(text, sizeof(text), " (first pixel %dx%d ref=0x%08x optimized=0x%08x)",
+                static_cast<int>(index % static_cast<std::size_t>(width)),
+                static_cast<int>(index / static_cast<std::size_t>(width)),
+                reference.pixels[index], optimized.pixels[index]);
+            return text;
+        }
+        POINT referencePoint{}, optimizedPoint{};
+        GetCurrentPositionEx(reference.dc, &referencePoint);
+        GetCurrentPositionEx(optimized.dc, &optimizedPoint);
+        char text[128]{};
+        std::snprintf(text, sizeof(text), " (pixels equal; current point ref=%d,%d optimized=%d,%d)",
+            static_cast<int>(referencePoint.x), static_cast<int>(referencePoint.y),
+            static_cast<int>(optimizedPoint.x), static_cast<int>(optimizedPoint.y));
+        return text;
+    };
 
     RuntimeSelectedPathRasterReferenceScope forceOptimized(false);
     for (int test = 0; test < 240; ++test) {
@@ -123,7 +144,7 @@ bool runRuntimeSelectedPathRasterPixelContract(std::string& error) {
                 raster.draw(RuntimePathRasterKind::Waypoint, {}, {70, 70});
             }
         }
-        if (!same()) return fail("mixed sequence/current point differs at " + std::to_string(test));
+        if (!same()) return fail("mixed sequence/current point differs at " + std::to_string(test) + firstDifference());
     }
 
     // A complete 128-unit sequence includes pending GDI before CPU drawing,
@@ -151,7 +172,7 @@ bool runRuntimeSelectedPathRasterPixelContract(std::string& error) {
             original(kind, {}, target); raster.draw(kind, {}, target);
         }
     }
-    if (!same()) return fail("128-unit overlapping paths differ");
+    if (!same()) return fail("128-unit overlapping paths differ" + firstDifference());
 
     RECT clip{};
     const auto accepted = [&] { return RuntimeSelectedPathRaster::supported(optimized.dc, optimized.pixels, width, height, clip); };
