@@ -171,6 +171,13 @@ set(
     # That split is what lets text honour the clip region without the text layer
     # ever touching a pixel.
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatText.cpp"
+    # S7: the window / message / input backend.  Pure-offscreen route: HWND is a
+    # pointer to a logical CompatWindow (handle-table + magic verified), the
+    # message queue is a thread-level object, and the window DC is an offscreen
+    # CompatDevice with the client bitmap selected.  No real NSWindow is opened;
+    # a Cocoa shell can present the offscreen frame later without changing this
+    # object model.
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatUser.cpp"
     CACHE INTERNAL
     "Win32 compatibility implementations compiled into Apple builds"
 )
@@ -394,6 +401,29 @@ function(concord_apple_add_win32_compat_selftest)
         target_include_directories(
             concord_win32_compat_text_selftest
             BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
+        )
+    endif()
+
+    # S7: window / message / hook.  The assertions here are about the logical
+    # window object model closing its loop: register → create → WM_NCCREATE
+    # stores GWLP_USERDATA → PostMessage/GetMessage/DispatchMessage reach the
+    # window proc → WH_CBT sees HCBT_CREATEWND → DestroyWindow drops the handle
+    # table count back to zero.  No real window is opened.
+    if(NOT TARGET concord_win32_compat_user_selftest)
+        add_executable(
+            concord_win32_compat_user_selftest
+            "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/selftest/CompatUserSemantics.cpp"
+            ${CONCORD_APPLE_WIN32_COMPAT_SOURCES}
+        )
+        target_include_directories(
+            concord_win32_compat_user_selftest
+            BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
+        )
+        # 本自测直接断言句柄表计数（liveHandleCount 证明"窗口关干净了"），
+        # 需要看到 RuntimeWin32CompatInternal.h —— 它和实现源同目录。
+        target_include_directories(
+            concord_win32_compat_user_selftest
+            BEFORE PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src"
         )
     endif()
 

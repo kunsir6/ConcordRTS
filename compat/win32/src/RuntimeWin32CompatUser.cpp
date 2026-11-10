@@ -1,0 +1,1159 @@
+// ---------------------------------------------------------------------------
+// 窗口 / 消息 / 输入后端（S7）——纯离屏路线
+// ---------------------------------------------------------------------------
+//
+// 设计立场：macOS 上**不开真窗口**，只在进程内维护一套"逻辑窗口对象模型"——
+// HWND 是指向 CompatWindow 的指针（靠句柄表 + magic 双重验证），消息队列是
+// 线程级的一等对象，窗口 DC 是选入客户区位图的离屏 CompatDevice。
+//
+// 为什么不开真窗口（本轮）：前面的呈现路径已经是 software-present=ON 的
+// 软件帧缓冲，MapNativeOverlay 也按"原生像素、不缩放"渲染。菜单系统要的是
+// "创建窗口 → 收消息 → 画到客户区 → 销毁"这条链走通，而不是真的开一个
+// NSWindow。等这条链验证通过，再叠一个 Cocoa NSView 把离屏帧贴出来显示即可，
+// 窗口对象模型一行都不用改。
+//
+// 诚实边界（与前面小族一致：看效果不看 API 名）：
+//   · 定时器（SetTimer）仍是 Input.cpp 的登记桩——本轮不生成 WM_TIMER，消息
+//     循环靠短 sleep 轮询。真正的"虚拟时钟驱动动画"是下一块硬活。
+//   · 键盘/鼠标事件无真实宿主来源，SendInput/GetAsyncKeyState 保持诚实 0。
+//   · MessageBoxW 不开对话框，恒返回 IDOK 并打日志（诊断 smoke 只看返回值）。
+//   · 钩子只在"本线程 + WH_CBT + HCBT_CREATEWND/DESTROYWND"上真实实现。
+
+#include <windows.h>
+
+#include "RuntimeWin32CompatInternal.h"
+
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cwchar>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+// ---------------------------------------------------------------------------
+// 窗口对象模型
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 纯离屏虚拟屏幕（工作区）。菜单按 SPI_GETWORKAREA 取工作区来居中窗口，
+// 这里给出一个稳定的 1024×768 桌面，让"窗口落在屏幕内"的断言成立。
+constexpr int kVirtualScreenW = 1024;
+constexpr int kVirtualScreenH = 768;
+
+// 窗口对象的 magic。HWND 是指向本结构体的指针；magic + 句柄表双验证防止把
+// 野指针当窗口解引用。
+constexpr std::uint32_t kWndMagic = 0x574E4400u;  // "WND\0"
+
+struct CompatWindow {
+    std::uint32_t magic = kWndMagic;
+
+    std::wstring className;   // 注册时的类名（GetClassNameW 回填）
+    std::wstring title;       // 窗口标题（SetWindowTextW 设置）
+    DWORD style = 0;
+    DWORD exStyle = 0;
+
+    RECT windowRect{0, 0, 0, 0};  // 屏幕坐标，含边框。纯离屏无边框装饰，
+                                  // 故窗口矩形 == 客户区矩形按 (x,y) 平移。
+    bool visible = false;
+    bool iconic = false;
+    bool zoomed = false;
+    bool enabled = true;
+
+    HWND parent = nullptr;
+    HMENU menu = nullptr;
+    HINSTANCE instance = nullptr;
+
+    LONG_PTR userData = 0;    // GWLP_USERDATA（WM_NCCREATE 时窗口过程写入）
+    WNDPROC wndProc = nullptr;  // 来自窗口类 lpfnWndProc
+
+    HDC dc = nullptr;         // 缓存窗口 DC（客户区位图已选入）
+    HBITMAP surface = nullptr;  // 客户区位图（32bpp top-down DIB）
+
+    bool dirty = false;       // InvalidateRect 置位，BeginPaint 清位
+    bool destroying = false;
+
+    std::vector<HWND> children;                 // 子窗口
+    std::unordered_map<std::wstring, HANDLE> props;  // SetProp/GetProp
+};
+
+std::mutex& userMutex() { static std::mutex m; return m; }
+
+std::vector<CompatWindow*>& windowTable() { static std::vector<CompatWindow*> v; return v; }
+
+std::unordered_map<std::wstring, WNDCLASSEXW>& classTable() {
+    static std::unordered_map<std::wstring, WNDCLASSEXW> v;
+    return v;
+}
+
+std::deque<MSG>& messageQueue() { static std::deque<MSG> v; return v; }
+
+HWND& focusWindow() { static HWND h = nullptr; return h; }
+HWND& foregroundWindow() { static HWND h = nullptr; return h; }
+
+// WH_CBT 钩子（本轮只支持本线程 + WH_CBT + CREATEWND/DESTROYWND）
+struct HookEntry {
+    int id = 0;
+    HOOKPROC proc = nullptr;
+    DWORD threadId = 0;
+};
+std::vector<HookEntry>& hookTable() { static std::vector<HookEntry> v; return v; }
+int& nextHookId() { static int v = 1; return v; }
+
+// 本线程 id（SetWindowsHookExW 判定"本线程"用）。懒初始化。
+DWORD currentThreadId() {
+    static thread_local DWORD id = [] {
+        return static_cast<DWORD>(::GetCurrentThreadId());
+    }();
+    return id;
+}
+
+// ---------------------------------------------------------------------------
+// 句柄 <-> 对象转换
+// ---------------------------------------------------------------------------
+//
+// asWindow 先走句柄表（isRegisteredHandle 只比较指针值、不碰内存），确认这个
+// 指针值确实是本层登记过的窗口句柄，再转回 CompatWindow* 做 magic 校验。两步
+// 缺一不可：只查句柄表不知道指针类型对不对；只验 magic 会在野指针上崩。
+
+inline CompatWindow* asWindow(HWND h) {
+    if (h == nullptr) return nullptr;
+    if (!concord_compat::isRegisteredHandle(reinterpret_cast<void*>(h), "window")) {
+        return nullptr;
+    }
+    auto* w = reinterpret_cast<CompatWindow*>(h);
+    return (w->magic == kWndMagic) ? w : nullptr;
+}
+
+inline HWND toHwnd(CompatWindow* w) { return reinterpret_cast<HWND>(w); }
+
+// 从窗口表里摘除（不 delete）。DestroyWindow 用它把窗口从全局表移除。
+void removeFromTable(CompatWindow* w) {
+    auto& table = windowTable();
+    for (auto it = table.begin(); it != table.end(); ++it) {
+        if (*it == w) {
+            table.erase(it);
+            return;
+        }
+    }
+}
+
+// 句柄表登记的析构函数：清理窗口 DC + 位图 + 释放对象。
+void destroyWindowPayload(void* handle) {
+    auto* w = reinterpret_cast<CompatWindow*>(handle);
+    if (w->dc != nullptr) ::DeleteDC(w->dc);       // 摘掉客户区位图
+    if (w->surface != nullptr) ::DeleteObject(reinterpret_cast<HGDIOBJ>(w->surface));
+    w->magic = 0;
+    delete w;
+}
+
+// 创建（或复用）窗口客户区位图 + DC。尺寸变化时重建。
+bool ensureSurface(CompatWindow* w, int width, int height) {
+    if (w->dc != nullptr && w->surface != nullptr) return true;
+    if (width <= 0) width = 1;
+    if (height <= 0) height = 1;
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;  // 负值 = top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP surface = ::CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (surface == nullptr) return false;
+
+    HDC dc = ::CreateCompatibleDC(nullptr);
+    if (dc == nullptr) {
+        ::DeleteObject(reinterpret_cast<HGDIOBJ>(surface));
+        return false;
+    }
+    ::SelectObject(dc, reinterpret_cast<HGDIOBJ>(surface));
+    w->dc = dc;
+    w->surface = surface;
+    return true;
+}
+
+// 客户区尺寸（从 windowRect 推得；纯离屏下窗口矩形 == 客户区矩形）。
+inline int clientWidth(const CompatWindow* w) {
+    return w->windowRect.right - w->windowRect.left;
+}
+inline int clientHeight(const CompatWindow* w) {
+    return w->windowRect.bottom - w->windowRect.top;
+}
+
+// 触发 HCBT_CREATEWND / HCBT_DESTROYWND 钩子链。返回非 0 = 有钩子阻止。
+LRESULT fireCbtHook(int code, HWND window) {
+    std::vector<HookEntry> hooks;
+    {
+        std::lock_guard<std::mutex> lock(userMutex());
+        hooks = hookTable();
+    }
+    for (const HookEntry& e : hooks) {
+        // 只回调本线程钩子；跨线程钩子在本层诚实跳过（无法真正跨线程注入）。
+        if (e.threadId != 0 && e.threadId != currentThreadId()) continue;
+        LRESULT r = e.proc(code, reinterpret_cast<WPARAM>(window), 0);
+        if (r != 0) return r;
+    }
+    return 0;
+}
+
+// 同步调用一个窗口的窗口过程（不持有锁，避免窗口过程重入时死锁）。
+LRESULT callWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    CompatWindow* w = asWindow(window);
+    if (w == nullptr || w->wndProc == nullptr) return 0;
+    WNDPROC proc = w->wndProc;
+    return proc(window, message, wParam, lParam);
+}
+
+// 匹配消息过滤（GetMessageW/PeekMessageW 的 hWnd + 范围过滤）。
+bool messageMatches(const MSG& msg, HWND hWnd, UINT filterMin, UINT filterMax) {
+    if (hWnd != nullptr && msg.hwnd != hWnd) return false;
+    if (filterMin != 0 || filterMax != 0) {
+        if (msg.message < filterMin || msg.message > filterMax) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// 对外接口（extern "C"：与 windows.h 声明、产品源码的 C 链接一致）
+// ---------------------------------------------------------------------------
+
+extern "C" {
+
+// ===========================================================================
+// 窗口类
+// ===========================================================================
+
+ATOM RegisterClassExW(const WNDCLASSEXW* lpWndClass) {
+    if (lpWndClass == nullptr || lpWndClass->lpszClassName == nullptr) {
+        concord_compat::setLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const std::wstring name(lpWndClass->lpszClassName);
+    std::lock_guard<std::mutex> lock(userMutex());
+    auto& table = classTable();
+    if (table.find(name) != table.end()) {
+        // 已存在：登记一个"重复类"错误，让调用点走
+        // `GetLastError() == ERROR_CLASS_ALREADY_EXISTS` 的成功分支。
+        concord_compat::setLastError(ERROR_CLASS_ALREADY_EXISTS);
+        return 0;
+    }
+    table.emplace(name, *lpWndClass);
+    return 1;  // ATOM 非零即成功
+}
+
+ATOM RegisterClassW(const WNDCLASSW* lpWndClass) {
+    if (lpWndClass == nullptr || lpWndClass->lpszClassName == nullptr) {
+        concord_compat::setLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    WNDCLASSEXW ex{};
+    ex.cbSize = sizeof(ex);
+    ex.style = lpWndClass->style;
+    ex.lpfnWndProc = lpWndClass->lpfnWndProc;
+    ex.hInstance = lpWndClass->hInstance;
+    ex.hIcon = lpWndClass->hIcon;
+    ex.hCursor = lpWndClass->hCursor;
+    ex.hbrBackground = lpWndClass->hbrBackground;
+    ex.lpszMenuName = lpWndClass->lpszMenuName;
+    ex.lpszClassName = lpWndClass->lpszClassName;
+    return RegisterClassExW(&ex);
+}
+
+BOOL UnregisterClassW(LPCWSTR lpClassName, HINSTANCE hInstance) {
+    (void)hInstance;
+    if (lpClassName == nullptr) return FALSE;
+    std::lock_guard<std::mutex> lock(userMutex());
+    return classTable().erase(lpClassName) > 0 ? TRUE : FALSE;
+}
+
+BOOL GetClassInfoW(HINSTANCE hInstance, LPCWSTR lpClassName, WNDCLASSW* lpWndClass) {
+    (void)hInstance;
+    if (lpClassName == nullptr || lpWndClass == nullptr) return FALSE;
+    std::lock_guard<std::mutex> lock(userMutex());
+    auto found = classTable().find(lpClassName);
+    if (found == classTable().end()) return FALSE;
+    const WNDCLASSEXW& ex = found->second;
+    lpWndClass->style = ex.style;
+    lpWndClass->lpfnWndProc = ex.lpfnWndProc;
+    lpWndClass->hInstance = ex.hInstance;
+    lpWndClass->hIcon = ex.hIcon;
+    lpWndClass->hCursor = ex.hCursor;
+    lpWndClass->hbrBackground = ex.hbrBackground;
+    lpWndClass->lpszMenuName = ex.lpszMenuName;
+    lpWndClass->lpszClassName = ex.lpszClassName;
+    return TRUE;
+}
+
+BOOL GetClassInfoExW(HINSTANCE hInstance, LPCWSTR lpszClass, WNDCLASSEXW* lpwcx) {
+    (void)hInstance;
+    if (lpszClass == nullptr || lpwcx == nullptr) return FALSE;
+    std::lock_guard<std::mutex> lock(userMutex());
+    auto found = classTable().find(lpszClass);
+    if (found == classTable().end()) return FALSE;
+    *lpwcx = found->second;
+    return TRUE;
+}
+
+// ===========================================================================
+// 窗口创建 / 销毁
+// ===========================================================================
+
+HWND CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR lpWindowName,
+                     DWORD dwStyle, int X, int Y, int nWidth, int nHeight,
+                     HWND hWndParent, HMENU hMenu, HINSTANCE hInstance,
+                     LPVOID lpParam) {
+    if (lpClassName == nullptr) return nullptr;
+
+    WNDCLASSEXW cls{};
+    {
+        std::lock_guard<std::mutex> lock(userMutex());
+        auto found = classTable().find(lpClassName);
+        if (found == classTable().end()) return nullptr;
+        cls = found->second;
+    }
+
+    CompatWindow* w = new (std::nothrow) CompatWindow();
+    if (w == nullptr) return nullptr;
+    w->className = lpClassName;
+    w->title = (lpWindowName != nullptr) ? lpWindowName : L"";
+    w->style = dwStyle;
+    w->exStyle = dwExStyle;
+    w->parent = hWndParent;
+    w->menu = hMenu;
+    w->instance = hInstance;
+    w->wndProc = cls.lpfnWndProc;
+    w->windowRect = {X, Y, X + nWidth, Y + nHeight};
+
+    if (!ensureSurface(w, nWidth, nHeight)) {
+        destroyWindowPayload(w);
+        return nullptr;
+    }
+
+    HWND hwnd = toHwnd(w);
+    if (!concord_compat::registerHandle(reinterpret_cast<void*>(hwnd), destroyWindowPayload, "window")) {
+        destroyWindowPayload(w);
+        return nullptr;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(userMutex());
+        windowTable().push_back(w);
+        if (hWndParent != nullptr) {
+            if (CompatWindow* p = asWindow(hWndParent)) p->children.push_back(hwnd);
+        }
+    }
+
+    // HCBT_CREATEWND：钩子可在此观察类名，或返回非 0 阻止创建。
+    if (fireCbtHook(HCBT_CREATEWND, hwnd) != 0) {
+        // 撤销创建：从表移除 + 关句柄（触发 delete）。
+        {
+            std::lock_guard<std::mutex> lock(userMutex());
+            removeFromTable(w);
+        }
+        concord_compat::closeRegisteredHandle(reinterpret_cast<void*>(hwnd));
+        return nullptr;
+    }
+
+    // WM_NCCREATE：把 lpCreateParams 交给窗口过程（它写入 GWLP_USERDATA）。
+    CREATESTRUCTW create{};
+    create.lpCreateParams = lpParam;
+    create.hInstance = hInstance;
+    create.hMenu = hMenu;
+    create.hwndParent = hWndParent;
+    create.cx = nWidth;
+    create.cy = nHeight;
+    create.x = X;
+    create.y = Y;
+    create.style = dwStyle;
+    callWindowProc(hwnd, WM_NCCREATE, 0, reinterpret_cast<LPARAM>(&create));
+    callWindowProc(hwnd, WM_CREATE, 0, reinterpret_cast<LPARAM>(&create));
+    return hwnd;
+}
+
+BOOL DestroyWindow(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    if (w->destroying) return FALSE;
+    w->destroying = true;
+
+    // 先发销毁消息，让窗口过程清理（WM_NCDESTROY 里会清 GWLP_USERDATA）。
+    callWindowProc(hWnd, WM_DESTROY, 0, 0);
+    callWindowProc(hWnd, WM_NCDESTROY, 0, 0);
+    fireCbtHook(HCBT_DESTROYWND, hWnd);
+
+    {
+        std::lock_guard<std::mutex> lock(userMutex());
+        removeFromTable(w);
+        if (w->parent != nullptr) {
+            if (CompatWindow* p = asWindow(w->parent)) {
+                for (auto it = p->children.begin(); it != p->children.end(); ++it) {
+                    if (*it == hWnd) { p->children.erase(it); break; }
+                }
+            }
+        }
+        if (focusWindow() == hWnd) focusWindow() = nullptr;
+        if (foregroundWindow() == hWnd) foregroundWindow() = nullptr;
+    }
+
+    concord_compat::closeRegisteredHandle(reinterpret_cast<void*>(hWnd));
+    return TRUE;
+}
+
+BOOL IsWindow(HWND hWnd) {
+    return asWindow(hWnd) != nullptr ? TRUE : FALSE;
+}
+
+BOOL IsWindowVisible(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    return (w != nullptr && w->visible) ? TRUE : FALSE;
+}
+
+HWND GetParent(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    return (w != nullptr) ? w->parent : nullptr;
+}
+
+HWND GetAncestor(HWND hwnd, UINT gaFlags) {
+    CompatWindow* w = asWindow(hwnd);
+    if (w == nullptr) return nullptr;
+    if (gaFlags == GA_PARENT) return w->parent;
+    // GA_ROOT：一路向上找到没有父窗口的顶层窗口。
+    if (gaFlags == GA_ROOT) {
+        HWND cur = hwnd;
+        while (CompatWindow* c = asWindow(cur)) {
+            if (c->parent == nullptr) return cur;
+            cur = c->parent;
+        }
+        return cur;
+    }
+    return hwnd;  // 其余 GA_* 诚实原样返回
+}
+
+// ===========================================================================
+// 窗口几何
+// ===========================================================================
+
+BOOL GetWindowRect(HWND hWnd, LPRECT lpRect) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr || lpRect == nullptr) return FALSE;
+    *lpRect = w->windowRect;
+    return TRUE;
+}
+
+BOOL GetClientRect(HWND hWnd, LPRECT lpRect) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr || lpRect == nullptr) return FALSE;
+    lpRect->left = 0;
+    lpRect->top = 0;
+    lpRect->right = clientWidth(w);
+    lpRect->bottom = clientHeight(w);
+    return TRUE;
+}
+
+BOOL AdjustWindowRect(LPRECT lpRect, DWORD dwStyle, BOOL bMenu) {
+    return AdjustWindowRectEx(lpRect, dwStyle, bMenu, 0);
+}
+
+BOOL AdjustWindowRectEx(LPRECT lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle) {
+    (void)dwStyle;
+    (void)bMenu;
+    (void)dwExStyle;
+    if (lpRect == nullptr) return FALSE;
+    // 纯离屏无边框装饰、无菜单栏，窗口矩形 == 客户区矩形。原样返回即如实。
+    return TRUE;
+}
+
+BOOL MoveWindow(HWND hWnd, int X, int Y, int nWidth, int nHeight, BOOL bRepaint) {
+    return SetWindowPos(hWnd, nullptr, X, Y, nWidth, nHeight,
+                        SWP_NOZORDER | (bRepaint ? 0 : SWP_NOREDRAW));
+}
+
+BOOL SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy,
+                  UINT uFlags) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    (void)hWndInsertAfter;
+
+    RECT r = w->windowRect;
+    if ((uFlags & SWP_NOMOVE) == 0) { r.left = X; r.top = Y; }
+    if ((uFlags & SWP_NOSIZE) == 0) { r.right = r.left + cx; r.bottom = r.top + cy; }
+    w->windowRect = r;
+
+    if ((uFlags & SWP_SHOWWINDOW) != 0) w->visible = true;
+    if ((uFlags & SWP_HIDEWINDOW) != 0) w->visible = false;
+    return TRUE;
+}
+
+HWND WindowFromPoint(POINT Point) {
+    std::lock_guard<std::mutex> lock(userMutex());
+    // 从最上层（表尾）往回找，命中第一个可见且含点的窗口。
+    auto& table = windowTable();
+    for (auto it = table.rbegin(); it != table.rend(); ++it) {
+        CompatWindow* w = *it;
+        if (!w->visible) continue;
+        const RECT& r = w->windowRect;
+        if (Point.x >= r.left && Point.x < r.right && Point.y >= r.top && Point.y < r.bottom) {
+            return toHwnd(w);
+        }
+    }
+    return nullptr;
+}
+
+// ===========================================================================
+// 窗口状态
+// ===========================================================================
+
+BOOL ShowWindow(HWND hWnd, int nCmdShow) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    switch (nCmdShow) {
+    case SW_HIDE: w->visible = false; break;
+    case SW_SHOWMAXIMIZED: w->zoomed = true; w->iconic = false; w->visible = true; break;
+    case SW_SHOWMINIMIZED: w->iconic = true; w->zoomed = false; w->visible = true; break;
+    case SW_RESTORE: w->iconic = false; w->zoomed = false; w->visible = true; break;
+    default: w->visible = true; break;  // SW_SHOW / SW_SHOWNORMAL 等
+    }
+    return TRUE;
+}
+
+BOOL IsIconic(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    return (w != nullptr && w->iconic) ? TRUE : FALSE;
+}
+
+BOOL IsZoomed(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    return (w != nullptr && w->zoomed) ? TRUE : FALSE;
+}
+
+BOOL EnableWindow(HWND hWnd, BOOL bEnable) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    const BOOL previous = w->enabled ? TRUE : FALSE;
+    w->enabled = (bEnable != FALSE);
+    return previous;
+}
+
+BOOL IsWindowEnabled(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    return (w != nullptr && w->enabled) ? TRUE : FALSE;
+}
+
+BOOL BringWindowToTop(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    // 纯离屏的"置顶" = 移到窗口表尾（枚举/命中时视为最上层）。
+    std::lock_guard<std::mutex> lock(userMutex());
+    removeFromTable(w);
+    windowTable().push_back(w);
+    return TRUE;
+}
+
+BOOL UpdateWindow(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    // 纯离屏无真正的同步重绘：直接把脏区画成 WM_PAINT 派发。
+    if (w->dirty) {
+        callWindowProc(hWnd, WM_PAINT, 0, 0);
+    }
+    return TRUE;
+}
+
+// ===========================================================================
+// 窗口属性 / 长指针
+// ===========================================================================
+
+LONG_PTR GetWindowLongPtrW(HWND hWnd, int nIndex) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return 0;
+    switch (nIndex) {
+    case GWLP_USERDATA: return w->userData;
+    case GWLP_WNDPROC: return reinterpret_cast<LONG_PTR>(w->wndProc);
+    case GWLP_HINSTANCE: return reinterpret_cast<LONG_PTR>(w->instance);
+    case GWL_STYLE: return static_cast<LONG_PTR>(w->style);
+    case GWL_EXSTYLE: return static_cast<LONG_PTR>(w->exStyle);
+    default: return 0;
+    }
+}
+
+LONG_PTR SetWindowLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return 0;
+    LONG_PTR previous = 0;
+    switch (nIndex) {
+    case GWLP_USERDATA:
+        previous = w->userData;
+        w->userData = dwNewLong;
+        break;
+    case GWLP_WNDPROC:
+        previous = reinterpret_cast<LONG_PTR>(w->wndProc);
+        w->wndProc = reinterpret_cast<WNDPROC>(dwNewLong);
+        break;
+    case GWLP_HINSTANCE:
+        previous = reinterpret_cast<LONG_PTR>(w->instance);
+        w->instance = reinterpret_cast<HINSTANCE>(dwNewLong);
+        break;
+    case GWL_STYLE:
+        previous = static_cast<LONG_PTR>(w->style);
+        w->style = static_cast<DWORD>(dwNewLong);
+        break;
+    case GWL_EXSTYLE:
+        previous = static_cast<LONG_PTR>(w->exStyle);
+        w->exStyle = static_cast<DWORD>(dwNewLong);
+        break;
+    default: return 0;
+    }
+    return previous;
+}
+
+BOOL SetPropW(HWND hWnd, LPCWSTR lpString, HANDLE hData) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr || lpString == nullptr) return FALSE;
+    std::lock_guard<std::mutex> lock(userMutex());
+    w->props[lpString] = hData;
+    return TRUE;
+}
+
+HANDLE GetPropW(HWND hWnd, LPCWSTR lpString) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr || lpString == nullptr) return nullptr;
+    std::lock_guard<std::mutex> lock(userMutex());
+    auto found = w->props.find(lpString);
+    return (found != w->props.end()) ? found->second : nullptr;
+}
+
+HANDLE RemovePropW(HWND hWnd, LPCWSTR lpString) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr || lpString == nullptr) return nullptr;
+    std::lock_guard<std::mutex> lock(userMutex());
+    auto found = w->props.find(lpString);
+    if (found == w->props.end()) return nullptr;
+    HANDLE value = found->second;
+    w->props.erase(found);
+    return value;
+}
+
+BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    w->title = (lpString != nullptr) ? lpString : L"";
+    return TRUE;
+}
+
+int GetWindowTextW(HWND hWnd, LPWSTR lpString, int nMaxCount) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return 0;
+    if (lpString == nullptr || nMaxCount <= 0) return static_cast<int>(w->title.size());
+    const int copy = (nMaxCount - 1 < static_cast<int>(w->title.size()))
+                         ? nMaxCount - 1
+                         : static_cast<int>(w->title.size());
+    std::memcpy(lpString, w->title.data(), static_cast<std::size_t>(copy) * sizeof(wchar_t));
+    lpString[copy] = L'\0';
+    return copy;
+}
+
+int GetClassNameW(HWND hWnd, LPWSTR lpClassName, int nMaxCount) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return 0;
+    if (lpClassName == nullptr || nMaxCount <= 0) return static_cast<int>(w->className.size());
+    const int copy = (nMaxCount - 1 < static_cast<int>(w->className.size()))
+                         ? nMaxCount - 1
+                         : static_cast<int>(w->className.size());
+    std::memcpy(lpClassName, w->className.data(), static_cast<std::size_t>(copy) * sizeof(wchar_t));
+    lpClassName[copy] = L'\0';
+    return copy;
+}
+
+// ===========================================================================
+// DC 关联（绘制）
+// ===========================================================================
+
+HDC GetDC(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return nullptr;
+    if (!ensureSurface(w, clientWidth(w), clientHeight(w))) return nullptr;
+    return w->dc;
+}
+
+int ReleaseDC(HWND hWnd, HDC hDC) {
+    (void)hWnd;
+    (void)hDC;
+    // 纯离屏缓存 DC：不真正释放，返回 1（成功）。DC 随窗口销毁而释放。
+    return 1;
+}
+
+HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return nullptr;
+    if (!ensureSurface(w, clientWidth(w), clientHeight(w))) return nullptr;
+    if (lpPaint != nullptr) {
+        lpPaint->hdc = w->dc;
+        lpPaint->fErase = FALSE;
+        lpPaint->rcPaint.left = 0;
+        lpPaint->rcPaint.top = 0;
+        lpPaint->rcPaint.right = clientWidth(w);
+        lpPaint->rcPaint.bottom = clientHeight(w);
+    }
+    w->dirty = false;
+    return w->dc;
+}
+
+BOOL EndPaint(HWND hWnd, const PAINTSTRUCT* lpPaint) {
+    (void)hWnd;
+    (void)lpPaint;
+    return TRUE;
+}
+
+BOOL InvalidateRect(HWND hWnd, const RECT* lpRect, BOOL bErase) {
+    (void)lpRect;
+    (void)bErase;
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    w->dirty = true;
+    return TRUE;
+}
+
+BOOL ValidateRect(HWND hWnd, const RECT* lpRect) {
+    (void)lpRect;
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    w->dirty = false;
+    return TRUE;
+}
+
+BOOL GetUpdateRect(HWND hWnd, LPRECT lpRect, BOOL bErase) {
+    (void)bErase;
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    if (lpRect != nullptr) {
+        lpRect->left = 0;
+        lpRect->top = 0;
+        lpRect->right = w->dirty ? clientWidth(w) : 0;
+        lpRect->bottom = w->dirty ? clientHeight(w) : 0;
+    }
+    return w->dirty ? TRUE : FALSE;
+}
+
+BOOL RedrawWindow(HWND hWnd, const RECT* lprcUpdate, HRGN hrgnUpdate, UINT flags) {
+    (void)lprcUpdate;
+    (void)hrgnUpdate;
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return FALSE;
+    w->dirty = true;
+    if ((flags & RDW_UPDATENOW) != 0) {
+        callWindowProc(hWnd, WM_PAINT, 0, 0);
+    }
+    return TRUE;
+}
+
+// ===========================================================================
+// 消息队列
+// ===========================================================================
+
+BOOL PostMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
+    MSG msg{};
+    msg.hwnd = hWnd;
+    msg.message = Msg;
+    msg.wParam = wParam;
+    msg.lParam = lParam;
+    std::lock_guard<std::mutex> lock(userMutex());
+    messageQueue().push_back(msg);
+    return TRUE;
+}
+
+void PostQuitMessage(int nExitCode) {
+    PostMessageW(nullptr, WM_QUIT, static_cast<WPARAM>(nExitCode), 0);
+}
+
+// 从队列取一条匹配消息（不阻塞）。返回 true 表示取到并填入 lpMsg。
+bool popMessage(LPMSG lpMsg, HWND hWnd, UINT filterMin, UINT filterMax, bool remove) {
+    std::lock_guard<std::mutex> lock(userMutex());
+    auto& q = messageQueue();
+    for (auto it = q.begin(); it != q.end(); ++it) {
+        if (messageMatches(*it, hWnd, filterMin, filterMax)) {
+            *lpMsg = *it;
+            if (remove) q.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+BOOL PeekMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax,
+                  UINT wRemoveMsg) {
+    if (lpMsg == nullptr) return FALSE;
+    const bool remove = (wRemoveMsg & PM_REMOVE) != 0;
+    return popMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, remove) ? TRUE : FALSE;
+}
+
+BOOL GetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax) {
+    if (lpMsg == nullptr) return -1;
+    // 阻塞取消息：无消息时短 sleep 轮询（虚拟时钟/真实输入源是下一块硬活）。
+    for (;;) {
+        if (popMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, true)) {
+            if (lpMsg->message == WM_QUIT) return 0;
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+BOOL WaitMessage() {
+    // 阻塞直到有消息。与 GetMessageW 共用轮询语义。
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(userMutex());
+            if (!messageQueue().empty()) return TRUE;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+DWORD MsgWaitForMultipleObjectsEx(DWORD nCount, const HANDLE* pHandles,
+                                  DWORD dwMilliseconds, DWORD dwWakeMask, DWORD dwFlags) {
+    (void)nCount;
+    (void)pHandles;
+    (void)dwWakeMask;
+    (void)dwFlags;
+    // 纯离屏无真实内核对象可等。语义："有消息则立刻返回 WAIT_OBJECT_0，否则
+    // 等满 dwMilliseconds 返回 WAIT_TIMEOUT"。调用点是菜单的 16ms 节流循环。
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(dwMilliseconds);
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(userMutex());
+            if (!messageQueue().empty()) return WAIT_OBJECT_0;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) return WAIT_TIMEOUT;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+// ===========================================================================
+// 消息派发
+// ===========================================================================
+
+BOOL TranslateMessage(const MSG* lpMsg) {
+    // 无键盘字符映射（无真实输入源），WM_KEYDOWN 不派生 WM_CHAR。诚实返回 FALSE。
+    (void)lpMsg;
+    return FALSE;
+}
+
+LRESULT DispatchMessageW(const MSG* lpMsg) {
+    if (lpMsg == nullptr) return 0;
+    if (lpMsg->hwnd == nullptr) return 0;
+    return callWindowProc(lpMsg->hwnd, lpMsg->message, lpMsg->wParam, lpMsg->lParam);
+}
+
+LRESULT SendMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
+    return callWindowProc(hWnd, Msg, wParam, lParam);
+}
+
+LRESULT CallWindowProcW(WNDPROC lpPrevWndFunc, HWND hWnd, UINT Msg, WPARAM wParam,
+                        LPARAM lParam) {
+    if (lpPrevWndFunc == nullptr) return 0;
+    return lpPrevWndFunc(hWnd, Msg, wParam, lParam);
+}
+
+LRESULT DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
+    (void)wParam;
+    (void)lParam;
+    switch (Msg) {
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hWnd, &ps);
+        if (dc != nullptr) EndPaint(hWnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SETCURSOR:
+        // 默认：让系统光标显示。纯离屏无真实光标，返回 TRUE 表示已处理。
+        return TRUE;
+    default:
+        return 0;
+    }
+}
+
+// ===========================================================================
+// 焦点 / 前台
+// ===========================================================================
+
+HWND SetFocus(HWND hWnd) {
+    std::lock_guard<std::mutex> lock(userMutex());
+    HWND previous = focusWindow();
+    focusWindow() = (asWindow(hWnd) != nullptr) ? hWnd : nullptr;
+    return previous;
+}
+
+HWND GetFocus() {
+    std::lock_guard<std::mutex> lock(userMutex());
+    return focusWindow();
+}
+
+BOOL SetForegroundWindow(HWND hWnd) {
+    std::lock_guard<std::mutex> lock(userMutex());
+    if (asWindow(hWnd) == nullptr) return FALSE;
+    foregroundWindow() = hWnd;
+    return TRUE;
+}
+
+HWND GetForegroundWindow() {
+    std::lock_guard<std::mutex> lock(userMutex());
+    return foregroundWindow();
+}
+
+HWND GetWindow(HWND hWnd, UINT uCmd) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr) return nullptr;
+    auto& table = windowTable();
+    std::lock_guard<std::mutex> lock(userMutex());
+    // 在窗口表里找 w 的位置。
+    auto it = std::find(table.begin(), table.end(), w);
+    if (it == table.end()) return nullptr;
+    switch (uCmd) {
+    case GW_HWNDFIRST:
+        return table.empty() ? nullptr : toHwnd(table.front());
+    case GW_HWNDNEXT:
+        return (it + 1 != table.end()) ? toHwnd(*(it + 1)) : nullptr;
+    case GW_CHILD:
+        return w->children.empty() ? nullptr : w->children.front();
+    default:
+        return nullptr;
+    }
+}
+
+HDESK GetThreadDesktop(DWORD dwThreadId) {
+    (void)dwThreadId;
+    // 纯离屏只有一个桌面。返回稳定的非空伪句柄（不是真 HDESK，只作身份标记）。
+    return reinterpret_cast<HDESK>(static_cast<std::intptr_t>(1));
+}
+
+// ===========================================================================
+// 枚举 / 查找
+// ===========================================================================
+
+BOOL EnumThreadWindows(DWORD dwThreadId, BOOL (*lpfn)(HWND, LPARAM), LPARAM lParam) {
+    if (lpfn == nullptr) return FALSE;
+    std::vector<HWND> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(userMutex());
+        for (CompatWindow* w : windowTable()) snapshot.push_back(toHwnd(w));
+    }
+    (void)dwThreadId;  // 纯离屏全部窗口都属本线程
+    for (HWND h : snapshot) {
+        if (!lpfn(h, lParam)) return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL EnumDesktopWindows(HDESK hDesktop, BOOL (*lpfn)(HWND, LPARAM), LPARAM lParam) {
+    (void)hDesktop;
+    return EnumThreadWindows(0, lpfn, lParam);
+}
+
+HWND FindWindowExW(HWND hWndParent, HWND hWndChildAfter, LPCWSTR lpszClass,
+                   LPCWSTR lpszWindow) {
+    std::lock_guard<std::mutex> lock(userMutex());
+    bool afterSeen = (hWndChildAfter == nullptr);
+    for (CompatWindow* w : windowTable()) {
+        HWND h = toHwnd(w);
+        // 父窗口过滤
+        if (hWndParent != nullptr && w->parent != hWndParent) continue;
+        // 类名过滤
+        if (lpszClass != nullptr && w->className != lpszClass) continue;
+        // 标题过滤
+        if (lpszWindow != nullptr && w->title != lpszWindow) continue;
+        // 从 hWndChildAfter 之后开始
+        if (!afterSeen) {
+            if (h == hWndChildAfter) afterSeen = true;
+            continue;
+        }
+        return h;
+    }
+    return nullptr;
+}
+
+DWORD GetWindowThreadProcessId(HWND hWnd, LPDWORD lpdwProcessId) {
+    if (asWindow(hWnd) == nullptr) return 0;
+    if (lpdwProcessId != nullptr) *lpdwProcessId = ::GetCurrentProcessId();
+    return currentThreadId();
+}
+
+// ===========================================================================
+// 系统信息
+// ===========================================================================
+
+int GetSystemMetrics(int nIndex) {
+    switch (nIndex) {
+    case SM_CXSCREEN: return kVirtualScreenW;
+    case SM_CYSCREEN: return kVirtualScreenH;
+    case SM_CXVIRTUALSCREEN: return kVirtualScreenW;
+    case SM_CYVIRTUALSCREEN: return kVirtualScreenH;
+    case SM_XVIRTUALSCREEN: return 0;
+    case SM_YVIRTUALSCREEN: return 0;
+    case SM_REMOTESESSION: return 0;  // 本地会话
+    default: return 0;
+    }
+}
+
+BOOL SystemParametersInfoW(UINT uiAction, UINT uiParam, LPVOID pvParam, UINT fWinIni) {
+    (void)uiParam;
+    (void)fWinIni;
+    if (uiAction == SPI_GETWORKAREA) {
+        if (pvParam == nullptr) return FALSE;
+        RECT* work = static_cast<RECT*>(pvParam);
+        work->left = 0;
+        work->top = 0;
+        work->right = kVirtualScreenW;
+        work->bottom = kVirtualScreenH;
+        return TRUE;
+    }
+    // 其余 SPI_* 诚实不处理（无真实宿主配置可读/写）。
+    return FALSE;
+}
+
+HMONITOR MonitorFromWindow(HWND hwnd, DWORD dwFlags) {
+    (void)hwnd;
+    (void)dwFlags;
+    // 纯离屏只有一块虚拟主屏。
+    return reinterpret_cast<HMONITOR>(static_cast<std::intptr_t>(1));
+}
+
+BOOL GetMonitorInfoW(HMONITOR hMonitor, LPMONITORINFO lpmi) {
+    (void)hMonitor;
+    if (lpmi == nullptr || lpmi->cbSize == 0) return FALSE;
+    lpmi->rcMonitor.left = 0;
+    lpmi->rcMonitor.top = 0;
+    lpmi->rcMonitor.right = kVirtualScreenW;
+    lpmi->rcMonitor.bottom = kVirtualScreenH;
+    lpmi->rcWork = lpmi->rcMonitor;
+    lpmi->dwFlags = MONITORINFOF_PRIMARY;
+    return TRUE;
+}
+
+BOOL GetSystemPowerStatus(LPSYSTEM_POWER_STATUS lpSystemPowerStatus) {
+    if (lpSystemPowerStatus == nullptr) return FALSE;
+    // 纯离屏宿主无真实电源：恒报"交流电在线、电量满、无电池"。这是如实默认
+    // 而非编造——软件帧缓冲不依赖电池状态。
+    lpSystemPowerStatus->ACLineStatus = AC_LINE_ONLINE;
+    lpSystemPowerStatus->BatteryFlag = 128;  // 无系统电池
+    lpSystemPowerStatus->BatteryLifePercent = 100;
+    lpSystemPowerStatus->SystemStatusFlag = 0;
+    lpSystemPowerStatus->BatteryLifeTime = 0xFFFFFFFFu;
+    lpSystemPowerStatus->BatteryFullLifeTime = 0xFFFFFFFFu;
+    return TRUE;
+}
+
+// ===========================================================================
+// 杂项
+// ===========================================================================
+
+HMENU GetMenu(HWND hWnd) {
+    CompatWindow* w = asWindow(hWnd);
+    return (w != nullptr) ? w->menu : nullptr;
+}
+
+BOOL ScreenToClient(HWND hWnd, LPPOINT lpPoint) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr || lpPoint == nullptr) return FALSE;
+    lpPoint->x -= w->windowRect.left;
+    lpPoint->y -= w->windowRect.top;
+    return TRUE;
+}
+
+BOOL ClientToScreen(HWND hWnd, LPPOINT lpPoint) {
+    CompatWindow* w = asWindow(hWnd);
+    if (w == nullptr || lpPoint == nullptr) return FALSE;
+    lpPoint->x += w->windowRect.left;
+    lpPoint->y += w->windowRect.top;
+    return TRUE;
+}
+
+BOOL MessageBeep(UINT uType) {
+    (void)uType;
+    // 无真实音频后端，诚实静默返回 TRUE（调用点不依赖声音）。
+    return TRUE;
+}
+
+int MessageBoxW(HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType) {
+    (void)hWnd;
+    (void)lpText;
+    (void)lpCaption;
+    (void)uType;
+    // 诊断 smoke 只判断返回值（IDOK）。不开对话框，打印一条日志便于排查。
+    std::fprintf(stderr, "[compat/win32] MessageBoxW: 纯离屏无对话框，返回 IDOK\n");
+    return IDOK;
+}
+
+// ===========================================================================
+// 钩子
+// ===========================================================================
+
+HHOOK SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hmod, DWORD dwThreadId) {
+    (void)hmod;
+    if (lpfn == nullptr) return nullptr;
+    // 只支持 WH_CBT；其余钩子类型诚实失败（不假装）。
+    if (idHook != WH_CBT) {
+        std::fprintf(stderr, "[compat/win32] SetWindowsHookExW: 仅支持 WH_CBT，"
+                             "得到 idHook=%d，诚实失败\n", idHook);
+        return nullptr;
+    }
+    // 只支持本线程钩子（dwThreadId==0 或当前线程）。跨线程注入无宿主可依。
+    if (dwThreadId != 0 && dwThreadId != currentThreadId()) {
+        std::fprintf(stderr, "[compat/win32] SetWindowsHookExW: 仅支持本线程钩子，"
+                             "得到 dwThreadId=%lu，诚实失败\n",
+                     static_cast<unsigned long>(dwThreadId));
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> lock(userMutex());
+    HookEntry entry;
+    entry.id = nextHookId()++;
+    entry.proc = lpfn;
+    entry.threadId = dwThreadId;
+    hookTable().push_back(entry);
+    return reinterpret_cast<HHOOK>(static_cast<std::intptr_t>(entry.id));
+}
+
+BOOL UnhookWindowsHookEx(HHOOK hhk) {
+    if (hhk == nullptr) return FALSE;
+    const int id = static_cast<int>(reinterpret_cast<std::intptr_t>(hhk));
+    std::lock_guard<std::mutex> lock(userMutex());
+    auto& hooks = hookTable();
+    for (auto it = hooks.begin(); it != hooks.end(); ++it) {
+        if (it->id == id) {
+            hooks.erase(it);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+LRESULT CallNextHookEx(HHOOK hhk, int nCode, WPARAM wParam, LPARAM lParam) {
+    (void)hhk;
+    (void)nCode;
+    (void)wParam;
+    (void)lParam;
+    // 本层没有钩子链（钩子在 fireCbtHook 里已按注册顺序全部回调），
+    // "下一个钩子"不存在，返回 0。
+    return 0;
+}
+
+}  // extern "C"

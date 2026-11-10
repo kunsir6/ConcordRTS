@@ -2522,7 +2522,12 @@ using DPI_AWARENESS_CONTEXT = void*;
 #define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((DPI_AWARENESS_CONTEXT)(std::intptr_t)-4)
 
 // --- 钩子常量
+// 本层只真实实现 WH_CBT（本线程、HCBT_CREATEWND/DESTROYWND）。其余 WH_* 仅给出
+// 标准值，让诊断 smoke 里"非 CBT 钩子应诚实失败"这类判据能编译。
+#define WH_KEYBOARD 2
 #define WH_CBT 5
+#define WH_SYSMSGFILTER 6
+#define WH_MOUSE 7
 #define HCBT_MOVESIZE 0
 #define HCBT_MINMAX 1
 #define HCBT_QS 2
