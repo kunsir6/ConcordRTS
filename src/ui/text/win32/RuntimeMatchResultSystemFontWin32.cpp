@@ -1,7 +1,10 @@
 #include "ui/text/win32/RuntimeMatchResultSystemFontWin32.h"
 #include <string>
 namespace concord::ui {
+// S4-1: macOS 的 wchar_t 为 4 字节；Windows 侧断言原文与语义均不变。
+#if defined(_WIN32)
 static_assert(sizeof(wchar_t)==sizeof(char16_t));
+#endif
 void MatchResultSystemFontWin32::initialize(std::int32_t pixelHeight) {
  font_=CreateFontW(pixelHeight,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
   OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,NONANTIALIASED_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Microsoft YaHei UI");

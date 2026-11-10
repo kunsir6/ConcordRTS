@@ -1,7 +1,10 @@
 #include "ui/text/win32/RuntimeMainSystemFontWin32.h"
 #include <string>
 namespace concord::ui {
+// S4-1: macOS 的 wchar_t 为 4 字节；Windows 侧断言原文与语义均不变。
+#if defined(_WIN32)
 static_assert(sizeof(wchar_t)==sizeof(char16_t));
+#endif
 void MainSystemFontsWin32::initialize() {
     buttonFont_ = CreateFontW(
         -17, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,

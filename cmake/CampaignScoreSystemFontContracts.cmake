@@ -21,4 +21,8 @@ if(WIN32)
  if(CONCORD_MSVC_ABI)
   set_property(TARGET concord_campaign_score_system_font_native_contract PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
  endif()
+elseif(APPLE)
+ # S4-1: 纯逻辑 + GDI 调用，放回 Apple 构建图（源码零改动），既有 WIN32 分支未动。
+ concord_add_profiled_leaf(concord_campaign_score_system_font_win32 src/ui/text/win32/RuntimeCampaignScoreSystemFontWin32.cpp concord_runtime Runtime)
+ target_link_libraries(concord_runtime PRIVATE concord_campaign_score_system_font_win32)
 endif()
