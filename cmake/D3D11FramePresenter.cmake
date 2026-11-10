@@ -49,5 +49,4 @@ foreach(s41_stage IN ITEMS vs ps)
 endforeach()
 target_include_directories(concord_d3d11_frame_presenter_win32 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/s41-shaders")
 
-include("${CMAKE_CURRENT_LIST_DIR}/MapNativeOverlayWin32.cmake")
 add_subdirectory(tests/infrastructure/d3d11_frame_presenter)

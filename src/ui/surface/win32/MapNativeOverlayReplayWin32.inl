@@ -154,8 +154,8 @@ struct NativeOverlayCompilation {
         std::uint64_t total=static_cast<std::uint64_t>(width)*height*4+MapNativeOverlayWin32::maxLookupGroups*2048+exactSampleMask.capacity();
         if(total>MapNativeOverlayWin32::maxScratchBytes){fail("native-scratch-budget");return false;}
         for(auto& layer:layers) {
-            const auto columns=std::max(0L,layer.bounds.right-layer.bounds.left);
-            const auto area=static_cast<std::uint64_t>(columns)*std::max(0L,layer.bounds.bottom-layer.bounds.top);
+            const auto columns=std::max(static_cast<LONG>(0),layer.bounds.right-layer.bounds.left);
+            const auto area=static_cast<std::uint64_t>(columns)*std::max(static_cast<LONG>(0),layer.bounds.bottom-layer.bounds.top);
             std::size_t sensitive=0;
             if(!exactSampleMask.empty())for(int y=layer.bounds.top;y<layer.bounds.bottom;++y)for(int x=layer.bounds.left;x<layer.bounds.right;++x)
                 sensitive+=exactSampleMask[static_cast<std::size_t>(y)*width+x]!=0;

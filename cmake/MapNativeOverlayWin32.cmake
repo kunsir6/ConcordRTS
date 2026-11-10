@@ -1,3 +1,4 @@
+include_guard(GLOBAL)
 # P06/W019-G003-01 is a private CPU-native producer for S41 value commands.
 concord_add_profiled_leaf(concord_map_native_overlay_win32 src/ui/surface/win32/MapNativeOverlayWin32.cpp concord_runtime Runtime)
 target_sources(concord_map_native_overlay_win32 PRIVATE src/ui/surface/win32/MapCompositionWin32.cpp)
