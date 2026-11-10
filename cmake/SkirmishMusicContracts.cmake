@@ -14,13 +14,17 @@ if(CONCORD_MSVC_ABI)
     set_property(TARGET concord_skirmish_music_policy_contract PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
+# The policy is pure presentation logic (borrowed clock + abstract device), so it
+# links on every platform; only the physical Win32 adapter stays behind WIN32.
+target_link_libraries(concord_runtime PRIVATE concord_skirmish_music_policy)
+
 if(WIN32)
     concord_add_profiled_leaf(concord_skirmish_music_win32 src/audio/menu/win32/RuntimeSkirmishMusicWin32.cpp concord_runtime Runtime)
     concord_add_profiled_leaf(concord_skirmish_music_win32_contract_leaf src/audio/menu/win32/RuntimeSkirmishMusicWin32.cpp concord_runtime_match_score_contract Contract)
     target_link_libraries(concord_skirmish_music_win32 PRIVATE concord_menu_music_unsupported)
     target_link_libraries(concord_skirmish_music_win32_contract_leaf PRIVATE concord_menu_music_unsupported_contract_leaf winmm)
     # Runtime retains its existing UI/SFX winmm native linker contract once.
-    target_link_libraries(concord_runtime PRIVATE concord_skirmish_music_policy concord_skirmish_music_win32)
+    target_link_libraries(concord_runtime PRIVATE concord_skirmish_music_win32)
 add_executable(concord_skirmish_music_win32_contract tests/infrastructure/RuntimeSkirmishMusicWin32Contract.cpp)
 target_include_directories(concord_skirmish_music_win32_contract PRIVATE src)
 target_compile_features(concord_skirmish_music_win32_contract PRIVATE cxx_std_20)

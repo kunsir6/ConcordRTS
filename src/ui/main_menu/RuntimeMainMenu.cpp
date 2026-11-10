@@ -24,7 +24,9 @@
 #include "core/io/IniFile.h"
 #include "runtime/campaign/RuntimeCampaignMovieResolver.h"
 #include "assets/menu/MenuImageResources.h"
+#if defined(_WIN32)
 #include "assets/menu/win32/MenuBmpReaderWin32.h"
+#endif
 #include "ui/resources/RuntimeMenuResourceWatch.h"
 #include "runtime/config/RuntimeConfigPaths.h"
 #include "network/lockstep/RuntimeMultiplayerRuntimeBridge.h"
@@ -334,9 +336,11 @@ struct WestwoodBitFont {
 
 using AssetImage = concord::assets::MenuImage;
 
+#if defined(_WIN32)
 bool loadBmp(const fs::path& path, AssetImage& output) {
     return concord::assets::menuWin32BmpReader().read(path, output);
 }
+#endif
 
 const wchar_t* binkStreamArgument(
     concord::bink_stream::PlaybackMode mode,
@@ -954,7 +958,9 @@ bool initializeMenu(MenuState& state, const RuntimeConfig& config, bool smoke) {
     );
     loadOne(state, "mouse.shp", "mousepal.pal", true, state.mouse);
 
+#if defined(_WIN32)
     loadBmp(state.exportRoot / "langmd" / "ra2ts_l_frame.bmp", state.videoFrame);
+#endif
     concord::assets::loadMenuLooseFrame(
         (state.exportRoot / "langmd" / "glslmd.shp").string(),
         (state.exportRoot / "langmd" / "glsmd.pal").string(),
@@ -2361,6 +2367,7 @@ int runRuntimeMainMenuSmokeTest(
         if(*only!="1") {std::cerr<<"Main music clock ONLY must be1\n";return 1;}
         return runMainMenuMusicClockSmoke();
     }
+#if defined(_WIN32)
     if (const auto only=mainMenuSmokeEnvironment("CONCORD_INTERNET_MENU_CLOCK_ONLY")) {
         const auto output=mainMenuSmokeEnvironment("CONCORD_INTERNET_MENU_CLOCK_OUTPUT");
         if(*only!="1" || !output || output->empty()) {
@@ -2369,6 +2376,7 @@ int runRuntimeMainMenuSmokeTest(
         }
         return runRuntimeInternetMenuClockContract(fs::path(*output));
     }
+#endif
     if (const auto only=mainMenuSmokeEnvironment("CONCORD_MAIN_MENU_PRESENTATION_CLOCK_ONLY")) {
         const auto output=mainMenuSmokeEnvironment("CONCORD_MAIN_MENU_PRESENTATION_CLOCK_OUTPUT");
         if(*only!="1" || !output || output->empty()) {
