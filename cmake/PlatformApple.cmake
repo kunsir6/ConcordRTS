@@ -183,10 +183,12 @@ set(
     # startup/shutdown token bookkeeping, a one-codec (PNG) encoder report, and
     # a Bitmap that holds a pixel buffer and saves it via ImageIO.
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatGdiplus.cpp"
-    # P4-01b: XAudio2Create.  xaudio2.h 一直是"声明层"（S1 的 windows.h 覆盖不到
-    # DirectX 的 COM 接口），它刻意留下的那一个链接缺口由这里兑现。兑现的方式是
-    # 明确的 E_NOTIMPL，不是空壳引擎：多路语音混音在 macOS 上还没实现，假装成功
-    # 会变成"每条语音都播放成功但不出声"。详见该文件头。
+    # P4-02：XAudio2 的真引擎。P4-01b 时这里只是"诚实的 E_NOTIMPL"（未实现多路
+    # 混音，返回成功会变成"每条语音都播放成功但不出声"）；现在它是一台真正的
+    # 软件混音器：多条 source voice 在 48kHz 立体声浮点缓冲里相加、按音量/输出
+    # 矩阵分配、支持 LoopCount 与线性重采样，最后由**一个** AudioQueue 输出。
+    # 这个 TU 因此需要 AudioToolbox —— 框架清单就在下面那份 sets 里，随源清单
+    # 一起走，任何编译它的目标都不会漏链接。
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatAudio.cpp"
     CACHE INTERNAL
     "Win32 compatibility implementations compiled into Apple builds"
@@ -205,6 +207,9 @@ set(
     # ImageIO is only needed by the GDI+ PNG export (S6), but it travels with the
     # list so every target that compiles that translation unit links it.
     ImageIO
+    # P4-02: the XAudio2 engine drives a real AudioQueue. 十二个 compat 自测目标
+    # 都编译同一份源清单，框架漏了它们就会在链接期各报一次同样的错。
+    AudioToolbox
     CACHE INTERNAL
     "Apple frameworks required by the Win32 compatibility layer"
 )

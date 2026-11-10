@@ -122,3 +122,59 @@ if(NOT TARGET concord_apple_audio_devices_selftest)
         target_link_libraries(concord_apple_audio_devices_selftest PRIVATE "-framework ${_caas_framework}")
     endforeach()
 endif()
+
+# ---------------------------------------------------------------------------
+# P4-02：XAudio2 混音器的两个自测。
+#
+# 为什么要两个而不是一个：混音数学可以完全脱离声卡验证（离线引擎），而"产品那条
+# 路径真的活了"（RuntimeVoiceAudio::ready()）必须要真设备。合成一个目标会让
+# "没有声卡的 CI/容器"上跑不了本该跑得动的 52 条逐样本断言；拆开以后，
+# 无声卡时只有一个检查会红，而且红得清楚。
+#
+# 两个目标都**不**碰产品目标：混音器的源文件已经通过
+# CONCORD_APPLE_WIN32_COMPAT_SOURCES 进了产品图（和 GDI 的实现同一个位置）。
+# ---------------------------------------------------------------------------
+set(
+    CONCORD_APPLE_XAUDIO2_COMPAT_INCLUDE_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/include"
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src"
+)
+
+if(NOT TARGET concord_apple_xaudio2_mixer_selftest)
+    add_executable(
+        concord_apple_xaudio2_mixer_selftest
+        "${CMAKE_CURRENT_LIST_DIR}/../tests/audio/apple/XAudio2MixerSmoke.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatAudio.cpp"
+    )
+    target_include_directories(
+        concord_apple_xaudio2_mixer_selftest
+        BEFORE PRIVATE
+            ${CONCORD_APPLE_XAUDIO2_COMPAT_INCLUDE_DIRS}
+            "${CMAKE_CURRENT_LIST_DIR}/../src"
+    )
+    target_compile_features(concord_apple_xaudio2_mixer_selftest PRIVATE cxx_std_20)
+    target_link_libraries(concord_apple_xaudio2_mixer_selftest PRIVATE "-framework AudioToolbox")
+endif()
+
+if(NOT TARGET concord_apple_xaudio2_voice_selftest)
+    # RuntimeVoiceAudio 是**产品**的语音门面，它对 Windows 的依赖只剩
+    # CoInitializeEx 与两个编码助手（都在 compat 里）。这里把这三件事一起编进来，
+    # 而不是给它加一层测试专用的替身——替身一出现，"ready()==true"就不再是产品
+    # 路径上的事实。
+    add_executable(
+        concord_apple_xaudio2_voice_selftest
+        "${CMAKE_CURRENT_LIST_DIR}/../tests/audio/apple/XAudio2VoiceAudioSmoke.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../src/audio/backend/RuntimeVoiceAudio.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatAudio.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatMisc.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatProcess.cpp"
+    )
+    target_include_directories(
+        concord_apple_xaudio2_voice_selftest
+        BEFORE PRIVATE
+            ${CONCORD_APPLE_XAUDIO2_COMPAT_INCLUDE_DIRS}
+            "${CMAKE_CURRENT_LIST_DIR}/../src"
+    )
+    target_compile_features(concord_apple_xaudio2_voice_selftest PRIVATE cxx_std_20)
+    target_link_libraries(concord_apple_xaudio2_voice_selftest PRIVATE "-framework AudioToolbox")
+endif()
