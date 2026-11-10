@@ -220,6 +220,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <list>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -26641,8 +26642,8 @@ RECT runtimeCampaignScoreScaledRect(
     const RECT& clientRect,
     const RECT& baseRect
 ) {
-    const int width = std::max(1L, clientRect.right - clientRect.left);
-    const int height = std::max(1L, clientRect.bottom - clientRect.top);
+    const int width = std::max<LONG>(1L, clientRect.right - clientRect.left);
+    const int height = std::max<LONG>(1L, clientRect.bottom - clientRect.top);
     return RECT{
         clientRect.left + baseRect.left * width / 800,
         clientRect.top + baseRect.top * height / 600,
@@ -26838,10 +26839,10 @@ void drawRuntimeCampaignScoreFallbackOverlay(
                 : RGB(5 + band, 13 + band, 28 + shade));
         const RECT bandRect{
             clientRect.left,
-            clientRect.top + band * std::max(1L,
+            clientRect.top + band * std::max<LONG>(1L,
                 (clientRect.bottom - clientRect.top) / 12),
             clientRect.right,
-            clientRect.top + (band + 1) * std::max(1L,
+            clientRect.top + (band + 1) * std::max<LONG>(1L,
                 (clientRect.bottom - clientRect.top) / 12)
         };
         FillRect(dc, &bandRect, bandBrush);
@@ -27526,9 +27527,9 @@ void advanceRuntimeUiPresentation(RuntimeWindowState& state) {
 RECT runtimeResultBannerRect(const RECT& clientRect, int width, int height) {
     const RECT viewport = runtimeMapViewport(clientRect);
     const double scale = std::min({1.0,
-        static_cast<double>(std::max(1L, viewport.right - viewport.left))
+        static_cast<double>(std::max<LONG>(1L, viewport.right - viewport.left))
             / std::max(1, width),
-        static_cast<double>(std::max(1L, viewport.bottom - viewport.top))
+        static_cast<double>(std::max<LONG>(1L, viewport.bottom - viewport.top))
             / std::max(1, height)});
     width = std::max(1, static_cast<int>(std::lround(width * scale)));
     height = std::max(1, static_cast<int>(std::lround(height * scale)));

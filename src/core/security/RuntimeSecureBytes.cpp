@@ -12,6 +12,9 @@
 #elif defined(__linux__)
 #include <cerrno>
 #include <sys/random.h>
+#elif defined(__APPLE__)
+#include <cerrno>
+#include <sys/random.h>
 #endif
 
 namespace {
@@ -35,6 +38,18 @@ public:
 #elif defined(__linux__)
         const auto count = ::getrandom(output.data(), output.size(), 0U);
         if (count >= 0) return {ReadStatus::Success, static_cast<std::size_t>(count), 0};
+        const int code = errno;
+        if (code == EINTR) return {ReadStatus::Interrupted, 0, code};
+        return {code == ENOSYS ? ReadStatus::Unavailable : ReadStatus::Failure, 0, code};
+#elif defined(__APPLE__)
+        // getentropy() rejects requests larger than 256 bytes, so a large span
+        // is filled in chunks. Each chunk is reported as progress rather than
+        // success, and fillWithReader() keeps reading until the span is full --
+        // that keeps the retry bound and the wipe-on-failure policy identical
+        // to the Windows and Linux paths.
+        const std::size_t chunk = output.size() < 256U ? output.size() : 256U;
+        if (::getentropy(output.data(), chunk) == 0)
+            return {ReadStatus::Success, chunk, 0};
         const int code = errno;
         if (code == EINTR) return {ReadStatus::Interrupted, 0, code};
         return {code == ENOSYS ? ReadStatus::Unavailable : ReadStatus::Failure, 0, code};
@@ -80,6 +95,8 @@ RuntimeSecureBytesBackend runtimeSecureBytesBackend() noexcept {
     return RuntimeSecureBytesBackend::WindowsCng;
 #elif defined(__linux__)
     return RuntimeSecureBytesBackend::LinuxGetrandom;
+#elif defined(__APPLE__)
+    return RuntimeSecureBytesBackend::AppleGetentropy;
 #else
     return RuntimeSecureBytesBackend::Unsupported;
 #endif

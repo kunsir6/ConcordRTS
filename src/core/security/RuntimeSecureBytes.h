@@ -16,7 +16,10 @@ enum class RuntimeSecureBytesStatus : std::uint8_t {
 enum class RuntimeSecureBytesBackend : std::uint8_t {
     Unsupported,
     WindowsCng,
-    LinuxGetrandom
+    LinuxGetrandom,
+    // Appended rather than inserted so the existing enumerator values of every
+    // other platform stay byte-identical across the build matrix.
+    AppleGetentropy
 };
 
 inline constexpr std::size_t runtimeSecureBytesMaximumRequest = 0xffffffffULL;

@@ -46,6 +46,14 @@ private:
 
 int main() {
     static_assert(noexcept(fillRuntimeSecureBytes({})));
+    // The backend enumerator values are a cross-platform contract: the Apple
+    // adapter was appended rather than inserted so that the numbers the Windows
+    // and Linux builds already produce stay exactly the same. Pinning them here
+    // turns that promise into something the compiler enforces.
+    static_assert(static_cast<int>(RuntimeSecureBytesBackend::Unsupported) == 0);
+    static_assert(static_cast<int>(RuntimeSecureBytesBackend::WindowsCng) == 1);
+    static_assert(static_cast<int>(RuntimeSecureBytesBackend::LinuxGetrandom) == 2);
+    static_assert(static_cast<int>(RuntimeSecureBytesBackend::AppleGetentropy) == 3);
     static_assert(std::is_trivially_copyable_v<RuntimeSecureBytesResult>);
     int checks = 0, failures = 0;
     const auto expect = [&](bool condition, const char* message) {
@@ -102,6 +110,8 @@ int main() {
     expect(backend == RuntimeSecureBytesBackend::WindowsCng, "actual Windows system backend");
 #elif defined(__linux__)
     expect(backend == RuntimeSecureBytesBackend::LinuxGetrandom, "actual Linux system backend");
+#elif defined(__APPLE__)
+    expect(backend == RuntimeSecureBytesBackend::AppleGetentropy, "actual macOS system backend");
 #else
     expect(backend == RuntimeSecureBytesBackend::Unsupported, "explicit unsupported platform");
 #endif
