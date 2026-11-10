@@ -301,6 +301,27 @@ function(concord_apple_add_win32_compat_selftest)
         BEFORE PRIVATE "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
     )
 
+    # Q-06：输入投递闭环。真实点击无法在无人值守环境里验证（不能截图、
+    # 不能合成鼠标），但"InputEvent → WM_*"这一段可以钉死，而且它正是最容易
+    # **静默**写错的地方：LPARAM 的坐标是两个 16 位字（负数/超界会被截断）、
+    # WM_MOUSEWHEEL 的 delta 必须在**高位**字（放低位就永远等于 0）。
+    # 这些错了都不会崩，只会让"点上去没反应"。
+    if(NOT TARGET concord_apple_input_semantics_selftest)
+        add_executable(
+            concord_apple_input_semantics_selftest
+            "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/selftest/CompatAppleInputSemantics.cpp"
+            ${CONCORD_APPLE_WIN32_COMPAT_SOURCES}
+        )
+        target_include_directories(
+            concord_apple_input_semantics_selftest
+            BEFORE PRIVATE
+                "${CONCORD_APPLE_WIN32_COMPAT_INCLUDE_DIR}"
+                # RuntimeAppleWindowSurface.h 在 src/ 下（不是 include/ 下的 shim 头）。
+                "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src"
+        )
+        concord_apple_link_win32_compat_frameworks(concord_apple_input_semantics_selftest)
+    endif()
+
     # The XAPO half of the audio story: CXAPOBase is only "done" if the project's
     # real peak limiter (src/audio/backend/RuntimeAudioPeakLimiter.h, pure DSP)
     # still compiles, still limits, and is still destroyed by Release().  That
