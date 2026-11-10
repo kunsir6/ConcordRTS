@@ -42483,6 +42483,7 @@ void RuntimeGrandCannonPreparedFacing::install(RuntimeMapRenderCache& target) {
 
 #include "render/voxel/diagnostics/RuntimeGrandCannonPrewarmContract.inl"
 
+#if defined(_WIN32)
 #include "ui/surface/win32/diagnostics/MapVisionGpuFixtureWin32.inl"
 #include "render/visibility/diagnostics/RuntimeGpuVisionOverlayContract.inl"
 
@@ -42498,6 +42499,7 @@ void RuntimeGrandCannonPreparedFacing::install(RuntimeMapRenderCache& target) {
 #include "render/lighting/diagnostics/RuntimeGpuLightWorldContract.inl"
 #include "render/voxel/diagnostics/RuntimeGpuVxlModeContract.inl"
 #include "render/terrain/diagnostics/RuntimeGpuTerrainContract.inl"
+#endif
 
 #include "render/core/diagnostics/RuntimeAuxiliaryShpDrawingContract.inl"
 

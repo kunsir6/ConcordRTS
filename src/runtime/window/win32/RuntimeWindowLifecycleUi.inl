@@ -10,7 +10,9 @@ public:
     void releaseGraphics() override {
         // Retire the graphics owner while the native window still exists.
         state_->mapComposition.release();
+#if defined(_WIN32)
         state_->d3d11Presenter.reset();
+#endif
         releaseRuntimeBackBuffer(state_->completedFrameBuffer);
         (void)state_->fpsDeviceOverlay.release();
         releaseRuntimeBackBuffer(state_->backBuffer);

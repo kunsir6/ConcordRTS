@@ -14,7 +14,9 @@
 #include "render/core/win32/RuntimeScreenShakeDrawingWin32.h"
 #include "render/voxel/RuntimeVoxelLoadingPrewarm.h"
 #include "runtime/presentation/win32/FramePresenterWin32.h"
+#if defined(_WIN32)
 #include "runtime/presentation/win32/D3D11FramePresenterWin32.h"
+#endif
 #include "ui/surface/win32/MapCompositionWin32.h"
 #include "ui/surface/win32/MapFrameProbeWin32.h"
 #include "ui/surface/win32/RuntimeMainBackBufferWin32.h"
@@ -1409,7 +1411,9 @@ struct RuntimeWindowState : RuntimeProductionHostState {
     concord::ui::win32::SkirmishBackBufferWin32 fpsDeviceOverlay;
     concord::presentation::FramePresentStatistics softwareFrameCounters;
     concord::presentation::FrameBackendOptions frameBackendRequest;
+#if defined(_WIN32)
     std::unique_ptr<concord::presentation::win32::D3D11FramePresenterWin32> d3d11Presenter;
+#endif
     concord::ui::win32::MapCompositionWin32 mapComposition;
     bool frameBackendInitialized=false;
     std::uint64_t softwareFrameSequence=0,softwareSceneVersion=0,softwareFallbackSubmissions=0;
@@ -28818,6 +28822,7 @@ LRESULT CALLBACK runtimeWindowProc(
             advanceRuntimeResultPresentation(*state,presentationMs);
             expireRuntimePlayerDefeatNotices(*state,presentationMs);
         }
+#if defined(_WIN32)
         if(state&&(state->frameBackendRequest.backend==concord::presentation::FrameBackend::D3D11
             ||state->frameBackendRequest.mapBackend==concord::presentation::FrameBackend::D3D11)){
             if(IsIconic(window)||clientWidth<=0||clientHeight<=0){
@@ -28834,14 +28839,19 @@ LRESULT CALLBACK runtimeWindowProc(
         }
         if(state&&state->d3d11Presenter&&!state->d3d11Presenter->active()
             &&state->d3d11Presenter->tryRecoverDevice())state->repaintRequested=true;
+#endif
         bool reuseCachedFrame=false,backBufferReady=false,submissionSucceeded=false,baselineVisibleSubmission=false;
         std::chrono::steady_clock::time_point baselineSubmissionStart{};
         concord::ui::ConstMenuPixelSurfaceView completedPixels;
         for(int mapAttempt=0;mapAttempt<2;++mapAttempt) {
+#if defined(_WIN32)
         const auto deviceGeneration=state&&state->d3d11Presenter?state->d3d11Presenter->report().deviceGeneration:0;
         const bool mapMode=state&&state->world.getSummary().loaded
             &&state->frameBackendRequest.mapBackend==concord::presentation::FrameBackend::D3D11
             &&state->d3d11Presenter&&state->d3d11Presenter->active();
+#else
+        const bool mapMode=false;
+#endif
         bool mapCaptureFailed=false;
         reuseCachedFrame =
             state != nullptr
@@ -28870,8 +28880,10 @@ LRESULT CALLBACK runtimeWindowProc(
             backBufferReady = true;
         }
 
+#if defined(_WIN32)
         if(state&&state->d3d11Presenter&&state->d3d11Presenter->active()&&!backBufferReady)
             state->d3d11Presenter->fallbackToSoftware("CPU-scene-allocation");
+#endif
         if (backBufferReady && !reuseCachedFrame) state->backBuffer.beginWrite();
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(220, 230, 240));
@@ -29064,6 +29076,7 @@ LRESULT CALLBACK runtimeWindowProc(
             }
         }
 
+#if defined(_WIN32)
         if(mapMode&&!reuseCachedFrame) {
             const bool nativeReady=!mapCaptureFailed&&state->mapComposition.finish();
             dc=state->backBuffer.memoryDc;
@@ -29073,6 +29086,7 @@ LRESULT CALLBACK runtimeWindowProc(
                 state->repaintRequested=true;continue;
             }
         }
+#endif
         traceScenePaint("after-scene");
         // Complete the clean scene first. Cached paints keep its version/tick,
         // while each presentation receives a fresh submission identity.
@@ -29080,8 +29094,13 @@ LRESULT CALLBACK runtimeWindowProc(
             if (++state->softwareSceneVersion==0) ++state->softwareSceneVersion;
             state->softwareSceneTick=state->tick;
         }
+#if defined(_WIN32)
         baselineSubmissionStart = state != nullptr && (state->liveBenchmark != nullptr || state->d3d11Presenter)
             ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+#else
+        baselineSubmissionStart = state != nullptr && state->liveBenchmark != nullptr
+            ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+#endif
         submissionSucceeded=false;baselineVisibleSubmission=false;completedPixels={};
         if (state != nullptr) {
             const bool visible=IsWindowVisible(window)!=FALSE,minimized=IsIconic(window)!=FALSE;
@@ -29122,12 +29141,16 @@ LRESULT CALLBACK runtimeWindowProc(
                             drawRuntimeMouseCursorOverlay(native,*c.client,*c.state,c.bounds);
                         };
                         bool overlayReady=false;
+#if defined(_WIN32)
                         if(copied&&state->d3d11Presenter&&state->d3d11Presenter->active()){
                             overlayReady=state->d3d11Presenter->composeDeviceOverlay(state->backBuffer,finalBuffer,
                                 {bounds.left,bounds.top,bounds.right,bounds.bottom},draw,&context);
                             if(!overlayReady)state->d3d11Presenter->fallbackToSoftware("CPU-device-font-target");
                         }
                         if(copied&&!overlayReady&&(!state->d3d11Presenter||!state->d3d11Presenter->active()))
+#else
+                        if(copied&&!overlayReady)
+#endif
                             overlayReady=concord::presentation::win32::composeWindowDeviceOverlayWin32(
                                 window,state->backBuffer,finalBuffer,state->fpsDeviceOverlay,
                                 {bounds.left,bounds.top,bounds.right,bounds.bottom},draw,&context);
@@ -29136,6 +29159,7 @@ LRESULT CALLBACK runtimeWindowProc(
                         }
                     }
                 }else completedPixels=state->backBuffer.completedPixels();
+#if defined(_WIN32)
                 if(mapMode) {
                     bool packetReady=state->mapComposition.prepare();
                     if(loaded&&eligible&&!IsRectEmpty(&bounds))packetReady=packetReady&&completedPixels.valid()
@@ -29150,12 +29174,15 @@ LRESULT CALLBACK runtimeWindowProc(
                         state->mapComposition.cancel();if(state->d3d11Presenter->active())state->d3d11Presenter->fallbackToSoftware("map-complete-packet");
                         state->repaintRequested=true;continue; // Repaint the complete original CPU scene in this same WM_PAINT.
                     }
-                }else if(completedPixels.valid()){
+                } else
+#endif
+                if(completedPixels.valid()){
                     using namespace concord::presentation;
                     const auto sequence=++state->softwareFrameSequence;
                     SoftwareFrameView frame{completedPixels,sequence,state->softwareSceneVersion,
                         static_cast<std::uint64_t>(std::max(0,state->softwareSceneTick)),
                         reuseCachedFrame?SoftwareFrameContent::ReusedScene:SoftwareFrameContent::Redrawn};
+#if defined(_WIN32)
                     if(state->d3d11Presenter&&state->d3d11Presenter->active()){
                         const auto compositionEnd=std::chrono::steady_clock::now();
                         submissionSucceeded=state->d3d11Presenter->present(frame)==FramePresentResult::Presented;
@@ -29165,13 +29192,18 @@ LRESULT CALLBACK runtimeWindowProc(
                         if(!submissionSucceeded&&!state->d3d11Presenter->active())frame.sequence=++state->softwareFrameSequence;
                     }
                     if(!state->d3d11Presenter||!state->d3d11Presenter->active()){
+#else
+                    if(true){
+#endif
                         concord::presentation::win32::DibFramePresenterWin32 presenter(
                             paintDc,*completedOwner,state->softwareFrameCounters);
                         submissionSucceeded=presenter.present(frame)==FramePresentResult::Presented;
                     }
                 }else{
+#if defined(_WIN32)
                     if(state->d3d11Presenter&&state->d3d11Presenter->active())
                         state->d3d11Presenter->fallbackToSoftware("CPU-complete-frame-unavailable");
+#endif
                     // Resource/flush failure keeps the original direct native
                     // path. It does not claim to publish CPU-readable pixels.
                     submissionSucceeded=BitBlt(paintDc,0,0,clientWidth,clientHeight,
@@ -29236,7 +29268,11 @@ LRESULT CALLBACK runtimeWindowProc(
                 reuseCachedFrame ? 0.0 : state->renderStats.visionMs,
                 !reuseCachedFrame, state->renderStats.visibleWorldObjects,
                 baselineSubmissionCpuMs, baselineVisibleSubmission,
+#if defined(_WIN32)
                 state->d3d11Presenter && state->d3d11Presenter->active()
+#else
+                false
+#endif
             );
             if (!reuseCachedFrame && state->perf.lastPaintMs >= 50.0) {
                 std::cout << "Live slow frame: tick=" << state->tick
@@ -36656,8 +36692,10 @@ int runRuntimeResultPresentationSmokeTest(const RuntimeConfig& config) {
 
 #include "runtime/performance/diagnostics/RuntimeFullscreenPerformanceSmoke.inl"
 #include "runtime/performance/diagnostics/RuntimeFpsDisplaySmoke.inl"
+#if defined(_WIN32)
 #include "runtime/performance/diagnostics/RuntimeMainFrameContract.inl"
 #include "runtime/performance/diagnostics/RuntimeMapGpuTiming.inl"
+#endif
 #include "ui/selection/diagnostics/RuntimeIdleOverlayContract.inl"
 #include "render/core/diagnostics/RuntimeCombinedCameraBoundsContract.inl"
 #include "render/geometry/diagnostics/RuntimeCameraGeometryMemoContract.inl"
@@ -36705,6 +36743,7 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
         }
         return 0;
     }
+#if defined(_WIN32)
     if(const char* terrainDriver=std::getenv("CONCORD_S41_TERRAIN_GPU_CONTRACT")){
         std::string terrainError;const auto before=runtimeStandaloneSimulationStateHash(state,terrainError);
         RuntimeMapRenderContext assets;assets.rules=state.rulesLoaded?&state.rules:nullptr;assets.theater=state.theaterLoaded?&state.theater:nullptr;assets.art=state.artLoaded?&state.art:nullptr;
@@ -36717,12 +36756,15 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
     }
     if(const char* driver=std::getenv("CONCORD_S41_MAP_VISION_CONTRACT")){std::string visionError;
         if((std::strcmp(driver,"hardware")!=0&&std::strcmp(driver,"warp")!=0)||!runRuntimeGpuVisionOverlayContractCheck(runtimeAssetRootPath(state.config),std::strcmp(driver,"warp")==0,visionError)){std::cerr<<"S41 GPU vision contract failed: "<<visionError<<'\n';return 1;}return 0;}
+#endif
+#if defined(_WIN32)
     if(std::getenv("CONCORD_S41_MAP_TIMING")){std::string timingError;if(!runRuntimeMapGpuTiming(state,timingError)){std::cerr<<"S41 normal map timing failed: "<<timingError<<'\n';return 1;}return 0;}
     if (std::getenv("CONCORD_MAIN_FRAME_CONTRACT_OUTPUT")) {
         std::string frameError;
         if (!runRuntimeMainFrameContract(state,frameError)) {std::cerr << "Main frame contract failed: " << frameError << '\n';return 1;}
         return 0;
     }
+#endif
     if (const char* fpsDisplay = std::getenv("CONCORD_INTERACTION_SMOKE_FPS_DISPLAY_ONLY");
         fpsDisplay != nullptr && parseRuntimeBool(fpsDisplay)) {
         std::string fpsDisplayError;

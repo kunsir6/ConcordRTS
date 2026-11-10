@@ -18,7 +18,9 @@
 #include "ui/text/win32/RuntimeSkirmishSystemFontWin32.h"
 #include "ui/surface/RuntimeMenuPixelSurface.h"
 #include "ui/drawing/MenuDrawCommands.h"
+#if defined(_WIN32)
 #include "runtime/presentation/win32/D3D11FramePresenterWin32.h"
+#endif
 #include "ui/skirmish/win32/RuntimeSkirmishBackBufferWin32.h"
 #include "ui/input/RuntimeObserver.h"
 #include "data/maps/RuntimeRandomMap.h"
@@ -738,8 +740,10 @@ struct MenuState : RuntimeSkirmishServices, RuntimeSkirmishController {
     concord::presentation::FrameBackendOptions menuRequest;
     concord::presentation::FramePresentStatistics menuStatistics;
     concord::ui::MenuDrawList menuCommands;
+#if defined(_WIN32)
     std::unique_ptr<concord::presentation::win32::D3D11FramePresenterWin32> menuGpu;
     concord::presentation::win32::D3D11FrameProbeWin32* menuProbe=nullptr;
+#endif
     bool menuGpuAttempted=false;
     std::uint64_t menuSequence=0,softwareCompositions=0;
     double lastMenuPrepareMs=0,lastMenuSubmitMs=0,lastMenuPresentMs=0;
@@ -3615,6 +3619,7 @@ bool renderShellBackBuffer(MenuState& state) {
 bool renderShellClient(MenuState& state, HDC target, int width, int height) {
     computeShellViewport(state, width, height);
     if(width<=0||height<=0||IsIconic(state.hwnd))return false;
+#if defined(_WIN32)
     if(state.menuRequest.menuBackend==concord::presentation::FrameBackend::D3D11&&!state.menuGpuAttempted) {
         state.menuGpuAttempted=true;
         auto request=state.menuRequest;request.backend=request.menuBackend;request.device=request.menuDevice;
@@ -3642,6 +3647,7 @@ bool renderShellClient(MenuState& state, HDC target, int width, int height) {
         }catch(...){state.menuGpu->fallbackToSoftware("menu-prepare-allocation");}
         state.backDirty=true;
     }
+#endif
     const auto softwareStart=std::chrono::steady_clock::now();
     if (!ensureShellBackBuffer(state, target)) return false;
     if (state.backDirty && !renderShellBackBuffer(state)) return false;
@@ -3854,7 +3860,10 @@ LRESULT CALLBACK shellSkirmishWindowProc(
         break;
     case WM_NCDESTROY:
         KillTimer(window, 2);
-        state->menuGpu.reset();state->menuGpuAttempted=false;state->menuSequence=0;state->menuCommands.reset();
+#if defined(_WIN32)
+        state->menuGpu.reset();
+#endif
+        state->menuGpuAttempted=false;state->menuSequence=0;state->menuCommands.reset();
         state->audio.stopMusic();
         state->hwnd = nullptr;
         state->randomNameWindow = nullptr;
@@ -4224,8 +4233,10 @@ RuntimeSkirmishSelection runRuntimeSkirmishMenu(const RuntimeConfig& config,Runt
 #include "ui/skirmish/diagnostics/RuntimeSkirmishPixelSurfaceSmoke.inl"
 #include "audio/menu/diagnostics/RuntimeSkirmishMusicClockSmoke.inl"
 #include "ui/skirmish/diagnostics/RuntimeSecondWindowContract.inl"
+#if defined(_WIN32)
 #include "ui/skirmish/diagnostics/RuntimeGpuMenuContract.inl"
 #include "ui/skirmish/diagnostics/RuntimeGpuMenuTiming.inl"
+#endif
 #include "ui/skirmish/diagnostics/skirmish_clock_original/Timer.original.inl"
 #include "ui/skirmish/diagnostics/RuntimeSkirmishPresentationClockSmoke.inl"
 
@@ -4240,8 +4251,10 @@ int runRuntimeSkirmishMenuSmokeTest(
         }
         return runSkirmishPresentationClockSmoke(config,fs::path(*output));
     }
+#if defined(_WIN32)
     if(const char* output=std::getenv("CONCORD_GPU_MENU_CONTRACT_OUTPUT"))return runGpuMenuContract(config,fs::path(output));
     if(const char* output=std::getenv("CONCORD_GPU_MENU_TIMING_OUTPUT"))return runGpuMenuTiming(config,fs::path(output));
+#endif
     if (const char* output = std::getenv("CONCORD_SECOND_WINDOW_CONTRACT_OUTPUT"))
         return runSecondWindowContract(config, fs::path(output));
     if (std::getenv("CONCORD_SKIRMISH_MUSIC_CLOCK_ONLY"))
