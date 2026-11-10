@@ -112,3 +112,7 @@ Thumbs.db
 *.community.state
 /.aws/
 /.ssh/
+
+# ON-1-03：图标源图是打包**输入**（不是构建产物）。.gitignore 里的通配 *.png
+# 会把它一起吞掉，于是 clone 出来的仓库打不出带图标的 bundle。
+!/packaging/icon-source.png
