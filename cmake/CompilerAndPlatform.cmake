@@ -6,6 +6,12 @@ if(CONCORD_PORTABLE_CORE)
     return()
 endif()
 
+# macOS platform axis.  Not taken on Windows, so PlatformApple.cmake is never
+# read there and cannot affect the existing build in any way.
+if(APPLE)
+    include("${CMAKE_CURRENT_LIST_DIR}/PlatformApple.cmake")
+endif()
+
 target_compile_definitions(
     concord_rules_dump PRIVATE
     CONCORD_RULES_ABI_REVISION=${CONCORD_RULES_ABI_REVISION}
@@ -230,6 +236,27 @@ if (WIN32)
     target_link_libraries(
         concord_internet_multiplayer_menu_smoke PRIVATE bcrypt
     )
+elseif(APPLE)
+    # macOS needs no import libraries to replace the Win32 list above.  Frameworks
+    # are linked on demand through concord_apple_link_frameworks() at the point
+    # where the code that needs them is introduced, so nothing is pulled in early.
+    # Print the resolved capability set, because the most common mistake while a
+    # port is in progress is believing a backend is enabled when its switch is OFF.
+    message(
+        STATUS
+        "concord_apple: sdl3-window=${CONCORD_APPLE_SDL3_WINDOW} sdl3-audio=${CONCORD_APPLE_SDL3_AUDIO} software-present=${CONCORD_APPLE_SOFTWARE_PRESENT} metal-present=${CONCORD_APPLE_METAL_PRESENT}"
+    )
+    # S1: point the include path at the declaration-only Win32 shim before this
+    # point's targets are created, so `#include <windows.h>` resolves on macOS
+    # without touching a single source file.
+    concord_apple_enable_win32_compat()
+    # S2: the shim now has real object code behind part of its declarations.
+    # Attach it to the runtime target so those symbols resolve at link time, and
+    # build the compat layer's own pixel-level test binary alongside.
+    if(TARGET concord_runtime)
+        concord_apple_add_win32_compat_sources(concord_runtime)
+    endif()
+    concord_apple_add_win32_compat_selftest()
 endif()
 
 
