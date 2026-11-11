@@ -40,5 +40,9 @@
     <string>@CONCORD_MIN_MACOS@</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.strategy-games</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
 </dict>
 </plist>

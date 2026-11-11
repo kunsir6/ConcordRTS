@@ -81,30 +81,24 @@ sed -e "s|@CONCORD_APP_NAME@|$APP_NAME|g" \
     "$SCRIPT_DIR/Info.plist.in" > "$CONTENTS/Info.plist.tmp"
 mv "$CONTENTS/Info.plist.tmp" "$CONTENTS/Info.plist"
 
-# ④ 图标：从单张 256px 源图生成 iconset，再交给 iconutil。
-#    仓库里只存一张 120 KB 的 PNG，而不是 2 MB 的 icns：icns 是构建产物。
+# ④ 图标：交给 make-icon.py 生成（1024 画布 + Big Sur 圆角 + 透明边距），再 iconutil 出 icns。
+#    这里**不能**只做「sips 缩 10 个尺寸 + iconutil」：
+#      · 源图通常是纯 RGB 方块（游戏封面），没有 alpha、也不是苹果的圆角形体；
+#      · 这样出来的 icns 系统不报错也不理它，Finder/Dock 显示通用空白图标；
+#      · 实测纯 10 帧的 iconset 会被 iconutil 直接判 "Invalid Iconset"。
+#    为什么不是"在 icns 里存 alpha 就够了"：Dock 里系统图标都按 824/1024 网格排，
+#    满幅方图在旁边一眼就偏大偏方，所以形体和留白一起做。
 if [ -f "$ICON_SOURCE" ]; then
-    # 目录名必须以 .iconset 结尾，且**不能**是隐藏文件（".iconset" 这种名字
-    # iconutil 会当成"没有扩展名"，报 "The file extension must equal icns"）。
-    ICONSET="$OUTPUT/concord-icon.iconset"
-    mkdir -p "$ICONSET"
-    for size in 16 32 64 128 256 512 1024; do
-        sips -z "$size" "$size" "$ICON_SOURCE" --out "$ICONSET/icon_${size}.png" >/dev/null
-    done
-    cp "$ICONSET/icon_16.png"   "$ICONSET/icon_16x16.png"
-    cp "$ICONSET/icon_32.png"   "$ICONSET/icon_16x16@2x.png"
-    cp "$ICONSET/icon_32.png"   "$ICONSET/icon_32x32.png"
-    cp "$ICONSET/icon_64.png"   "$ICONSET/icon_32x32@2x.png"
-    cp "$ICONSET/icon_128.png"  "$ICONSET/icon_128x128.png"
-    cp "$ICONSET/icon_256.png"  "$ICONSET/icon_128x128@2x.png"
-    cp "$ICONSET/icon_256.png"  "$ICONSET/icon_256x256.png"
-    cp "$ICONSET/icon_512.png"  "$ICONSET/icon_256x256@2x.png"
-    cp "$ICONSET/icon_512.png"  "$ICONSET/icon_512x512.png"
-    cp "$ICONSET/icon_1024.png" "$ICONSET/icon_512x512@2x.png"
-    # iconutil 的 -o 也要求扩展名真的是 .icns（写 ".tmp" 会被拒），
-    # 所以先在 build 目录产出 .icns，再 mv 进 Resources。
-    iconutil -c icns "$ICONSET" -o "$OUTPUT/$APP_NAME.icns"
-    mv "$OUTPUT/$APP_NAME.icns" "$RESOURCES_DIR/$APP_NAME.icns"
+    # 中间产物（10 帧 iconset）放临时目录：它只是 iconutil 的输入，
+    # 留在 build/ 或 dist/ 里只会变成"这个目录里哪些文件是产物"的噪声。
+    ICON_WORK="$(mktemp -d "${TMPDIR:-/tmp}/concord-icon.XXXXXX")"
+    python3 "$SCRIPT_DIR/make-icon.py" \
+        --source "$ICON_SOURCE" \
+        --out-dir "$ICON_WORK" \
+        --name "$APP_NAME" \
+        --canvas 1024 --content 824 --radius 185
+    mv "$ICON_WORK/$APP_NAME.icns" "$RESOURCES_DIR/$APP_NAME.icns"
+    rm -rf "$ICON_WORK"
 else
     echo "make-app-bundle: warning: icon source not found: $ICON_SOURCE" >&2
 fi
