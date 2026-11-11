@@ -1401,6 +1401,7 @@ struct RuntimeWindowState : RuntimeProductionHostState {
     int lastHealthPipFallbackDraws = 0;
     int lastVeterancyResourceDraws = 0;
     int lastVeterancyFallbackDraws = 0;
+    int lastTeamNumberBadges = 0;
     int lastSidebarAddonResourceDraws = 0;
     std::size_t lastInteractionOffscreenNonBlackPixels = 0;
     int lastSelectedHealthBars = 0;
@@ -23293,6 +23294,55 @@ void drawRuntimeVeterancyBadge(
     SetBkMode(dc, oldBkMode);
 }
 
+// Retail shows a control-group digit on every selected unit that belongs to
+// that team, independent of how the current selection was made. A unit may
+// belong to several groups; the lowest assigned number wins so the display is
+// deterministic.
+int runtimeTeamGroupIndexForObject(const RuntimeWindowState& state, int objectId) {
+    for (std::size_t index = 0; index < state.playerLocalCommands.teams.size(); ++index) {
+        const auto& team = state.playerLocalCommands.teams[index];
+        if (std::find(team.begin(), team.end(), objectId) != team.end()) {
+            return static_cast<int>(index);
+        }
+    }
+    return -1;
+}
+
+void drawRuntimeTeamNumberBadge(
+    HDC dc,
+    RuntimeWindowState& state,
+    const RuntimeProjectedObject& projectedObject,
+    const RECT& selectionBounds
+) {
+    if (projectedObject.object == nullptr) {
+        return;
+    }
+    const int group =
+        runtimeTeamGroupIndexForObject(state, projectedObject.object->instanceId);
+    if (group < 0 || group >= 10) {
+        return;
+    }
+    const wchar_t digit =
+        static_cast<wchar_t>(group == 9 ? L'0' : L'1' + group);
+    wchar_t text[2] = {digit, L'\0'};
+    RECT badge{
+        selectionBounds.left + 1,
+        selectionBounds.top,
+        selectionBounds.left + 13,
+        selectionBounds.top + 15
+    };
+    const int oldBkMode = SetBkMode(dc, TRANSPARENT);
+    const COLORREF oldTextColor = SetTextColor(dc, RGB(16, 20, 26));
+    RECT shadow = badge;
+    OffsetRect(&shadow, 1, 1);
+    DrawTextW(dc, text, -1, &shadow, DT_SINGLELINE | DT_LEFT | DT_TOP);
+    SetTextColor(dc, RGB(236, 242, 248));
+    DrawTextW(dc, text, -1, &badge, DT_SINGLELINE | DT_LEFT | DT_TOP);
+    SetTextColor(dc, oldTextColor);
+    SetBkMode(dc, oldBkMode);
+    ++state.lastTeamNumberBadges;
+}
+
 RuntimeStructureSelectionFrameGeometry
 runtimeStructureSelectionFrameGeometry(
     const std::vector<POINT>& footprintCenters,
@@ -23903,6 +23953,7 @@ void drawRuntimeInteractionOverlay(
     state.lastHealthPipFallbackDraws = 0;
     state.lastVeterancyResourceDraws = 0;
     state.lastVeterancyFallbackDraws = 0;
+    state.lastTeamNumberBadges = 0;
     state.lastSelectedHealthBars = 0;
     state.lastHoveredStructureHealthBars = 0;
     state.lastHoveredUnitHealthBars = 0;
@@ -24039,6 +24090,8 @@ void drawRuntimeInteractionOverlay(
                 runtimeRenderPlacementNativeRect(projectedObject.spriteBounds);
             state.lastUnitSelectionRenderCenter =
                 runtimeRenderPlacementNativePoint(projectedObject.renderCenter);
+            // 编队编号：选中属于某个 Ctrl 编队的单位时，在选中框左上角显示编号。
+            drawRuntimeTeamNumberBadge(dc, state, projectedObject, selectionBounds);
         }
 
         if ((selected || hovered)
@@ -59421,6 +59474,8 @@ bool runRuntimeNumberImpassableRowsSemanticsProbe(
 bool runRuntimeNeutralBuildingPaletteRenderContractCheck(
     const RuntimeMapRenderContext& context, const std::string& output, std::string& error);
 #include "simulation/combat/targeting/diagnostics/RuntimeDefenseFacingSmoke.inl"
+#include "simulation/combat/targeting/diagnostics/RuntimeGuardAcquisitionPolicySmoke.inl"
+#include "ui/selection/diagnostics/RuntimeTeamNumberBadgeSmoke.inl"
 #include "simulation/abilities/unit_special/diagnostics/RuntimeDemoTruckDeploySmoke.inl"
 #include "simulation/combat/damage/diagnostics/RuntimeDemoTruckFriendlyDamageSmoke.inl"
 #include "simulation/combat/targeting/diagnostics/RuntimeMinimumRangeSmoke.inl"
@@ -62067,6 +62122,20 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
         }
         return 0;
     }
+    if (std::getenv("CONCORD_COMMAND_SMOKE_GUARD_POLICY_ONLY") != nullptr) {
+        std::string error;
+        if (!runRuntimeGuardAcquisitionPolicySmoke(state, error)) {
+            std::cerr << error << '\n'; return 1;
+        }
+        return 0;
+    }
+    if (std::getenv("CONCORD_COMMAND_SMOKE_TEAM_NUMBER_ONLY") != nullptr) {
+        std::string error;
+        if (!runRuntimeTeamNumberBadgeSmoke(state, error)) {
+            std::cerr << error << '\n'; return 1;
+        }
+        return 0;
+    }
     if (std::getenv("CONCORD_COMMAND_SMOKE_ORE_DRILL_PALETTE_ONLY") != nullptr) {
         std::string error;
         if (!runRuntimeOreDrillPaletteSmoke(state, error)) {
@@ -62653,6 +62722,18 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
     if (!runRuntimeAirstrikeHostSmokeProbe(airstrikeHostError)) {
         std::cerr << "Command smoke failed: Airstrike host: "
                   << airstrikeHostError << ".\n";
+        return 1;
+    }
+    std::string guardPolicyError;
+    if (!runRuntimeGuardAcquisitionPolicySmoke(state, guardPolicyError)) {
+        std::cerr << "Command smoke failed: guard acquisition policy: "
+                  << guardPolicyError << ".\n";
+        return 1;
+    }
+    std::string teamNumberBadgeError;
+    if (!runRuntimeTeamNumberBadgeSmoke(state, teamNumberBadgeError)) {
+        std::cerr << "Command smoke failed: team number badge: "
+                  << teamNumberBadgeError << ".\n";
         return 1;
     }
     traceStage("before-startup-timing");
