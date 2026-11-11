@@ -69,6 +69,20 @@ using InputSink = void (*)(const InputEvent& event, void* context);
 // 注册接收方。context 由调用方定义（compat 侧传目标窗口）。
 void setInputSink(InputSink sink, void* context);
 
+// ---------------------------------------------------------------------------
+// U-14: 全屏视口
+// ---------------------------------------------------------------------------
+// 全屏的语义不是「把 1024x640 的画面放大铺满屏幕」，而是**获得更大的客户区**：
+// 单位保持原来的像素大小，一屏能看到更多地图。靠 CoreAnimation 拉伸一张小图
+// 永远做不到这件事——必须让游戏自己的客户区（以及它那块 DIB / 后缓冲）跟着
+// 变成全屏尺寸，再由游戏按 GetClientRect 重新布局、重绘。
+//
+// 所以 .mm 在进入/退出全屏时把宿主给出的内容区尺寸（**点**，不是 backing 像素）
+// 回调给 compat：compat 改自己的窗口矩形、丢掉旧尺寸的客户区位图、让游戏
+// 按新客户区重排。width<=0 表示「恢复进全屏之前的尺寸」。
+using ResizeSink = void (*)(int width, int height, void* context);
+void setResizeSink(ResizeSink sink, void* context);
+
 // 把队列里攒下的 AppKit 事件全部取出来、翻译后交给 sink。
 // 必须由**消息循环**周期性调用（compat 的 GetMessageW 轮询里）：
 // NSApp 的事件分发依赖 NSRunLoop，而本项目的主循环是 compat 自己的

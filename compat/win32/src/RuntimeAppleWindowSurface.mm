@@ -42,6 +42,20 @@ concord_compat::apple::InputSink gInputSink = nullptr;
 void* gInputContext = nullptr;
 bool gInputTrace = false;  // CONCORD_INPUT_TRACE=1 时打一行/事件，取证用
 
+// U-14：全屏视口回调。全屏的正确语义是"客户区变大、单位尺寸不变"，
+// 所以 .mm 要在进入/退出全屏时把新客户区尺寸交给 compat（见头文件说明）。
+concord_compat::apple::ResizeSink gResizeSink = nullptr;
+void* gResizeContext = nullptr;
+// 进全屏之前的窗口内容区尺寸（点）。退出时按它恢复，而不是按当时的表面尺寸——
+// 全屏期间表面已经被改成全屏大小了。
+int gWindowedWidthBeforeFullScreen = 0;
+int gWindowedHeightBeforeFullScreen = 0;
+// 自测判据：全屏期间是否至少有一帧「呈现表面尺寸 == 内容区尺寸」。
+// 这一条才是"没有拉伸放大"的证据：相等说明游戏按全屏尺寸重绘了 1:1 的画面，
+// 不相等说明屏幕上是把一张小图拉伸铺满（单位被放大，看不到更多地图）。
+bool gFullScreenCoverageOk = false;
+long long gFullScreenCoverageFrames = 0;
+
 // 上一次**呈现**的尺寸/标题。用来判断"这次贴的是不是另一个界面"。
 // 为什么不拿 NSWindow 的当前尺寸比对：窗口可以被用户拖动缩放，那时
 // 尺寸与 surface 不一致是正常的，不该被我们掰回去。只有"surface 自己变了"
@@ -120,6 +134,44 @@ bool gFullScreenButtonTried = false;
 // 绿灯语义（可全屏 vs 只能缩放）是否已经对了。这是用户报障的那一条本身，
 // 所以它算失败，不只是日志。
 bool gFullScreenAffordanceOk = false;
+
+// 全屏自测的触发时机。默认第一帧（拿到 input sink 之后立刻）——
+// 但"全屏里画面有没有铺满"这条只在**世界画面**上成立：菜单阶段触发，全屏的是
+// 1024x640 的菜单壳，之后进世界时 present 会按新表面尺寸 setContentSize，
+// 把窗口从全屏里踢出来，测到的其实是窗口态。CONCORD_FULLSCREEN_SELFTEST_DELAY
+// 让自测等 N 帧再点绿灯，就能停在世界画面里验。
+long long gPresentCount = 0;
+// 退出全屏后由下一帧 present 在主循环栈里把窗口恢复成表面尺寸（见 didExit 注释）。
+bool gRestoreWindowAfterFullScreen = false;
+static long long fullScreenSelftestDelayFrames() {
+    static const long long frames = []() {
+        const char* value = std::getenv("CONCORD_FULLSCREEN_SELFTEST_DELAY");
+        return value != nullptr ? std::atoll(value) : 0LL;
+    }();
+    return frames;
+}
+
+// CONCORD_PRESENT_GEOM=1：每 60 帧打一次窗口/view/layer 的几何。
+// 用来回答"进全屏后画面为什么只在左上角"——是 view 没变大、layer 没跟着变大，
+// 还是两者都对但 contents 没被拉伸（gravity 被改 / 内容尺寸没变）。
+// CONCORD_FULLSCREEN_STAY 的取值：'1' 表示一直停在全屏；N>1 表示在全屏里停留
+// N 帧后自动退回（用来验"退出全屏后窗口有没有恢复成表面尺寸"）。
+static long long fullScreenStayFrames() {
+    static const long long frames = []() {
+        const char* value = std::getenv("CONCORD_FULLSCREEN_STAY");
+        if (value == nullptr) return 0LL;
+        const long long parsed = std::atoll(value);
+        return parsed > 1 ? parsed : 0LL;
+    }();
+    return frames;
+}
+static bool presentGeomEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("CONCORD_PRESENT_GEOM");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
 
 // U-09：鼠标坐标从 view 空间反算回**呈现表面**空间。
 //
@@ -609,16 +661,35 @@ static void ensurePointerAssociationRestored();
         && CGImageGetHeight(attached) == static_cast<std::size_t>(gPresentedHeight);
     const bool presentedWhileFullScreen =
         std::strcmp(phase, "entered") == 0 || gFramesInFullScreen > 0;
-    const bool ok = contentsKept && sizeKept && presentedWhileFullScreen;
+    // 全屏期间 view 必须和窗口一样大（全屏窗口没有标题栏，frame 就是内容尺寸）。
+    // 这一条是 2026-11-11「全屏后画面只在左上角」的判据：present() 曾经在表面
+    // 尺寸变化时按表面尺寸 setContentSize + 改 view.frame，窗口仍被系统撑满、
+    // view 却被钉回 1024x640，画面缩在左上角、右下全黑。contents 与 size 两项
+    // 都"正常"，只有这一条能抓出来。
+    const bool windowFullScreen =
+        (gWindow.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    const bool viewTracksWindow = !windowFullScreen
+        || (std::fabs(gView.frame.size.width - gWindow.frame.size.width) < 1.0
+            && std::fabs(gView.frame.size.height - gWindow.frame.size.height) < 1.0);
+    // U-14：还要求"全屏期间至少出现过一帧 表面尺寸 == 内容区尺寸"。
+    // 少了这一条，"画面拉伸铺满"和"客户区真的变大了"在日志上一模一样——
+    // 这正是用户第一次报障时判据全部报 ok=1 的原因。
+    const bool coverageRequired = std::strcmp(phase, "exited") == 0;
+    const bool coverage = !coverageRequired || gFullScreenCoverageOk;
+    const bool ok = contentsKept && sizeKept && presentedWhileFullScreen
+        && viewTracksWindow && coverage;
     if (!ok) ++gFullScreenFailures;
     std::fprintf(stderr,
         "[fullscreen] %s window=%.0fx%.0f view=%.0fx%.0f contents=%s size=%s"
+        " viewTracksWindow=%d coverage=%d"
         " framesInFullScreen=%d hash=%u (before=%u, diagnostic only) ok=%d\n",
         phase,
         gWindow.frame.size.width, gWindow.frame.size.height,
         gView.frame.size.width, gView.frame.size.height,
         contentsKept ? "kept" : "lost",
         sizeKept ? "kept" : "changed",
+        viewTracksWindow ? 1 : 0,
+        gFullScreenCoverageOk ? 1 : 0,
         gFramesInFullScreen,
         gLastPresentHash, gHashBeforeFullScreen,
         ok ? 1 : 0);
@@ -631,14 +702,47 @@ static void ensurePointerAssociationRestored();
     // 后者说明状态机在推进，只是没人喂 run loop。
     std::fprintf(stderr, "[fullscreen] willEnter styleMask=0x%lx\n",
                  static_cast<unsigned long>(gWindow.styleMask));
+    // U-14：此刻窗口还是窗口态，正是记录"进全屏前客户区多大"的唯一时机。
+    const NSRect contentBefore = gView != nil
+        ? gView.bounds
+        : NSMakeRect(0, 0, gPresentedWidth, gPresentedHeight);
+    gWindowedWidthBeforeFullScreen =
+        static_cast<int>(std::lround(contentBefore.size.width));
+    gWindowedHeightBeforeFullScreen =
+        static_cast<int>(std::lround(contentBefore.size.height));
     gFullScreenTransition = true;
     gFullScreenStarted = true;
+}
+
+// U-14：全屏 = 更大的客户区，而不是把一张小图放大铺满。
+//
+// 位置说明：调用点在 windowDidEnterFullScreen 里、`if (!gFullScreenTest) return`
+// **之前**——这是产品行为，不是自测行为。compat 收到尺寸后改自己的窗口矩形，
+// 游戏下一帧就按新客户区建后缓冲、重算地图视口，于是屏幕上出现的是
+// 「同样大小的单位 + 更多地图」，而不是「同一张画面被放大 1.76 倍」。
+- (void)applyFullScreenViewport {
+    if (gResizeSink == nullptr) {
+        // 纯呈现场景（离屏 smoke / 没有接输入）：没有人能重排，保持原样即可。
+        return;
+    }
+    const NSSize content = gView != nil
+        ? gView.bounds.size
+        : [gWindow contentLayoutRect].size;
+    const int width = static_cast<int>(std::lround(content.width));
+    const int height = static_cast<int>(std::lround(content.height));
+    if (width <= 0 || height <= 0) return;
+    gFullScreenCoverageFrames = 0;
+    gResizeSink(width, height, gResizeContext);
+    std::fprintf(stderr,
+        "[fullscreen] viewport -> %dx%d: game client takes the fullscreen size"
+        " (units stay 1:1, more map visible)\n", width, height);
 }
 
 - (void)windowDidEnterFullScreen:(NSNotification*)note {
     (void)note;
     gFullScreenTransition = false;
     gFullScreenEntered = true;
+    [self applyFullScreenViewport];
     if (!gFullScreenTest) return;
     gHashAfterEnter = gLastPresentHash;
     [self checkFullScreenState:"entered"];
@@ -664,7 +768,20 @@ static void ensurePointerAssociationRestored();
     // 进程带着一个全屏窗口继续跑完整个 smoke。同一件事在主循环里做就没问题
     // （独立探针里 willEnter→didEnter→willExit→didExit 是连着的）。
     // 所以只置标志，由下一帧 present 在主循环栈里发起退回。
-    gFullScreenExitPending = true;
+    //
+    // CONCORD_FULLSCREEN_STAY=1：停在全屏不退回，给"全屏画面到底铺没铺满"这类
+    // 必须用眼睛/抓图看的问题留一个可复现的现场（自测本身只测尺寸，测不出
+    // "客户区里那块内容有没有被拉伸铺满"）。
+    // CONCORD_FULLSCREEN_STAY：不设 = 进全屏后立刻退回（原行为）；
+    // '1' = 一直停在全屏，给"画面到底铺没铺满"这类必须抓图看的问题留现场；
+    // N>1 = 在全屏里停 N 帧再退回，用来验退出后窗口有没有恢复成表面尺寸。
+    const char* stay = std::getenv("CONCORD_FULLSCREEN_STAY");
+    if (stay == nullptr) {
+        gFullScreenExitPending = true;
+    } else if (stay[0] != '1') {
+        // N>1 的场景由 present() 按帧数发起退回；N<=0 视为原行为。
+        gFullScreenExitPending = fullScreenStayFrames() == 0;
+    }
 }
 
 - (void)windowWillExitFullScreen:(NSNotification*)note {
@@ -676,6 +793,21 @@ static void ensurePointerAssociationRestored();
 - (void)windowDidExitFullScreen:(NSNotification*)note {
     (void)note;
     gFullScreenTransition = false;
+    // U-14：把客户区恢复成进全屏之前的大小。全屏期间游戏是按全屏尺寸建后缓冲的，
+    // 不还原的话窗口退回窗口态、画面却还是全屏尺寸的一张图，被 Resize 压缩回
+    // 1024x640——单位又变小了（和"放大"是同一个错误的反面）。
+    // 这件事必须先于下面的 present 收尾：present 只负责 NSWindow 内容区尺寸，
+    // 客户区尺寸（游戏那边）归 compat 管。
+    if (gResizeSink != nullptr) {
+        gResizeSink(0, 0, gResizeContext);
+        std::fprintf(stderr, "[fullscreen] viewport -> restore %dx%d (windowed)\n",
+                     gWindowedWidthBeforeFullScreen, gWindowedHeightBeforeFullScreen);
+    }
+    // 全屏期间刻意不改窗口几何（见 present() 的注释），所以退出后必须按**当前**
+    // 表面尺寸把窗口恢复成窗口态：否则窗口停在屏幕大小，1024x640 的画面被
+    // 拉伸成非 4:3。和 toggleFullScreen 一样，这件事不能在通知栈里做——
+    // 交给下一帧 present 在主循环栈里收尾。
+    gRestoreWindowAfterFullScreen = true;
     if (!gFullScreenTest) return;
     gHashAfterExit = gLastPresentHash;
     [self checkFullScreenState:"exited"];
@@ -711,6 +843,7 @@ static void ensurePointerAssociationRestored();
 
 void present(const Surface& surface) {
     if (surface.pixels == nullptr || surface.width <= 0 || surface.height <= 0) return;
+    ++gPresentCount;
 
     @autoreleasepool {
         if (!gApplicationReady) {
@@ -833,17 +966,62 @@ void present(const Surface& surface) {
             gPresentedWidth = surface.width;
             gPresentedHeight = surface.height;
             gPresentedTitle = title != nullptr ? title : "";
+        } else if (gRestoreWindowAfterFullScreen) {
+            // 刚退出全屏：把窗口恢复成**进全屏之前**的尺寸。
+            //
+            // 不能拿 gPresented* 当依据（U-14 更正）：全屏期间游戏是按全屏尺寸
+            // 重绘的，gPresented* 已经被改成 1800x1130 了，照它恢复等于没退出。
+            // 进全屏前的内容区尺寸记在 gWindowed*BeforeFullScreen（willEnter 里）。
+            gRestoreWindowAfterFullScreen = false;
+            const int width = gWindowedWidthBeforeFullScreen > 0
+                ? gWindowedWidthBeforeFullScreen : gPresentedWidth;
+            const int height = gWindowedHeightBeforeFullScreen > 0
+                ? gWindowedHeightBeforeFullScreen : gPresentedHeight;
+            const NSRect contentRect = NSMakeRect(0, 0, width, height);
+            [gWindow setContentSize:contentRect.size];
+            gView.frame = contentRect;
+            // 尺寸基线跟着回到窗口态：否则下一帧 surface 仍是全屏尺寸时会再走
+            // 一次"尺寸变了"，把窗口重新撑大。
+            gPresentedWidth = width;
+            gPresentedHeight = height;
+            std::fprintf(stderr, "[cocoa] left fullscreen: window back to %dx%d\n",
+                         width, height);
         } else if (surface.width != gPresentedWidth || surface.height != gPresentedHeight) {
             // 换了界面尺寸：必须跟着改，否则小尺寸界面会被 contentsGravity=Resize
             // 拉伸铺满旧窗口——画面"能看"但比例是错的，而且这种错不会报任何东西。
             // 遭遇战菜单是 800x600、主菜单是 1024x640，走的就是这条路。
+            //
+            // **全屏期间绝不在这里改窗口/view 尺寸**（U-09/U-13 的教训）：
+            // 全屏时窗口由系统接管成屏幕大小，这里若按表面尺寸 setContentSize +
+            // 改 gView.frame，窗口仍是全屏、view 却被钉成表面尺寸贴左上角，
+            // 右下大片黑。
+            //
+            // U-14 起全屏期间的表面尺寸变化是**正常的**：applyFullScreenViewport
+            // 让游戏按全屏客户区重新建后缓冲，表面从 1024x640 变成 1800x1130，
+            // 那时 surface 与 view 相等，画面是 1:1（单位不变、地图更多）。
+            // 这里只需把基线跟上，别的都不做。
+            const bool fullScreen =
+                gFullScreenEntered || (gWindow.styleMask & NSWindowStyleMaskFullScreen) != 0;
             gPresentedWidth = surface.width;
             gPresentedHeight = surface.height;
-            const NSRect contentRect = NSMakeRect(0, 0, surface.width, surface.height);
-            [gWindow setContentSize:contentRect.size];
-            gView.frame = contentRect;
-            std::fprintf(stderr, "[cocoa] NSWindow resized to %dx%d\n",
-                         surface.width, surface.height);
+            if (fullScreen) {
+                const int viewWidth = static_cast<int>(std::lround(gView.bounds.size.width));
+                const int viewHeight = static_cast<int>(std::lround(gView.bounds.size.height));
+                // 尺寸相等 = 游戏已经按全屏客户区重绘（U-14 的目标形态）；
+                // 不等 = 还在过渡帧，此刻屏幕上是把旧尺寸画面拉伸铺满。
+                std::fprintf(stderr,
+                    "[cocoa] surface changed to %dx%d while fullscreen: keep window geometry"
+                    " view=%dx%d %s\n",
+                    surface.width, surface.height, viewWidth, viewHeight,
+                    (surface.width == viewWidth && surface.height == viewHeight)
+                        ? "1:1" : "still scaled (waiting for repaint at fullscreen size)");
+            } else {
+                const NSRect contentRect = NSMakeRect(0, 0, surface.width, surface.height);
+                [gWindow setContentSize:contentRect.size];
+                gView.frame = contentRect;
+                std::fprintf(stderr, "[cocoa] NSWindow resized to %dx%d\n",
+                             surface.width, surface.height);
+            }
         }
 
         // 标题只在真的变了时才写（每帧写会打断 AppKit 的标题栏）。
@@ -908,6 +1086,26 @@ void present(const Surface& surface) {
             [CATransaction setDisableActions:YES];
             gView.layer.contents = (__bridge id)image;
             [CATransaction commit];
+
+            if (presentGeomEnabled() && gPresentCount % 60 == 0) {
+                const NSRect viewBounds = gView.bounds;
+                const CGRect layerBounds = gView.layer.bounds;
+                const CGRect layerFrame = gView.layer.frame;
+                NSString* gravity = gView.layer.contentsGravity;
+                std::fprintf(stderr,
+                    "[geom] frame=%lld win=%.0fx%.0f fullscreen=%d view=%.0fx%.0f"
+                    " layer.bounds=%.0fx%.0f layer.frame=%.0fx%.0f gravity=%s scale=%.2f"
+                    " img=%zux%zu\n",
+                    gPresentCount,
+                    gWindow.frame.size.width, gWindow.frame.size.height,
+                    (gWindow.styleMask & NSWindowStyleMaskFullScreen) ? 1 : 0,
+                    viewBounds.size.width, viewBounds.size.height,
+                    layerBounds.size.width, layerBounds.size.height,
+                    layerFrame.size.width, layerFrame.size.height,
+                    gravity != nil ? [gravity UTF8String] : "(nil)",
+                    static_cast<double>(gView.layer.contentsScale),
+                    CGImageGetWidth(image), CGImageGetHeight(image));
+            }
 
             // 首帧诊断：一条日志就能区分三种"黑屏"——view 尺寸为 0（没布局）、
             // layer 为 nil（wantsLayer 没生效）、contents 为 nil（事务没提交）。
@@ -1184,7 +1382,8 @@ void present(const Surface& surface) {
 
         // ON-2-04 全屏自测：同样等 sink 就绪（理由同 close selftest），
         // 请求进入全屏后就不再做任何事——后面全靠 delegate 的两个回调推进。
-        if (!gFullScreenRequested && gInputSink != nullptr) {
+        if (!gFullScreenRequested && gInputSink != nullptr
+            && gPresentCount >= fullScreenSelftestDelayFrames()) {
             gFullScreenRequested = true;
             const char* fsTest = std::getenv("CONCORD_FULLSCREEN_SELFTEST");
             if (fsTest != nullptr && fsTest[0] == '1') {
@@ -1247,9 +1446,34 @@ void present(const Surface& surface) {
         // 同一画面重绘 hash 不变，所以判据仍然成立；画面真的变了反而该报警。
         if (gFullScreenTest) {
             if (gFullScreenEntered) ++gFramesInFullScreen;
+            // U-14 的核心判据：全屏期间出现「表面尺寸 == 内容区尺寸」的帧，
+            // 说明游戏真的按全屏客户区重绘了 1:1 的画面（contentsGravity 无缩放）。
+            // 用户第一次报障时结论是"拉伸铺满"——那时这一条永远不成立，
+            // 而其它判据全都报 ok，所以必须单独记一条。
+            if (gFullScreenEntered) {
+                const int viewWidth = static_cast<int>(std::lround(gView.bounds.size.width));
+                const int viewHeight = static_cast<int>(std::lround(gView.bounds.size.height));
+                if (std::abs(surface.width - viewWidth) <= 1
+                    && std::abs(surface.height - viewHeight) <= 1) {
+                    ++gFullScreenCoverageFrames;
+                    if (!gFullScreenCoverageOk) {
+                        gFullScreenCoverageOk = true;
+                        std::fprintf(stderr,
+                            "[fullscreen] coverage: surface=%dx%d == view=%dx%d"
+                            " after %lld frame(s) — 1:1, no scaling\n",
+                            surface.width, surface.height, viewWidth, viewHeight,
+                            gFullScreenCoverageFrames);
+                    }
+                }
+            }
             gLastPresentHash = attestHash24(
                 surface.pixels, surface.width, surface.height, surface.bytesPerRow);
             // 退回在**主循环栈**里发起（不能在 didEnter 通知栈里，见那边注释）。
+            const long long stayFrames = fullScreenStayFrames();
+            if (stayFrames > 0 && !gFullScreenTransition && !gFullScreenExitPending
+                && gFramesInFullScreen >= stayFrames) {
+                gFullScreenExitPending = true;
+            }
             if (gFullScreenExitPending) {
                 gFullScreenExitPending = false;
                 std::fprintf(stderr, "[fullscreen] request exit from present()\n");
@@ -1383,6 +1607,11 @@ void setInputSink(InputSink sink, void* context) {
         return value != nullptr && value[0] == '1';
     }();
     gInputTrace = trace;
+}
+
+void setResizeSink(ResizeSink sink, void* context) {
+    gResizeSink = sink;
+    gResizeContext = context;
 }
 
 namespace {

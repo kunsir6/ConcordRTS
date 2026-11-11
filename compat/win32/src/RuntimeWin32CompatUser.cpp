@@ -81,6 +81,10 @@ struct CompatWindow {
 
     HDC dc = nullptr;         // 缓存窗口 DC（客户区位图已选入）
     HBITMAP surface = nullptr;  // 客户区位图（32bpp top-down DIB）
+    // 客户区位图的实际尺寸。U-14：窗口被全屏/缩放改成别的尺寸时靠它判断
+    // "要不要重建位图"——不能只看 dc/surface 非空。
+    int surfaceWidth = 0;
+    int surfaceHeight = 0;
 
     bool dirty = false;       // InvalidateRect 置位，BeginPaint 清位
     bool destroying = false;
@@ -323,10 +327,27 @@ void destroyWindowPayload(void* handle) {
 }
 
 // 创建（或复用）窗口客户区位图 + DC。尺寸变化时重建。
+//
+// U-14：**尺寸变化必须重建**。原来这里一旦建好就直接 return true——窗口被
+// 全屏改成 1800x1130 之后，客户区位图还是 1024x640：游戏画的是 1024x640 的
+// 内容，呈现层却按更大区域贴，右下角留下上一帧的残影；而且游戏读
+// GetClientRect 拿到的是新尺寸，两者彻底脱节。
 bool ensureSurface(CompatWindow* w, int width, int height) {
-    if (w->dc != nullptr && w->surface != nullptr) return true;
     if (width <= 0) width = 1;
     if (height <= 0) height = 1;
+    if (w->dc != nullptr && w->surface != nullptr) {
+        // 尺寸一致才复用。比对的是建位图时记下的尺寸，而不是去问 GetObjectW：
+        // ensureSurface 在 GetObjectW 定义之前（匿名命名空间里），少一个前向依赖。
+        if (w->surfaceWidth == width && w->surfaceHeight == height) return true;
+        // 先删 DC 再删位图（与 destroyWindowPayload 同一顺序：DeleteDC 会把
+        // 选中的位图摘下来）。
+        ::DeleteDC(w->dc);
+        w->dc = nullptr;
+        ::DeleteObject(reinterpret_cast<HGDIOBJ>(w->surface));
+        w->surface = nullptr;
+        w->surfaceWidth = 0;
+        w->surfaceHeight = 0;
+    }
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -348,6 +369,8 @@ bool ensureSurface(CompatWindow* w, int width, int height) {
     ::SelectObject(dc, reinterpret_cast<HGDIOBJ>(surface));
     w->dc = dc;
     w->surface = surface;
+    w->surfaceWidth = width;
+    w->surfaceHeight = height;
     return true;
 }
 
@@ -737,6 +760,8 @@ HWND WindowFromPoint(POINT Point) {
 
 // 定义在 EndPaint 上方；ShowWindow 先用后定义，所以在这里前置声明。
 void maybePresentClientFrame(CompatWindow* w);
+// U-14：全屏视口回调（定义在 InvalidateRect 之后）。present 首次绑定时注册。
+void appleResizeRequest(int width, int height, void* context);
 
 BOOL ShowWindow(HWND hWnd, int nCmdShow) {
     CompatWindow* w = asWindow(hWnd);
@@ -1260,6 +1285,9 @@ void maybePresentClientFrame(CompatWindow* w) {
     if (boundTarget != presented) {
         boundTarget = presented;
         concord_compat::apple::setInputSink(&appleInputDispatch, boundTarget);
+        // U-14：同时把"全屏客户区尺寸"的接收方挂到这个窗口上。若不注册，
+        // 全屏后游戏仍按窗口态尺寸绘制，屏幕上只能把小图拉伸铺满。
+        concord_compat::apple::setResizeSink(&appleResizeRequest, boundTarget);
     }
 }
 
@@ -1307,6 +1335,52 @@ BOOL GetUpdateRect(HWND hWnd, LPRECT lpRect, BOOL bErase) {
         lpRect->bottom = w->dirty ? clientHeight(w) : 0;
     }
     return w->dirty ? TRUE : FALSE;
+}
+
+// U-14：全屏视口。宿主（Cocoa 侧）在进入/退出全屏时回调这里，接口见
+// RuntimeAppleWindowSurface.h。
+//
+// 为什么必须由 compat 改窗口矩形：游戏的地图视口、侧边栏、点击命中、后缓冲
+// 全部以 GetClientRect 为准。只把 NSWindow 内容区放大、不改这里，游戏仍按
+// 1024x640 绘制，屏幕上只能靠 contentsGravity 把小图拉伸铺满——单位被放大，
+// 一屏还是那么多内容（用户 2026-11-12 报的正是这个）。
+//
+// width/height <= 0 = 恢复进全屏之前的客户区尺寸。
+void appleResizeRequest(int width, int height, void* context) {
+    HWND hwnd = static_cast<HWND>(context);
+    CompatWindow* w = asWindow(hwnd);
+    if (w == nullptr) return;
+    // 进全屏前的客户区尺寸。按窗口记账（换了呈现目标就重新记），这样
+    // "退出全屏"永远回到那一刻的窗口态尺寸，而不是某次中间状态。
+    static HWND recordedWindow = nullptr;
+    static int windowedWidth = 0;
+    static int windowedHeight = 0;
+    if (recordedWindow != hwnd) {
+        recordedWindow = hwnd;
+        windowedWidth = 0;
+        windowedHeight = 0;
+    }
+    if (width <= 0 || height <= 0) {
+        if (windowedWidth <= 0 || windowedHeight <= 0) return;
+        width = windowedWidth;
+        height = windowedHeight;
+    } else if (windowedWidth <= 0 || windowedHeight <= 0) {
+        windowedWidth = clientWidth(w);
+        windowedHeight = clientHeight(w);
+    }
+    if (width == clientWidth(w) && height == clientHeight(w)) return;
+    // 只改尺寸、不动位置：纯离屏模型里位置只影响 GetWindowRect 的记账。
+    w->windowRect.right = w->windowRect.left + width;
+    w->windowRect.bottom = w->windowRect.top + height;
+    // 通知游戏重排。WM_SIZE 走队列（不在 pumpEvents 的栈里做重活），
+    // 再置脏让它在下一帧按新客户区重绘——客户区位图会在 BeginPaint 里
+    // 按新尺寸重建（见 ensureSurface）。
+    ::PostMessageW(hwnd, WM_SIZE, 0 /* SIZE_RESTORED */,
+                   static_cast<LPARAM>(
+                       (static_cast<unsigned long>(height) << 16) | (width & 0xFFFF)));
+    InvalidateRect(hwnd, nullptr, FALSE);
+    std::fprintf(stderr, "[cocoa] game client -> %dx%d\n", width, height);
+    std::fflush(stderr);
 }
 
 BOOL RedrawWindow(HWND hWnd, const RECT* lprcUpdate, HRGN hrgnUpdate, UINT flags) {

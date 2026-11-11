@@ -3353,6 +3353,36 @@ bool runtimeDefenseSidebarTabShouldFlash(const RuntimeWindowState& state) {
     return false;
 }
 
+// A completed placement order (building/defense) flags its sidebar tab the
+// same way the original flashes the tab that owns the finished item.  The
+// tab that is already open defers to the flashing build button instead.
+bool runtimeBuildReadySidebarTabShouldFlash(
+    const RuntimeWindowState& state,
+    RuntimeBuildKind kind
+) {
+    if (state.activeBuildTab == kind) {
+        return false;
+    }
+    for (const RuntimeProductionLane lane :
+            {RuntimeProductionLane::Structures, RuntimeProductionLane::Armory}) {
+        const RuntimeProductionLaneState& laneState =
+            state.economy.localProductionLanes.lanes[
+                runtimeProductionLaneIndex(lane)
+            ];
+        if (!laneState.ready.has_value()) {
+            continue;
+        }
+        const std::optional<RuntimeProductionCatalogAdapter> catalog =
+            runtimeProductionCatalogLookup(state, laneState.ready->itemKey);
+        if (catalog.has_value()
+            && catalog->item != nullptr
+            && catalog->item->kind == kind) {
+            return true;
+        }
+    }
+    return false;
+}
+
 RuntimeCameoIconCacheEntry* loadRuntimeSuperWeaponIcon(
     RuntimeWindowState& state,
     const SuperWeaponSidebarSnapshot& snapshot
@@ -9563,6 +9593,33 @@ struct RuntimePaintCameraMemoScope {
         width = value.camera.tileWidth; height = value.camera.tileHeight;
     }
 };
+
+// U-14：客户区尺寸变化（进出全屏）时，把镜头**中心**保持在原来的世界点上。
+//
+// 为什么不能只靠 clamp：clamp 只保证"视口不出地图边界"，worldOffset 不动的结果是
+// 画面锚在左上角——视口从 1024x640 变成 1800x1130 之后，多出来的 776x490 全在
+// 右下，玩家的基地被挤到角落里。按"世界坐标不变"来想，中心点应该原地不动，
+// 左上角随之左上移 (Δ/2)。全屏化之后观感才和"换了个更大的显示器"一致。
+//
+// 只在尺寸**变化**的那一帧动一次偏移，之后 previous == current 直接返回，
+// 不会和玩家手动滚动/跟随逻辑打架。
+void runtimeRecenterCameraForViewportChange(
+    RuntimeWindowState& state,
+    const RECT& viewport
+) {
+    if (!state.camera.initialized) return;
+    const RuntimeInputPixelRect previous = state.cameraClampViewport;
+    const int previousWidth = previous.right - previous.left;
+    const int previousHeight = previous.bottom - previous.top;
+    const int width = static_cast<int>(viewport.right - viewport.left);
+    const int height = static_cast<int>(viewport.bottom - viewport.top);
+    if (previousWidth <= 0 || previousHeight <= 0) return;
+    if (previousWidth == width && previousHeight == height) return;
+    if (width <= 0 || height <= 0) return;
+    state.camera.worldOffsetX -= (width - previousWidth) / 2;
+    state.camera.worldOffsetY -= (height - previousHeight) / 2;
+    invalidateRuntimeObjectProjectionCache(state);
+}
 
 void ensureRuntimeCameraForViewport(
     RuntimeWindowState& state,
@@ -20455,8 +20512,13 @@ void drawRuntimeSidebar(
         const RECT tabRect = runtimeBuildTabRect(sidebar, tab);
         const bool active = kind == state.activeBuildTab;
         const bool available = runtimeSidebarTabAvailable(state, kind);
-        const bool highlighted = kind == RuntimeBuildKind::Defense
-            && defenseTabHighlight;
+        const bool highlighted =
+            (kind == RuntimeBuildKind::Defense && defenseTabHighlight)
+            || (runtimeBuildReadySidebarTabShouldFlash(state, kind)
+                && runtimeSuperWeaponFlashHighlightPhase(
+                    state.tick,
+                    state.config.fixedTickHz
+                ));
         drawRuntimeUiShpFrame(
             dc,
             state,
@@ -20573,7 +20635,10 @@ void drawRuntimeSidebar(
         if (hovered || placementReady || busy || onHold || ready) {
             concord::ui::win32::MapNativeOverlayWin32::setPenColor(
                 dc,
-                placementReady ? RGB(120, 242, 220)
+                placementReady
+                    ? (runtimeUiReadyBlinkOn(presentationMs)
+                        ? RGB(240, 24, 16)
+                        : RGB(255, 255, 255))
                     : onHold ? RGB(214, 182, 96)
                     : busy ? RGB(92, 204, 236)
                     : hovered ? RGB(152, 204, 236)
@@ -22448,6 +22513,12 @@ void drawRuntimeCombatEffects(
 
 struct RuntimeCargoPipDisplay {
     bool available = false;
+    // 矿量格只画已装载的格子：原版矿车的载矿条长度跟着载矿量走，
+    // 空槽不占位（否则 40 格容量的矿车一选中就拖出 20 个黑框）。
+    bool hideEmptySlots = false;
+    // 一屏矿量格的上限。War Miner 容量 40，按 20 格排会拖出 99px 的长条，
+    // 比血条宽三倍；原版没有这么长的载矿条，按 10 格折算（每格 4 单位矿）。
+    int maxSlots = 20;
     int filledUnits = 0;
     int gemUnits = 0;
     int totalUnits = 0;
@@ -22538,6 +22609,8 @@ RuntimeCargoPipDisplay runtimeCargoPipDisplayForObject(
         return display;
     }
     display.filledFrameIndex = 2;
+    display.hideEmptySlots = true;
+    display.maxSlots = 10;
 
     if (runtimeObjectIsHarvester(state, object)) {
         display.totalUnits =
@@ -22596,7 +22669,11 @@ void drawRuntimeSelectedCargoPips(
         return;
     }
 
-    const int segmentCount = std::clamp(cargo.totalUnits, 1, 20);
+    const int segmentCount = std::clamp(
+        cargo.totalUnits,
+        1,
+        std::max(1, cargo.maxSlots)
+    );
     const int filledSegments =
         cargo.filledUnits <= 0
             ? 0
@@ -22618,8 +22695,14 @@ void drawRuntimeSelectedCargoPips(
     const int segmentWidth = 4;
     const int segmentHeight = 4;
     const int gap = 1;
-    const int totalWidth =
-        (segmentCount * segmentWidth) + ((segmentCount - 1) * gap);
+    // 隐藏空槽时，可见格数就是整条宽度：整条按可见格居中，
+    // 不会因为容量 40 格而把两格矿顶到屏幕左边去。
+    const int laidOutSegments = cargo.hideEmptySlots
+        ? filledSegments
+        : segmentCount;
+    const int totalWidth = laidOutSegments > 0
+        ? (laidOutSegments * segmentWidth) + ((laidOutSegments - 1) * gap)
+        : 0;
     const POINT selectionCenter =
         runtimeProjectedUnitSelectionCenter(projectedObject);
     const int left = selectionCenter.x - (totalWidth / 2);
@@ -22644,14 +22727,23 @@ void drawRuntimeSelectedCargoPips(
     state.lastSelectedCargoPipGemFrameIndex =
         gemSegments > 0 ? gemFrameIndex : -1;
     for (int index = 0; index < segmentCount; ++index) {
+        const bool filled = index < filledSegments;
+        const bool gemFilled = filled && index < gemSegments;
+        if (!filled && cargo.hideEmptySlots) {
+            // 矿量条只画有矿的格子：空槽既不上 SHP 也不上兜底色块，
+            // 条长直接等于载矿量，不再拖出一整排黑框。
+            if (!objectCounted) {
+                ++state.lastSelectedCargoPipObjects;
+                objectCounted = true;
+            }
+            continue;
+        }
         const RECT pipRect{
             left + (index * (segmentWidth + gap)),
             top,
             left + (index * (segmentWidth + gap)) + segmentWidth,
             top + segmentHeight
         };
-        const bool filled = index < filledSegments;
-        const bool gemFilled = filled && index < gemSegments;
         bool resourceDrawn = false;
         const bool selectedFilledFrameAvailable =
             gemFilled ? gemFrameIndex >= 0 : filledFrameAvailable;
@@ -23741,8 +23833,6 @@ void drawRuntimeSuperWeaponTargetRings(
     RestoreDC(dc, savedDc);
 }
 
-#include "ui/selection/RuntimeSelectionFrameRaster.h"
-
 #include "simulation/production/RuntimeFactoryRallyUi.inl"
 
 bool runtimeInteractionNeedsProjectedObjects(const RuntimeWindowState& state,
@@ -23848,10 +23938,6 @@ void drawRuntimeInteractionOverlay(
     HPEN selectedPen = CreatePen(PS_SOLID, 2, RGB(113, 181, 255));
     HPEN structureSelectionPen = CreatePen(PS_SOLID, 2, RGB(236, 242, 238));
     HGDIOBJ oldPen = SelectObject(dc, selectedPen);
-    RuntimeSelectionFrameRaster selectionFrameRaster(dc,
-        dc == state.backBuffer.memoryDc ? static_cast<std::uint32_t*>(state.backBuffer.pixels) : nullptr,
-        state.backBuffer.width, state.backBuffer.height);
-    selectionFrameRaster.beginTrustedRestoredDcStateBatch();
 
     const RuntimeProjectedObject* hoveredObject = nullptr;
     if (state.mouseClientPointValid
@@ -23876,7 +23962,6 @@ void drawRuntimeInteractionOverlay(
             // Veterancy is an always-visible decoration in the original UI;
             // health and cargo pips remain selection/hover driven below.
             drawRuntimeVeterancyBadge(dc, state, projectedObject);
-            selectionFrameRaster.markNativeGdiWrites();
             continue;
         }
 
@@ -23932,7 +24017,6 @@ void drawRuntimeInteractionOverlay(
                 frameGeometry.footprintBounds;
             state.lastStructureSelectionHitBounds = runtimeRenderPlacementNativeRect(projectedObject.bounds);
             SelectObject(dc, selectedPen);
-            selectionFrameRaster.markNativeGdiWrites();
         } else if (selected
             && projectedObject.usesFootprintHit
             && !projectedObject.footprintHitCenters.empty()) {
@@ -23944,21 +24028,10 @@ void drawRuntimeInteractionOverlay(
                     projectedObject.footprintHalfHeight
                 );
             }
-            selectionFrameRaster.markNativeGdiWrites();
         } else if (selected && !usesStructureFootprint) {
-            RuntimePerfTraceScope selectionFrameTrace("overlaySelectionFrame", state.tick);
+            // 原版选中作战单位只画血条，没有外框也没有中心十字。
+            // 这里只保留几何记账，命中/悬停/自测仍按同一份矩形判定。
             const RECT selectionBounds = runtimeRenderPlacementNativeRect(projectedObject.selectionBounds);
-            const POINT selectionCenter =
-                runtimeProjectedUnitSelectionCenter(projectedObject);
-            if (!selectionFrameRaster.draw(selectionBounds, selectionCenter)) {
-                Rectangle(dc, selectionBounds.left, selectionBounds.top,
-                    selectionBounds.right, selectionBounds.bottom);
-                MoveToEx(dc, selectionCenter.x - 8, selectionCenter.y, nullptr);
-                LineTo(dc, selectionCenter.x + 9, selectionCenter.y);
-                MoveToEx(dc, selectionCenter.x, selectionCenter.y - 8, nullptr);
-                LineTo(dc, selectionCenter.x, selectionCenter.y + 9);
-                selectionFrameRaster.markNativeGdiWrites();
-            }
             ++state.lastUnitSelectionFrames;
             state.lastUnitSelectionBounds = selectionBounds;
             state.lastUnitSelectionHitBounds = runtimeRenderPlacementNativeRect(projectedObject.bounds);
@@ -23976,7 +24049,6 @@ void drawRuntimeInteractionOverlay(
                 projectedObject,
                 frameGeometry.valid ? &frameGeometry : nullptr
             );
-            selectionFrameRaster.markNativeGdiWrites();
             if (selected) {
                 ++state.lastSelectedHealthBars;
             }
@@ -23987,7 +24059,6 @@ void drawRuntimeInteractionOverlay(
             }
         }
         drawRuntimeVeterancyBadge(dc, state, projectedObject);
-        selectionFrameRaster.markNativeGdiWrites();
     }
 
     SelectObject(dc, oldPen);
@@ -28902,6 +28973,11 @@ LRESULT CALLBACK runtimeWindowProc(
                 RECT mapViewport = runtimeMapViewport(clientRect);
                 if (state->playerLocalCommands.cameraFollow && !state->runtimeMenuOpen)
                     runtimePlayerCenterSelection(*state, clientRect);
+                // U-14：进出全屏会改客户区尺寸（1024x640 → 1800x1130）。只 clamp
+                // 的话 worldOffset 不变，画面锚在左上角——多出来的空间全在右下，
+                // 玩家的基地被挤到角上。这里先把镜头中心平移到原来的世界点上，
+                // 再交给 ensure 做边界收敛，观感才和"换了个更大的显示器"一致。
+                runtimeRecenterCameraForViewportChange(*state, mapViewport);
                 // Resize/load can change the usable map viewport before any
                 // input path gets a chance to clamp it.  Establish the exact
                 // camera used by both this map frame and the radar overlay.
@@ -61304,6 +61380,111 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
         std::string error;
         if (!runRuntimeBehindMarkerSmoke(config, error)) { std::cerr << error << '\n'; return 1; }
         return 0;
+    }
+    if (std::getenv("CONCORD_COMMAND_SMOKE_ENEMY_SPAWN_PROBE")) {
+        // Temporary diagnostic: reproduce the user's skirmish lobby exactly
+        // (computer slot country/color = Random, random start) on a chosen
+        // map through the loading-style planned-assignment start path.
+        RuntimeConfig probeConfig = config;
+        probeConfig.gameMode = "Battle";
+        probeConfig.gameModeRulesOverride.clear();
+        probeConfig.playerCountry = "Americans";
+        probeConfig.playerColor = "Gold";
+        probeConfig.startingCredits = 10000;
+        probeConfig.startingUnits = 4;
+        probeConfig.shortGame = false;
+        probeConfig.crates = false;
+        probeConfig.computerAiEnabled = true;
+        probeConfig.fixedTickHz = 30;
+        if (const char* mapPath = std::getenv("CONCORD_PROBE_MAP")) {
+            probeConfig.defaultMapPath = mapPath;
+        }
+        probeConfig.playerSlots.clear();
+        RuntimeConfig::PlayerSlot human;
+        human.enabled = true;
+        human.human = true;
+        human.local = true;
+        human.name = "Human";
+        human.country = "Americans";
+        human.color = "Gold";
+        human.startPosition = 0;
+        probeConfig.playerSlots.push_back(human);
+        RuntimeConfig::PlayerSlot computer;
+        computer.enabled = true;
+        computer.human = false;
+        computer.name = "Computer";
+        computer.country = "Random";
+        computer.color = "Random";
+        computer.startPosition = 0;
+        computer.difficulty = "Medium";
+        probeConfig.playerSlots.push_back(computer);
+
+        RuntimeWindowState state;
+        RuntimeSnapshotActiveStateScope snapshotScope(state);
+        state.config = probeConfig;
+        state.report = buildRuntimeStartupReport(
+            probeConfig,
+            &state.world,
+            &state.theater,
+            &state.art,
+            &state.rules,
+            &state.mapFacts
+        );
+        state.theaterLoaded = state.report.theaterLoaded;
+        state.artLoaded = state.report.artLoaded;
+        state.rulesLoaded = state.report.rulesLoaded;
+        if (!state.report.success) {
+            std::cerr << "enemy-spawn probe: startup report failed\n";
+            return 1;
+        }
+        initializeRuntimeNavigation(state);
+        initializeRuntimeEconomy(state);
+
+        const std::vector<RuntimeCellPoint> candidates =
+            runtimeSkirmishStartCandidates(state);
+        const std::vector<std::vector<bool>> legality =
+            runtimeSkirmishStartCandidateLegality(state, candidates);
+        const std::vector<int> planned =
+            resolveRuntimeSkirmishStartAssignments(
+                state,
+                static_cast<int>(candidates.size()),
+                legality
+            );
+        std::cout << "enemy-spawn probe: map=" << probeConfig.defaultMapPath
+                  << " candidates=" << candidates.size() << "\n";
+        for (std::size_t slot = 0; slot < legality.size(); ++slot) {
+            int legalCount = 0;
+            for (bool ok : legality[slot]) legalCount += ok ? 1 : 0;
+            std::cout << "  slot" << slot
+                      << " country=" << probeConfig.playerSlots[slot].country
+                      << " legal=" << legalCount
+                      << " planned=" << (slot < planned.size()
+                          ? std::to_string(planned[slot]) : std::string("n/a"))
+                      << "\n";
+        }
+
+        std::vector<int> assignments;
+        const bool started = initializeRuntimeSkirmishStart(
+            state, &assignments, &planned);
+        std::cout << "enemy-spawn probe: started=" << (started ? "yes" : "no")
+                  << " status=" << state.economy.skirmishStatus << "\n";
+        std::map<std::string, int> objectsByOwner;
+        for (const WorldObjectInstance& object : state.world.getObjects()) {
+            if (object.alive) ++objectsByOwner[object.owner];
+        }
+        for (const auto& [owner, count] : objectsByOwner) {
+            std::cout << "  owner=" << owner << " alive=" << count << "\n";
+        }
+        state.tick = 300;
+        for (const WorldObjectInstance& object : state.world.getObjects()) {
+            if (!object.alive) continue;
+            std::cout << "  obj id=" << object.instanceId
+                      << " type=" << object.type
+                      << " owner=" << object.owner
+                      << " cell=" << static_cast<int>(object.cellX)
+                      << "," << static_cast<int>(object.cellY) << "\n";
+        }
+        return started ? 0 : 2;
     }
     if (std::getenv("CONCORD_COMMAND_SMOKE_NETWORK_COOPERATIVE_LAN_ONLY")) {
         std::string error;
