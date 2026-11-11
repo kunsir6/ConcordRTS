@@ -103,6 +103,9 @@ struct RuntimeCommandLine {
     std::string campaignCoverageMapPath;
     bool skipMainMenu = false;
     bool skipSkirmishMenu = false;
+    // Developer overlay: retail has no frame counter on screen, so this stays
+    // opt-in (see RuntimeConfig::fpsOverlayEnabled).
+    bool showFps = false;
     std::string mainMenuUiSmokeOutput;
     std::string skirmishUiSmokeOutput;
     // ON-3-01：上屏自证的输出目录；非空时走 --onscreen-attest-smoke。
@@ -370,6 +373,11 @@ RuntimeCommandLine parseRuntimeCommandLine(int argc, char** argv) {
 
         if (argument == "--skip-main-menu") {
             commandLine.skipMainMenu = true;
+            continue;
+        }
+
+        if (argument == "--show-fps") {
+            commandLine.showFps = true;
             continue;
         }
 
@@ -720,6 +728,7 @@ void printRuntimeHelp(const std::string& programName) {
     std::cout << "                         Render and validate the original 800x600 Yuri's Revenge shell.\n";
     std::cout << "  --skip-main-menu       Open the skirmish setup directly (developer/testing shortcut).\n";
     std::cout << "  --skip-skirmish-menu   Launch the configured map directly (developer/testing shortcut).\n";
+    std::cout << "  --show-fps             Draw the frame-counter overlay (off by default; retail has none).\n";
     std::cout << "  --vxl-atlas-dump <ids> Dump offline VXL atlases for comma-separated object ids.\n";
     std::cout << "  --config <path>        Runtime config INI; default local_data/runtime_config.ini.\n";
     std::cout << "  --resource-root <dir>  RA2/YR resource directory; default RedAlert2.\n";
@@ -820,6 +829,9 @@ int runRuntimeApplication(int argc, char** argv) {
     if (commandLine.skipSkirmishMenu) {
         config.showMainMenu = false;
         config.showSkirmishMenu = false;
+    }
+    if (commandLine.showFps) {
+        config.fpsOverlayEnabled = true;
     }
 
     if (!commandLine.mainMenuUiSmokeOutput.empty()) {

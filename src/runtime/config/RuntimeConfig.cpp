@@ -364,6 +364,13 @@ RuntimeConfig loadRuntimeConfig(const RuntimeConfigOverrides& overrides) {
                     config.scrollCoastingEnabled ? "yes" : "no"
                 )
             );
+            config.fpsOverlayEnabled = parseRuntimeBool(
+                ini.getValue(
+                    "Options",
+                    "ShowFps",
+                    config.fpsOverlayEnabled ? "yes" : "no"
+                )
+            );
             config.musicVolume = parseRuntimePercent(
                 ini.getValue("Audio", "MusicVolume", ""),
                 config.musicVolume

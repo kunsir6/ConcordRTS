@@ -29287,7 +29287,8 @@ LRESULT CALLBACK runtimeWindowProc(
                         } context{state,&clientRect,&bounds,&prospectiveMeter};
                         const auto draw=+[](HDC native,void* cookie){
                             const auto& c=*static_cast<OverlayContext*>(cookie);
-                            drawRuntimeFpsDisplay(native,*c.client,*c.meter);
+                            if(c.state->config.fpsOverlayEnabled)
+                                drawRuntimeFpsDisplay(native,*c.client,*c.meter);
                             drawRuntimeMouseCursorOverlay(native,*c.client,*c.state,c.bounds);
                         };
                         bool overlayReady=false;
@@ -29359,7 +29360,8 @@ LRESULT CALLBACK runtimeWindowProc(
                     submissionSucceeded=BitBlt(paintDc,0,0,clientWidth,clientHeight,
                         state->backBuffer.memoryDc,0,0,SRCCOPY)!=FALSE;
                     if(submissionSucceeded&&loaded&&eligible){
-                        drawRuntimeFpsDisplay(paintDc,clientRect,prospectiveMeter);
+                        if(state->config.fpsOverlayEnabled)
+                            drawRuntimeFpsDisplay(paintDc,clientRect,prospectiveMeter);
                         const auto fallbackBounds=runtimeFpsDisplayRect(clientRect);
                         if(!IsRectEmpty(&fallbackBounds))drawRuntimeMouseCursorOverlay(
                             paintDc,clientRect,*state,&fallbackBounds);
@@ -29370,7 +29372,8 @@ LRESULT CALLBACK runtimeWindowProc(
             }else if(!reuseCachedFrame&&paintDc){
                 submissionSucceeded=GdiFlush()!=FALSE;
                 if(submissionSucceeded&&loaded&&eligible){
-                    drawRuntimeFpsDisplay(paintDc,clientRect,prospectiveMeter);
+                    if(state->config.fpsOverlayEnabled)
+                        drawRuntimeFpsDisplay(paintDc,clientRect,prospectiveMeter);
                     const auto bounds=runtimeFpsDisplayRect(clientRect);
                     if(!IsRectEmpty(&bounds))drawRuntimeMouseCursorOverlay(paintDc,clientRect,*state,&bounds);
                     submissionSucceeded=GdiFlush()!=FALSE;

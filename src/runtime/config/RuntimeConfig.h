@@ -82,6 +82,10 @@ struct RuntimeConfig {
     bool tooltipsEnabled = true;
     bool targetLinesEnabled = true;
     bool scrollCoastingEnabled = true;
+    // Developer/self-test overlay.  Retail has no on-screen frame counter, so
+    // the panel is off unless the player asks for it ([Options] ShowFps=yes or
+    // --show-fps); the meter itself keeps running either way.
+    bool fpsOverlayEnabled = false;
     bool seeHiddenObjects = true;
     bool musicEnabled = true;
     bool soundEffectsEnabled = true;
