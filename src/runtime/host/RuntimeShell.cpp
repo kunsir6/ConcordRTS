@@ -37899,6 +37899,41 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
         return 0;
     }
 
+    // ON-4-07: 夹具地图（2peaks）里只有建筑（structures=10, units=0, infantry=0），
+    // 而 runtimeObjectCanBeBoxSelected 只认存活的 Unit/Infantry —— 所以框选这条断言
+    // 从来没有可选中对象，"不是框选坏了，是夹具里根本没有能被框选的东西"。
+    // 它后面的整条命令链（左键目标、目标线开关、右键命令）也因此从未被执行过。
+    //
+    // 注入位置刻意选在这里：五条契约（含像素契约、projection history）已经跑完，
+    // 它们对夹具人口有断言；而 buildProjectedObjects 还没调用，新对象能被正常投影。
+    {
+        const POINT spawnAnchor = approximateCellFromScreenPoint(state, viewport, POINT{
+            viewport.left + (viewport.right - viewport.left) / 2,
+            viewport.top + (viewport.bottom - viewport.top) * 5 / 8});
+        const bool spawnUnits = state.world.getObjects().size() == 10;  // 只对 2peaks 夹具生效
+        if (spawnUnits) {
+            for (int index = 0; index < 4; ++index) {
+                WorldObjectInstance object;
+                object.instanceId = 9000 + index;
+                object.kind = WorldObjectKind::Unit;
+                object.owner = state.economy.owner;
+                object.type = "HTNK";
+                object.mapId = "SMOKE" + std::to_string(object.instanceId);
+                object.health = 1000;
+                object.alive = true;
+                object.x = spawnAnchor.x + index;
+                object.y = spawnAnchor.y;
+                object.cell = runtimeCellKey(object.x, object.y);
+                object.mission = "Guard";
+                state.world.accessObjects().push_back(std::move(object));
+            }
+            invalidateRuntimeObjectProjectionCache(state);
+            std::cout << "Interaction fixture units: spawned=4 type=HTNK owner="
+                      << state.economy.owner << " anchor=" << spawnAnchor.x << ","
+                      << spawnAnchor.y << "\n";
+        }
+    }
+
     std::vector<RuntimeProjectedObject> projectedObjects =
         buildProjectedObjects(state, viewport);
     std::vector<int> visibleObjectIds;
