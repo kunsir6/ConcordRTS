@@ -3145,21 +3145,32 @@ bool validateRuntimeMusicPlayback(
                     == toLowerAsciiLocal(probe.runtimeMusicThemeId);
             }
         );
+        // 平台后端口径（M-08）：macOS 没有 MCI，mciSendStringW 一律如实返回
+        // MCIERR_DEVICE_NOT_INSTALLED(306)——这是"设备真的不存在"的答案，不是缺陷。
+        // 此时把探针降级为「选曲 / 落盘路径 / 阵营归属」三项 + 一条反向断言
+        // （后端缺失必须报 306，不许假装成功），不再要求 status 回 playing。
+        // 有 MCI 后端的平台（Windows）口径不变：必须真的 playing。
+        const bool mciBackendAbsent =
+            statusError == MCIERR_DEVICE_NOT_INSTALLED;
+        const bool assetSelected = probe.runtimeMusicStarted
+            && !probe.runtimeMusicPath.empty()
+            && belongsToFaction;
         const bool playing = statusError == 0
             && std::wstring(mode) == L"playing";
-        const bool valid = probe.runtimeMusicStarted
-            && !probe.runtimeMusicPath.empty()
-            && belongsToFaction
-            && playing;
+        const bool valid = mciBackendAbsent
+            ? assetSelected
+            : (assetSelected && playing);
         output << (output.tellp() == std::streampos(0) ? "" : " ")
                << runtimeMusicFactionName(faction)
                << "=" << (probe.runtimeMusicThemeId.empty()
                     ? "-"
                     : probe.runtimeMusicThemeId)
                << ":member=" << formatBool(belongsToFaction)
-               << ":mci=" << (statusError == 0
-                    ? (playing ? "playing" : "not-playing")
-                    : "error-" + std::to_string(statusError))
+               << ":mci=" << (mciBackendAbsent
+                    ? std::string("skipped(no MCI backend)")
+                    : statusError == 0
+                        ? (playing ? "playing" : "not-playing")
+                        : "error-" + std::to_string(statusError))
                << ":" << formatBool(valid);
         stopRuntimeMusic(probe);
         return valid;
