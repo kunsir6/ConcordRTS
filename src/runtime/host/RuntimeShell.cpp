@@ -40278,7 +40278,81 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
             || projectedObject.bounds.right < projectedObject.footprintBounds.right
             || projectedObject.bounds.bottom < projectedObject.footprintBounds.bottom
             || !rightClickMatches) {
-            std::cerr << "Interaction smoke test failed: structure footprint hit mismatch.\n";
+            std::cerr << "Interaction smoke test failed: structure footprint hit mismatch.";
+            // 只读计量：把 5 组谓词逐个打出来。命中框与地基框若不是同一个几何量，
+            // 必须先看清是哪一边、哪条边，而不是直接改命中逻辑。
+            std::cerr << " type=" << projectedObject.object->type
+                      << " cells=" << previewCells.size() << "/"
+                      << hitCells.size()
+                      << " hash=" << (previewHash == hitHash ? "same" : "diff")
+                      << " previewBounds=(" << previewBounds.left << ","
+                      << previewBounds.top << "," << previewBounds.right << ","
+                      << previewBounds.bottom << ")"
+                      << " footprintBounds=(" << projectedObject.footprintBounds.left
+                      << "," << projectedObject.footprintBounds.top << ","
+                      << projectedObject.footprintBounds.right << ","
+                      << projectedObject.footprintBounds.bottom << ")"
+                      << " hitBounds=(" << hitBounds.left << "," << hitBounds.top
+                      << "," << hitBounds.right << "," << hitBounds.bottom << ")"
+                      << " previewEqFootprint="
+                      << formatBool(runtimeRectEquals(previewBounds, projectedObject.footprintBounds))
+                      << " hitEqFootprint="
+                      << formatBool(runtimeRectEquals(hitBounds, projectedObject.footprintBounds))
+                      << " boundsContainsFootprint="
+                      << formatBool(
+                             !(projectedObject.bounds.left > projectedObject.footprintBounds.left
+                                 || projectedObject.bounds.top > projectedObject.footprintBounds.top
+                                 || projectedObject.bounds.right < projectedObject.footprintBounds.right
+                                 || projectedObject.bounds.bottom < projectedObject.footprintBounds.bottom))
+                      << " rightClick=" << formatBool(rightClickMatches)
+                      << ".\n";
+            if (rightClickTarget != nullptr) {
+                std::cerr << "  rightClickTarget #"
+                          << rightClickTarget->object->instanceId << " "
+                          << rightClickTarget->object->type
+                          << " bounds=(" << rightClickTarget->bounds.left << ","
+                          << rightClickTarget->bounds.top << ","
+                          << rightClickTarget->bounds.right << ","
+                          << rightClickTarget->bounds.bottom << ")\n";
+            } else {
+                std::cerr << "  rightClickTarget none\n";
+            }
+            if (!projectedObject.footprintHitCenters.empty()) {
+                const POINT probePoint = runtimeRenderPlacementNativePoint(
+                    projectedObject.footprintHitCenters.front()
+                );
+                std::cerr << "  rightClickProbe=(" << probePoint.x << ","
+                          << probePoint.y << ") objects=" << projectedObjects.size()
+                          << "\n";
+                for (const RuntimeProjectedObject& candidate : projectedObjects) {
+                    if (candidate.object == nullptr) continue;
+                    bool diamond = false;
+                    for (const RuntimeInputPixelPoint& center :
+                            candidate.footprintHitCenters) {
+                        if (pointInRuntimeIsoDiamond(
+                                probePoint,
+                                runtimeRenderPlacementNativePoint(center),
+                                candidate.footprintHalfWidth,
+                                candidate.footprintHalfHeight)) {
+                            diamond = true;
+                            break;
+                        }
+                    }
+                    const bool spans = runtimeSpriteHitSpansContainWin32(
+                        candidate.structureSpriteHitSpans,
+                        probePoint
+                    );
+                    if (!diamond && !spans) continue;
+                    std::cerr << "    candidate #" << candidate.object->instanceId
+                              << " " << candidate.object->type
+                              << " footprintHit=" << formatBool(candidate.usesFootprintHit)
+                              << " bodyClip=" << formatBool(candidate.hasBodyHitClip)
+                              << " diamond=" << formatBool(diamond)
+                              << " spans=" << formatBool(spans)
+                              << " depthVis=" << formatBool(candidate.hasBuildingDepthVisibility)
+                              << "\n";
+                }
+            }
             return 1;
         }
         std::cout << "Hit footprint: object #"
@@ -75560,6 +75634,28 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
         && state.lastStructureSelectionHitBounds.top <= state.lastStructureSelectionFootprintBounds.top
         && state.lastStructureSelectionHitBounds.right >= state.lastStructureSelectionFootprintBounds.right
         && state.lastStructureSelectionHitBounds.bottom >= state.lastStructureSelectionFootprintBounds.bottom;
+    if (!finalInteractionFootprintSizeMatches) {
+        // 只读计量：命中框与地基框的四边差值，判断命中框是按动画包围盒
+        // （含炮管/旗）还是按地基算——口径未定之前不改命中逻辑。
+        const RECT& hit = state.lastStructureSelectionHitBounds;
+        const RECT& footprint = state.lastStructureSelectionFootprintBounds;
+        std::cerr << "  structure probe " << selectionVisualProbeObject->type
+                  << " hit=(" << hit.left << "," << hit.top << ","
+                  << hit.right << "," << hit.bottom << ") footprint=("
+                  << footprint.left << "," << footprint.top << ","
+                  << footprint.right << "," << footprint.bottom
+                  << ") delta(l,t,r,b)=(" << (hit.left - footprint.left)
+                  << "," << (hit.top - footprint.top)
+                  << "," << (hit.right - footprint.right)
+                  << "," << (hit.bottom - footprint.bottom)
+                  << ") size hit=" << (hit.right - hit.left) << "x"
+                  << (hit.bottom - hit.top) << " footprint="
+                  << (footprint.right - footprint.left) << "x"
+                  << (footprint.bottom - footprint.top)
+                  << " artHeight=" << state.lastStructureSelectionMaxArtHeight
+                  << " selHeight=" << state.lastStructureSelectionMaxHeight
+                  << " frames=" << state.lastStructureSelectionFrames << "\n";
+    }
     const int structureHealthResourceDraws =
         state.lastHealthPipResourceDraws;
     const int structureHealthFallbackDraws =
