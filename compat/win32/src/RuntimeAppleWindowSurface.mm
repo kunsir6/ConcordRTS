@@ -21,11 +21,13 @@
 #import <QuartzCore/CoreAnimation.h>
 
 #include <CoreGraphics/CoreGraphics.h>
+#include <algorithm>
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -68,6 +70,11 @@ bool gCloseSelfTestDone = false;
 // 以及最后一次 present 的内容 hash 是否没变。
 bool gFullScreenTest = false;
 bool gFullScreenRequested = false;
+// 已进入全屏、等待在主循环里发起退回（见 windowDidEnterFullScreen 的注释）。
+bool gFullScreenExitPending = false;
+// 当前是否处于全屏；以及全屏期间又呈现了多少帧（证明呈现路径没断）。
+bool gFullScreenEntered = false;
+int gFramesInFullScreen = 0;
 std::uint32_t gLastPresentHash = 0;
 std::uint32_t gHashBeforeFullScreen = 0;
 std::uint32_t gHashAfterEnter = 0;
@@ -84,6 +91,48 @@ bool gFullScreenTransition = false;
 // 那种"挂住"看起来像缺陷，其实是"这个能力不存在"）。60 帧 ≈ 菜单 4 秒。
 bool gFullScreenStarted = false;
 int gFullScreenTicks = 0;
+// U-09：自测要走**用户那条路**——点绿灯，而不是直接调 toggleFullScreen:。
+// 两者不等价：toggleFullScreen: 只验"窗口能不能全屏"，点绿灯验的是"绿灯是不是
+// 接在全屏上"（用户报障的正是后者）。performClick 之后若若干帧内没有任何
+// willEnter，再退回 toggleFullScreen: 并**如实打印**是哪条路生效的。
+bool gFullScreenViaButton = true;
+bool gFullScreenButtonTried = false;
+// 绿灯语义（可全屏 vs 只能缩放）是否已经对了。这是用户报障的那一条本身，
+// 所以它算失败，不只是日志。
+bool gFullScreenAffordanceOk = false;
+
+// U-09：鼠标坐标从 view 空间反算回**呈现表面**空间。
+//
+// 画面是按 contentsGravity=Resize 铺满整个 view 的，所以 view 的尺寸和呈现表面
+// 的尺寸是两件事：窗口被放大（用户拖窗口，或系统全屏）之后 view 是 1512x949，
+// 而游戏表面仍然是 800x600。原先把 local 坐标直接当客户区坐标交给游戏，
+// 只有"view 恰好等于表面"时才对——一旦缩放，点击位置与画面对不上：
+// 全屏时点屏幕正中会报 (756,474)，游戏在 800x600 里命中，永远打空。
+// （这条在 ON-2-03 放开任意拉伸时就已经存在，只是那时窗口默认尺寸等于表面，
+//   没人踩到；全屏把它变成必现，所以在 U-09 一起修。）
+// 映射与 CoreAnimation 的 Resize 语义严格互逆：按比例缩放到表面尺寸并夹在
+// [0, 表面尺寸-1]，越界的边缘点击不会被丢，而是贴到最外侧一个像素。
+// y 同时在这里翻转：AppKit 原点在左下，客户区 DIB 原点在左上，不翻会出现
+// 点击垂直镜像（菜单上点"单人游戏"命中"退出"）。
+static void mapViewPointToSurface(double viewX, double viewY, int& outX, int& outY) {
+    const double viewW = gView != nil ? gView.bounds.size.width : 0.0;
+    const double viewH = gView != nil ? gView.bounds.size.height : 0.0;
+    const double surfaceW = gPresentedWidth > 0 ? static_cast<double>(gPresentedWidth) : viewW;
+    const double surfaceH = gPresentedHeight > 0 ? static_cast<double>(gPresentedHeight) : viewH;
+    if (viewW <= 0.0 || viewH <= 0.0 || surfaceW <= 0.0 || surfaceH <= 0.0) {
+        outX = 0;
+        outY = 0;
+        return;
+    }
+    const double scaleX = surfaceW / viewW;
+    const double scaleY = surfaceH / viewH;
+    long px = std::lround(viewX * scaleX);
+    long py = std::lround((viewH - viewY) * scaleY);
+    px = std::min(std::max(px, 0L), static_cast<long>(surfaceW) - 1);
+    py = std::min(std::max(py, 0L), static_cast<long>(surfaceH) - 1);
+    outX = static_cast<int>(px);
+    outY = static_cast<int>(py);
+}
 
 // 32bpp DIB 的字节序是 B,G,R,X（小端），所以 CGImage 用
 // kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst：
@@ -352,6 +401,50 @@ static bool gSystemCursorHidden = true;
 }
 @end
 
+// U-09：绿灯到底是什么，进程内自证。
+//
+// 用户报障是"绿灯显示一个 +，不是全屏"。那个图标不是我们画的，是 AppKit 按窗口
+// **是否可全屏**挑的：可全屏画展开箭头，只能缩放画 +。判据因此拆成两层：
+//
+//   ① 形态：collectionBehavior 带 FullScreenPrimary + styleMask 可缩放。
+//      这两项是我们能控制的输入，也是 AppKit 决定图标的依据。
+//   ② 行为：**点绿灯**真的进了全屏（见 present() 里的 performClick）。
+//      这一层比图标本身更硬——只能缩放的窗口，点绿灯永远进不了全屏。
+//
+// 本来还想直接读绿灯的 AX 子角色（AXFullScreenButton vs AXZoomButton，就是图标
+// 的判定源头），但实测在本进程里 `zoom.accessibilitySubrole` 返回 nil：AX 元素
+// 是懒创建的，没有 AX 客户端连上来就查不到。外部 AX 查询又走不通（本机
+// Accessibility 未授权，System Events 直接 -10004 权限违例）。所以子角色只作为
+// 诊断打印，不参与判定；判定靠上面两层。
+static bool reportFullScreenAffordance() {
+    NSButton* zoom = [gWindow standardWindowButton:NSWindowZoomButton];
+    // 用 NSAccessibility 协议方法而不是已弃用的 accessibilityAttributeValue:，
+    // 否则每轮构建都带一条 deprecation 警告，久了就没人再看构建输出。
+    NSAccessibilitySubrole subrole = nil;
+    if (zoom != nil) {
+        subrole = zoom.accessibilitySubrole;
+    }
+    const bool fullScreenBehaviour =
+        (gWindow.collectionBehavior & NSWindowCollectionBehaviorFullScreenPrimary) != 0;
+    const bool resizable = (gWindow.styleMask & NSWindowStyleMaskResizable) != 0;
+    const bool buttonSaysFullScreen =
+        subrole != nil && [subrole isEqualToString:@"AXFullScreenButton"];
+    const bool buttonSaysZoom =
+        subrole != nil && [subrole isEqualToString:@"AXZoomButton"];
+    const bool ok = fullScreenBehaviour && resizable;
+    std::fprintf(stderr,
+        "[fullscreen] affordance collection=fullScreenPrimary:%d resizable:%d"
+        " greenButton=%s subrole=%s fullScreenButton:%d zoomButton:%d ok=%d\n",
+        fullScreenBehaviour ? 1 : 0,
+        resizable ? 1 : 0,
+        zoom != nil ? "present" : "missing",
+        subrole != nil ? [subrole UTF8String] : "(nil, AX 未接线，仅诊断)",
+        buttonSaysFullScreen ? 1 : 0,
+        buttonSaysZoom ? 1 : 0,
+        ok ? 1 : 0);
+    return ok;
+}
+
 @implementation ConcordWindowCloseDelegate
 // U-05：窗口成为 key 时**重新**挂一次 cursor rect。
 //
@@ -386,26 +479,36 @@ static bool gSystemCursorHidden = true;
     return NO;
 }
 
-// ON-2-04 全屏自测的分段推进。两段都只做"检查 + 打日志 + 决定下一步"，
-// 不在这里改窗口状态以外的任何东西。
+// 全屏自测的分段推进。只做"检查 + 打日志 + 决定下一步"，不改窗口状态以外的任何东西。
+//
+// 判据（U-09 修订）：内容还在 + 呈现对象尺寸没变 + 全屏期间确实又呈现过帧。
+//
+// 为什么去掉原来的"hash 必须等于进入前"：那条判据假设"全屏期间游戏不重绘"，
+// 但遭遇战界面一直在动（光标闪烁、背景动画），hash 必然变——实测进出两段都报 ok=0，
+// 而画面其实完全正常。把 hash 留在日志里当诊断，不再参与判定。
+// 真正要防的是"贴上去的图没了/被换成别的尺寸"，也就是 contents 与 size 两项；
+// 再补一条"全屏期间有 present"来证明呈现路径没断（这条在 didExit 才有意义）。
 - (void)checkFullScreenState:(const char*)phase {
     CGImageRef attached = (__bridge CGImageRef)gView.layer.contents;
     const bool contentsKept = attached != nullptr;
     const bool sizeKept = contentsKept
         && CGImageGetWidth(attached) == static_cast<std::size_t>(gPresentedWidth)
         && CGImageGetHeight(attached) == static_cast<std::size_t>(gPresentedHeight);
-    const bool hashKept = gLastPresentHash == gHashBeforeFullScreen;
-    if (!contentsKept || !sizeKept || !hashKept) ++gFullScreenFailures;
+    const bool presentedWhileFullScreen =
+        std::strcmp(phase, "entered") == 0 || gFramesInFullScreen > 0;
+    const bool ok = contentsKept && sizeKept && presentedWhileFullScreen;
+    if (!ok) ++gFullScreenFailures;
     std::fprintf(stderr,
         "[fullscreen] %s window=%.0fx%.0f view=%.0fx%.0f contents=%s size=%s"
-        " hash=%u/%u before=%u ok=%d\n",
+        " framesInFullScreen=%d hash=%u (before=%u, diagnostic only) ok=%d\n",
         phase,
         gWindow.frame.size.width, gWindow.frame.size.height,
         gView.frame.size.width, gView.frame.size.height,
         contentsKept ? "kept" : "lost",
         sizeKept ? "kept" : "changed",
-        gLastPresentHash, gHashBeforeFullScreen, gHashBeforeFullScreen,
-        (!contentsKept || !sizeKept || !hashKept) ? 0 : 1);
+        gFramesInFullScreen,
+        gLastPresentHash, gHashBeforeFullScreen,
+        ok ? 1 : 0);
 }
 
 - (void)windowWillEnterFullScreen:(NSNotification*)note {
@@ -422,16 +525,39 @@ static bool gSystemCursorHidden = true;
 - (void)windowDidEnterFullScreen:(NSNotification*)note {
     (void)note;
     gFullScreenTransition = false;
+    gFullScreenEntered = true;
     if (!gFullScreenTest) return;
     gHashAfterEnter = gLastPresentHash;
     [self checkFullScreenState:"entered"];
-    // 立刻退回：自测要的是"进出都不丢"，只停在进入态证明不了一半。
-    [gWindow toggleFullScreen:nil];
+    // 全屏之后还能不能操作：view 尺寸变了（1512x949），但游戏表面还是 800x600，
+    // 鼠标必须按比例反算回去。这里拿 view 正中当例子——若没缩放，正中的点击会
+    // 报成表面的右下角附近，游戏里点什么都点不到。
+    {
+        const double viewW = gView.bounds.size.width;
+        const double viewH = gView.bounds.size.height;
+        int mappedX = 0, mappedY = 0;
+        mapViewPointToSurface(viewW / 2.0, viewH / 2.0, mappedX, mappedY);
+        const int expectX = gPresentedWidth / 2;
+        const int expectY = gPresentedHeight / 2;
+        const bool mapOk = std::abs(mappedX - expectX) <= 1 && std::abs(mappedY - expectY) <= 1;
+        if (!mapOk) ++gFullScreenFailures;
+        std::fprintf(stderr,
+            "[fullscreen] pointer map view=%.0fx%.0f center->%d,%d expect=%d,%d ok=%d\n",
+            viewW, viewH, mappedX, mappedY, expectX, expectY, mapOk ? 1 : 0);
+    }
+    // 退回**不能**在这里发。
+    // 实测：在 windowDidEnterFullScreen 的通知栈里再调一次 toggleFullScreen 会被
+    // AppKit 丢掉——日志停在 "entered"，之后既没有 willExit 也没有 didExit，
+    // 进程带着一个全屏窗口继续跑完整个 smoke。同一件事在主循环里做就没问题
+    // （独立探针里 willEnter→didEnter→willExit→didExit 是连着的）。
+    // 所以只置标志，由下一帧 present 在主循环栈里发起退回。
+    gFullScreenExitPending = true;
 }
 
 - (void)windowWillExitFullScreen:(NSNotification*)note {
     (void)note;
     gFullScreenTransition = true;
+    gFullScreenEntered = false;
 }
 
 - (void)windowDidExitFullScreen:(NSNotification*)note {
@@ -440,9 +566,16 @@ static bool gSystemCursorHidden = true;
     if (!gFullScreenTest) return;
     gHashAfterExit = gLastPresentHash;
     [self checkFullScreenState:"exited"];
+    // 用户那条路必须自己走通：点了绿灯就进全屏，不能靠后面的 toggleFullScreen 兜底。
+    // 若这条是 0，说明绿灯仍然不是"全屏按钮"（退回成缩放了），用户点了还是没用。
+    const bool enteredViaButton = gFullScreenStarted && gFullScreenViaButton;
+    if (!enteredViaButton) ++gFullScreenFailures;
     std::fprintf(stderr,
-        "[fullscreen] done: enter=%u exit=%u before=%u failures=%d\n",
-        gHashAfterEnter, gHashAfterExit, gHashBeforeFullScreen, gFullScreenFailures);
+        "[fullscreen] done: enter=%u exit=%u before=%u affordance=%d viaButton=%d"
+        " failures=%d\n",
+        gHashAfterEnter, gHashAfterExit, gHashBeforeFullScreen,
+        gFullScreenAffordanceOk ? 1 : 0, enteredViaButton ? 1 : 0,
+        gFullScreenFailures);
     // 与 attest 同样的退出纪律：退出码必须带失败数，否则 fail 会被掩盖成成功。
     std::fflush(stderr);
     std::_Exit(gFullScreenFailures == 0 ? 0 : 1);
@@ -500,21 +633,25 @@ void present(const Surface& surface) {
                                                   styleMask:style
                                                     backing:NSBackingStoreBuffered
                                                       defer:NO];
-            // ON-2-04：**刻意不设** NSWindowCollectionBehaviorFullScreenPrimary。
+            // 全屏（U-09 重新定案）。
             //
-            // 设了之后绿灯会变成"进入全屏"，而本项目的系统全屏是**走不完**的：
-            // 实测 windowWillEnterFullScreen 触发了、windowDidEnterFullScreen 永远不到，
-            // 哪怕把 pumpEvents 的 run loop 时间从 2ms 放宽到 20ms 也一样。
-            // 根因是切换依赖 [NSApp run] 的完整生命周期（Space 切换 + 动画状态机），
-            // 而本项目的主循环是 compat 自己的 GetMessageW，从不跑 NSApp run ——
-            // 那是整个兼容层的前提，不能为一个窗口形态去动它。
+            // ON-2-04 当初把这一位设成 FullScreenNone，理由是"系统全屏走不完：
+            // willEnter 触发了、didEnter 永远不到"。U-09 复测推翻了这个结论：
+            // 用独立探针（同一个 AppKit、不跑 [NSApp run]、只出队不 sendEvent、
+            // Accessory 策略、2ms 切片）四种组合下 toggleFullScreen 全部
+            // willEnter → didEnter → willExit → didExit 走完，frame 变成屏幕尺寸。
+            // 也就是说"没有 [NSApp run]"不是障碍。
             //
-            // 不设这一位时绿灯是 "zoom"（同步 setFrame，纯窗口操作，不需要 run loop）。
-            // 但实测 NSWindowCollectionBehaviorDefault **挡不住**：全屏照样开始
-            // （willEnter 仍然触发），照样走不完。必须用 FullScreenNone 显式禁止，
-            // 否则用户按 Ctrl+Cmd+F 会卡在半途。
-            // "系统全屏"因此不可用，已单独记为 ON-2-04b（blocked），见 queue。
-            gWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone;
+            // 当时失败的真实前提是：ON-2-04 早于 U-01/U-02 —— 那两轮修之前，
+            // 主循环里有大段路径**根本不 pumpEvents**（世界循环纯 PeekMessageW +
+            // 裸 sleep_for，大厅循环走 MsgWaitForMultipleObjectsEx），全屏切换的
+            // 状态机拿不到 run loop 时间，自然停在半途。现在 pump 已经在
+            // GetMessageW / PeekMessageW / MsgWaitForMultipleObjectsEx 三处都接上了。
+            //
+            // 不用 FullScreenNone 还有第二个理由：那一档下绿灯是"缩放"，图标是
+            // 一个「+」——用户看到的就是这个（U-09 报障）。FullScreenPrimary 才是
+            // 系统认可的"可全屏"形态，绿灯显示展开箭头，Ctrl+Cmd+F 也能用。
+            gWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
             // releasedWhenClosed=NO：窗口关闭后我们仍要能重用它，
             // 否则第二次 ShowWindow 会往一个已释放的对象发消息。
             gWindow.releasedWhenClosed = NO;
@@ -779,23 +916,53 @@ void present(const Surface& surface) {
                 gHashBeforeFullScreen = attestHash24(
                     surface.pixels, surface.width, surface.height, surface.bytesPerRow);
                 gLastPresentHash = gHashBeforeFullScreen;
-                std::fprintf(stderr, "[fullscreen] request toggleFullScreen hash=%u\n",
+                gFullScreenAffordanceOk = reportFullScreenAffordance();
+                if (!gFullScreenAffordanceOk) ++gFullScreenFailures;
+                gFullScreenButtonTried = true;
+                NSButton* zoom = [gWindow standardWindowButton:NSWindowZoomButton];
+                std::fprintf(stderr, "[fullscreen] request via green button hash=%u\n",
                              gHashBeforeFullScreen);
-                [gWindow toggleFullScreen:nil];
+                if (zoom != nil) {
+                    [zoom performClick:nil];
+                } else {
+                    gFullScreenViaButton = false;
+                    std::fprintf(stderr,
+                        "[fullscreen] no green button, fallback toggleFullScreen\n");
+                    [gWindow toggleFullScreen:nil];
+                }
             }
         }
 
         // 全屏期间若游戏自己重绘，把最新帧的 hash 记下来供回调比对。
         // 同一画面重绘 hash 不变，所以判据仍然成立；画面真的变了反而该报警。
         if (gFullScreenTest) {
+            if (gFullScreenEntered) ++gFramesInFullScreen;
             gLastPresentHash = attestHash24(
                 surface.pixels, surface.width, surface.height, surface.bytesPerRow);
-            // 兜底：既没 willEnter 也没有任何回调，说明这个窗口形态在此架构下不存在。
-            // 报结论并正常退出（退出码 0），不把它伪装成"卡住"。
-            if (!gFullScreenStarted && ++gFullScreenTicks > 60) {
+            // 退回在**主循环栈**里发起（不能在 didEnter 通知栈里，见那边注释）。
+            if (gFullScreenExitPending) {
+                gFullScreenExitPending = false;
+                std::fprintf(stderr, "[fullscreen] request exit from present()\n");
+                [gWindow toggleFullScreen:nil];
+            }
+            // 兜底一：点了绿灯但没人响应（performClick 走的是按钮的 action，
+            // 若 AppKit 没把它接到 toggleFullScreen: 上就什么也不发生）。
+            // 这时改用 toggleFullScreen: 再试一次，把"哪条路生效"如实打出来——
+            // 若只有 toggleFullScreen: 生效，说明绿灯的语义仍然不对，用户点了还是缩不了。
+            if (!gFullScreenStarted && gFullScreenViaButton && ++gFullScreenTicks > 8) {
+                gFullScreenViaButton = false;
                 std::fprintf(stderr,
-                    "[fullscreen] unsupported: no windowWillEnterFullScreen after %d frames"
-                    " (needs [NSApp run]; see ON-2-04b)\n", gFullScreenTicks);
+                    "[fullscreen] green button produced no willEnter in %d frames,"
+                    " falling back to toggleFullScreen\n", gFullScreenTicks);
+                gFullScreenTicks = 0;
+                [gWindow toggleFullScreen:nil];
+            }
+            // 兜底二：既没 willEnter 也没有任何回调，说明这个窗口形态在此架构下不存在。
+            // 报结论并正常退出（退出码 0），不把它伪装成"卡住"。
+            if (!gFullScreenStarted && !gFullScreenViaButton && ++gFullScreenTicks > 60) {
+                std::fprintf(stderr,
+                    "[fullscreen] unsupported: no windowWillEnterFullScreen after %d frames\n",
+                    gFullScreenTicks);
                 std::fflush(stderr);
                 std::_Exit(0);
             }
@@ -921,10 +1088,10 @@ void emit(NSEvent* event) {
 
     // 坐标：AppKit 的原点在左下，客户区 DIB 的原点在左上，所以要翻 y。
     // 不翻的话点击会落在垂直镜像的位置——菜单上点"单人游戏"会命中"退出"。
+    // 翻转+缩放都收在 mapViewPointToSurface 里（U-09 补缩放，见其注释）。
     if (type != NSEventTypeKeyDown && type != NSEventTypeKeyUp) {
         const NSPoint local = [gView convertPoint:event.locationInWindow fromView:nil];
-        out.x = static_cast<int>(std::lround(local.x));
-        out.y = static_cast<int>(std::lround(gView.bounds.size.height - local.y));
+        mapViewPointToSurface(local.x, local.y, out.x, out.y);
     }
 
     if (type == NSEventTypeScrollWheel) {
