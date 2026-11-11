@@ -38077,6 +38077,23 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
             std::cout << "Interaction fixture units: spawned=4 type=HTNK owner="
                       << state.economy.owner << " anchor=" << spawnAnchor.x << ","
                       << spawnAnchor.y << "\n";
+
+            // S-04：2peaks 的 10 栋建筑全是 Neutral，而修理光标断言要求
+            // owner == economy.owner 的己方建筑（下方 repair cursor 段）。缺这一栋，
+            // 这条回归就永久红、失去信号价值。
+            // 改既有建筑的 owner 而不是合成新建筑：art / rules / footprint 全部来自
+            // 真实地图，投影与命中测试一定成立。取**最后一栋**而非第一栋，是为了让
+            // visibleObjectIds.front()（后续选中/hover 断言的夹具）保持原样。
+            for (auto it = state.world.accessObjects().rbegin();
+                 it != state.world.accessObjects().rend(); ++it) {
+                if (it->kind != WorldObjectKind::Structure) continue;
+                it->owner = state.economy.owner;
+                std::cout << "Interaction fixture structure: owned id="
+                          << it->instanceId << " type=" << it->type
+                          << " owner=" << it->owner << "\n";
+                break;
+            }
+            invalidateRuntimeObjectProjectionCache(state);
         }
     }
 
