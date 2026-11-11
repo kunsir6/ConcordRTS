@@ -1057,14 +1057,21 @@ void appleInputDispatch(const concord_compat::apple::InputEvent& event, void* co
     if (gInputTarget == nullptr) return;
     using Kind = concord_compat::apple::InputEvent::Kind;
     const LPARAM point = MAKELPARAM(static_cast<WORD>(event.x), static_cast<WORD>(event.y));
+    // U-07：鼠标消息的 wParam 必须带上修饰键位。产品里 Shift+点击加选、Ctrl+点击
+    // 切换选择，判据就是 `wParam & MK_SHIFT/MK_CONTROL`（RuntimeMapLeftPointerSmoke
+    // 的 1759 行把四种组合都测了）。此前这里只写 MK_按键、不带修饰位，
+    // 于是"按住 Shift 点单位"和普通点击是同一条路径。
+    const WPARAM modifierBits =
+        ((GetKeyState(VK_SHIFT) & 0x8000) != 0 ? MK_SHIFT : 0)
+        | ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ? MK_CONTROL : 0);
     switch (event.kind) {
-    case Kind::MouseMove:  PostMessageW(gInputTarget, WM_MOUSEMOVE, 0, point); break;
-    case Kind::LeftDown:   PostMessageW(gInputTarget, WM_LBUTTONDOWN, MK_LBUTTON, point); break;
-    case Kind::LeftUp:     PostMessageW(gInputTarget, WM_LBUTTONUP, 0, point); break;
-    case Kind::RightDown:  PostMessageW(gInputTarget, WM_RBUTTONDOWN, MK_RBUTTON, point); break;
-    case Kind::RightUp:    PostMessageW(gInputTarget, WM_RBUTTONUP, 0, point); break;
-    case Kind::MiddleDown: PostMessageW(gInputTarget, WM_MBUTTONDOWN, MK_MBUTTON, point); break;
-    case Kind::MiddleUp:   PostMessageW(gInputTarget, WM_MBUTTONUP, 0, point); break;
+    case Kind::MouseMove:  PostMessageW(gInputTarget, WM_MOUSEMOVE, modifierBits, point); break;
+    case Kind::LeftDown:   PostMessageW(gInputTarget, WM_LBUTTONDOWN, MK_LBUTTON | modifierBits, point); break;
+    case Kind::LeftUp:     PostMessageW(gInputTarget, WM_LBUTTONUP, modifierBits, point); break;
+    case Kind::RightDown:  PostMessageW(gInputTarget, WM_RBUTTONDOWN, MK_RBUTTON | modifierBits, point); break;
+    case Kind::RightUp:    PostMessageW(gInputTarget, WM_RBUTTONUP, modifierBits, point); break;
+    case Kind::MiddleDown: PostMessageW(gInputTarget, WM_MBUTTONDOWN, MK_MBUTTON | modifierBits, point); break;
+    case Kind::MiddleUp:   PostMessageW(gInputTarget, WM_MBUTTONUP, modifierBits, point); break;
     case Kind::Wheel:
         // WM_MOUSEWHEEL 的 delta 在高位字，且坐标是**屏幕**坐标——
         // 但本层没有屏幕坐标系（纯离屏），产品只用 delta，所以低位置 0。
@@ -1072,8 +1079,16 @@ void appleInputDispatch(const concord_compat::apple::InputEvent& event, void* co
                      static_cast<WPARAM>(static_cast<unsigned>(event.wheelDelta) & 0xFFFFu) << 16,
                      point);
         break;
-    case Kind::KeyDown:    PostMessageW(gInputTarget, WM_KEYDOWN, static_cast<WPARAM>(event.keyCode), 0); break;
-    case Kind::KeyUp:      PostMessageW(gInputTarget, WM_KEYUP, static_cast<WPARAM>(event.keyCode), 0); break;
+    case Kind::KeyDown:
+        // U-07：状态必须先于消息更新——窗口过程在 DispatchMessageW 里读
+        // GetKeyState 判断修饰键，晚一步就会读到上一帧的状态。
+        concord_compat::setVirtualKeyDown(event.keyCode, true);
+        PostMessageW(gInputTarget, WM_KEYDOWN, static_cast<WPARAM>(event.keyCode), 0);
+        break;
+    case Kind::KeyUp:
+        concord_compat::setVirtualKeyDown(event.keyCode, false);
+        PostMessageW(gInputTarget, WM_KEYUP, static_cast<WPARAM>(event.keyCode), 0);
+        break;
     case Kind::Close:
         // ON-2-04：红叉 = 关掉呈现窗口 + 退出应用（macOS 单窗口应用的常规语义）。
         //
@@ -1521,6 +1536,21 @@ BOOL TranslateMessage(const MSG* lpMsg) {
 LRESULT DispatchMessageW(const MSG* lpMsg) {
     if (lpMsg == nullptr) return 0;
     if (lpMsg->hwnd == nullptr) return 0;
+    // U-07：真实 Windows 的键状态由系统维护，消息一入队 GetKeyState 就能反映。
+    // 这里没有系统，只能在派发时补上——好处是**合成消息**（smoke 的
+    // PostMessageW(WM_KEYDOWN)）也走同一条语义，验证不必依赖真键盘。
+    switch (lpMsg->message) {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        concord_compat::setVirtualKeyDown(static_cast<int>(lpMsg->wParam), true);
+        break;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        concord_compat::setVirtualKeyDown(static_cast<int>(lpMsg->wParam), false);
+        break;
+    default:
+        break;
+    }
     if (lpMsg->message == WM_PAINT && presentStatsEnabled()) ++presentStats().paintViaQueue;
     return callWindowProc(lpMsg->hwnd, lpMsg->message, lpMsg->wParam, lpMsg->lParam);
 }

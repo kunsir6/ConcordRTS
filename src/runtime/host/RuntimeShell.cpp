@@ -38363,6 +38363,108 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
                   << " frame=0 atlas=mouse\n";
     }
 
+    // U-07：Ctrl+数字编队。
+    //
+    // 用户实测"T 屏幕内同类全选有效，Ctrl+数字编队没反应"。根因不在绑定表：
+    // runtimePlayerCommandBindings 里 TeamCreate_n 就是 digit|runtimePlayerControlKey，
+    // 单元测试也一直是绿的。缺陷在 compat 层——GetKeyState 读的是 g_keyState，
+    // 而这张表在 macOS 上**从来没有人写过**（只有 SetKeyboardState 能写它，产品里
+    // 没有任何调用），于是恒 0：Ctrl+1 被解析成纯 '1'，走成"选第 1 队"，
+    // 空队等于清空选择，看起来就是"按了没反应"。
+    //
+    // 判据必须**穿过消息循环**。若直接拿 binding 去比一个手写的 code，就会绕过
+    // GetKeyState，测试永远绿——这个缺陷能活到现在，正是因为旧断言全在绑定层。
+    {
+        const HINSTANCE teamInstance = GetModuleHandleW(nullptr);
+        const wchar_t* teamClassName = L"ConcordInteractionSmokeTeamKeys";
+        WNDCLASSW teamWindowClass{};
+        teamWindowClass.lpfnWndProc = runtimeWindowProc;
+        teamWindowClass.hInstance = teamInstance;
+        teamWindowClass.lpszClassName = teamClassName;
+        if (RegisterClassW(&teamWindowClass) == 0
+            && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            std::cerr << "Interaction smoke test failed: cannot register team-key window class.\n";
+            return 1;
+        }
+        // WS_POPUP + 不 ShowWindow：只借它的消息分发，不上屏。
+        HWND teamWindow = CreateWindowExW(0, teamClassName, L"Team key test", WS_POPUP,
+            0, 0, clientRect.right, clientRect.bottom, nullptr, nullptr, teamInstance, nullptr);
+        if (teamWindow == nullptr) {
+            UnregisterClassW(teamClassName, teamInstance);
+            std::cerr << "Interaction smoke test failed: cannot create team-key window.\n";
+            return 1;
+        }
+        SetWindowLongPtrW(teamWindow, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&state));
+
+        // 投递后立刻抽取：走 PostMessageW → PeekMessageW → DispatchMessageW，
+        // 也就是键状态表被写入的那条真实路径。
+        const auto pumpKey = [&](UINT message, WPARAM key) {
+            if (PostMessageW(teamWindow, message, key, 0) == FALSE) return false;
+            MSG queued{};
+            while (PeekMessageW(&queued, teamWindow, message, message, PM_REMOVE) != FALSE) {
+                TranslateMessage(&queued);
+                DispatchMessageW(&queued);
+            }
+            return true;
+        };
+        const auto sameUnits = [](std::vector<int> a, std::vector<int> b) {
+            std::sort(a.begin(), a.end());
+            std::sort(b.begin(), b.end());
+            return a == b;
+        };
+
+        applySelection(state, boxSelectionIds, false, false);
+        const std::vector<int> teamSource = state.selectedObjectIds;
+        bool teamVerified = !teamSource.empty();
+        if (!teamVerified) {
+            std::cerr << "Interaction smoke test failed: no selection to assign to a team.\n";
+        }
+
+        if (teamVerified) {
+            state.playerLocalCommands.teams[0].clear();
+            teamVerified = pumpKey(WM_KEYDOWN, VK_CONTROL)
+                && pumpKey(WM_KEYDOWN, '1')
+                && pumpKey(WM_KEYUP, '1')
+                && pumpKey(WM_KEYUP, VK_CONTROL);
+            if (!teamVerified) {
+                std::cerr << "Interaction smoke test failed: cannot post team-key messages.\n";
+            } else if (!sameUnits(state.playerLocalCommands.teams[0], teamSource)) {
+                std::cerr << "Interaction smoke test failed: Ctrl+1 did not create team 1"
+                             " (GetKeyState probably reports no Ctrl).\n";
+                teamVerified = false;
+            }
+        }
+
+        // 反向判据：Ctrl 抬起后，同一个键必须是"选队"而不是又建一次队。
+        // 只测正向会漏掉"修饰键卡住"——那会让每个选择都变成建队。
+        if (teamVerified) {
+            applySelection(state, {}, false, false);
+            teamVerified = pumpKey(WM_KEYDOWN, '1') && pumpKey(WM_KEYUP, '1');
+            if (!teamVerified) {
+                std::cerr << "Interaction smoke test failed: cannot post plain team-select key.\n";
+            } else if (!sameUnits(state.playerLocalCommands.teams[0], teamSource)) {
+                std::cerr << "Interaction smoke test failed: plain 1 rebuilt team 1"
+                             " (stuck Ctrl modifier).\n";
+                teamVerified = false;
+            } else if (!sameUnits(state.selectedObjectIds, teamSource)) {
+                std::cerr << "Interaction smoke test failed: plain 1 did not recall team 1.\n";
+                teamVerified = false;
+            }
+        }
+
+        DestroyWindow(teamWindow);
+        UnregisterClassW(teamClassName, teamInstance);
+        // WM_DESTROY 会 PostQuitMessage（产品的关窗语义），这里把它吃掉，
+        // 免得后面任何取消息的地方读到一条本测试制造出来的 WM_QUIT。
+        MSG drained{};
+        while (PeekMessageW(&drained, nullptr, 0, 0, PM_REMOVE) != FALSE) {
+            if (drained.message == WM_QUIT) break;
+        }
+        if (!teamVerified) return 1;
+        std::cout << "Team keys: ctrl+1 create=" << teamSource.size()
+                  << " units plain1 recall=1\n";
+    }
+
     std::optional<POINT> repairCursorPoint;
     int repairCursorObjectId = -1;
     for (const RuntimeProjectedObject& projectedObject : projectedObjects) {

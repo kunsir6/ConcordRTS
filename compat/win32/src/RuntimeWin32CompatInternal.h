@@ -156,4 +156,10 @@ std::size_t timerCount();
 
 }  // namespace concord_compat
 
+// 键盘状态（U-07）。刻意**不**把这两个函数写在上面这段里，而是拆去一个不带
+// windows.h 的小头：唯一需要调它们的非 Win32 侧代码是 .mm（Cocoa），而
+// windows.h 与 AppKit 在同一个 TU 里会撞符号（Polygon / GetCurrentProcess）。
+// 见 RuntimeWin32CompatKeyState.h 顶部。
+#include "RuntimeWin32CompatKeyState.h"
+
 #endif  // CONCORD_COMPAT_WIN32_INTERNAL_H

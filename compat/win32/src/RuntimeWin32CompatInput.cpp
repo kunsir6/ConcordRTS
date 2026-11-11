@@ -5,8 +5,9 @@
 // 判据不是"能不能像 Windows 一样响应"，而是"在没有宿主的情况下，返回什么才是
 // 诚实的"：
 //
-//   · 键盘：无真实键状态 → 状态数组恒 0（"键未按下"）。返回 0 是诚实，返回一个
-//     编造的按位组合是撒谎。
+//   · 键盘：**U-07 起不再是恒 0**。窗口宿主（S7/Q-05）落地后，键状态由桥接层
+//     真实维护（FlagsChanged + KeyDown/KeyUp 都会写表，见 setVirtualKeyDown）。
+//     恒 0 的旧结论只对"没有宿主"的年代成立——它让所有修饰键快捷键静默失效。
 //   · 光标：无真实光标资源 → LoadCursorW 对标准 ID 返回稳定的非 NULL 伪句柄
 //     （调用点 `SetCursor(LoadCursorW(...))` 拿 NULL 当"隐藏光标"，返回 NULL 会
 //     静默把"加载失败"误读成"故意隐藏"）；对自定义字符串名返回 NULL（加载失败）。
@@ -55,7 +56,17 @@ extern "C" {
 
 SHORT GetKeyState(int nVirtKey) {
     if (nVirtKey < 0 || nVirtKey >= 256) return 0;
-    return static_cast<SHORT>(g_keyState[nVirtKey]);
+    // 两个 API 用的是**同一个字节表**，但位布局不同，这里必须搬运：
+    //   · GetKeyboardState/SetKeyboardState 的表里，按下 = 该字节 0x80（bit7）；
+    //   · GetKeyState 返回 SHORT，按下 = bit15 (0x8000)，锁存位（CapsLock 等）= bit0。
+    // 直接把字节强转成 SHORT，0x80 停在 bit7，于是所有 `GetKeyState(vk) & 0x8000`
+    // 恒假——症状和"表里没有按键"一模一样（Ctrl+数字编队、Shift+点击加选、
+    // Alt 强制攻击全部静默失效），但根因差一层，只查"谁写表"会一头雾水。
+    const unsigned char raw = g_keyState[nVirtKey];
+    unsigned short value = 0;
+    if ((raw & 0x80u) != 0) value |= 0x8000u;
+    if ((raw & 0x01u) != 0) value |= 0x0001u;
+    return static_cast<SHORT>(value);
 }
 
 SHORT GetAsyncKeyState(int vKey) {
@@ -261,3 +272,35 @@ BOOL DrawFrameControl(HDC hdc, LPRECT lprc, UINT type, UINT state) {
 
 }  // extern "C"
 
+// ---------------------------------------------------------------------------
+// U-07：键盘状态表（GetKeyState 的后端）
+// ---------------------------------------------------------------------------
+// 放在 extern "C" 之外：这两个函数是**本层内部接口**（namespace concord_compat），
+// 不是 Win32 API。塞进 extern "C" 会变成 C 链接的全局符号，与头文件声明对不上，
+// 链接期报未定义——而这个报错会很像"忘记加源文件"。
+namespace concord_compat {
+
+void setVirtualKeyDown(int virtualKey, bool down) noexcept {
+    if (virtualKey < 0 || virtualKey >= 256) return;
+    BYTE& state = g_keyState[virtualKey];
+    state = down ? static_cast<BYTE>(state | 0x80)
+                 : static_cast<BYTE>(state & ~0x80);
+}
+
+void clearModifierKeyDown() noexcept {
+    const int modifiers[] = {VK_SHIFT, VK_CONTROL, VK_MENU, VK_CAPITAL};
+    for (int key : modifiers) {
+        g_keyState[key] = static_cast<BYTE>(g_keyState[key] & ~0x80);
+    }
+}
+
+void setModifierKeyState(unsigned modifierMask) noexcept {
+    // 覆盖式：mask 是快照，不是增量。逐键置位在"焦点从别的应用切回来"时会算出
+    // 错误的中间状态（漏掉的那次抬起永远补不回来），表现为修饰键卡住。
+    setVirtualKeyDown(VK_SHIFT, (modifierMask & kModifierShift) != 0);
+    setVirtualKeyDown(VK_CONTROL, (modifierMask & kModifierControl) != 0);
+    setVirtualKeyDown(VK_MENU, (modifierMask & kModifierAlt) != 0);
+    setVirtualKeyDown(VK_CAPITAL, (modifierMask & kModifierCapsLock) != 0);
+}
+
+}  // namespace concord_compat

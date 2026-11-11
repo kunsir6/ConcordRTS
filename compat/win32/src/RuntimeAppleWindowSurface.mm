@@ -12,6 +12,11 @@
 
 #include "RuntimeAppleWindowSurface.h"
 
+// 只拿键盘状态那两个入口，**不**拿 RuntimeWin32CompatInternal.h：那个头会带进
+// windows.h，与下面的 Cocoa 同名符号互撞（Polygon / GetCurrentProcess），实测
+// 直接编译失败。这个 TU 不需要 WPARAM，也不需要知道 VK_* 的数值。
+#include "RuntimeWin32CompatKeyState.h"
+
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CoreAnimation.h>
 
@@ -358,6 +363,14 @@ static bool gSystemCursorHidden = true;
     (void)note;
     if (gWindow == nil || gView == nil) return;
     [gWindow invalidateCursorRectsForView:gView];
+}
+
+// U-07：失焦时清掉修饰键。否则按住 Ctrl 用 Cmd+Tab 切走、或点到别的窗口后
+// 松开 Ctrl，本进程收不到 KeyUp，Ctrl 会一直"卡住"——之后所有点击都变成
+// Ctrl+点击（切换选择/强制攻击），看起来像选择功能坏了。
+- (void)windowDidResignKey:(NSNotification*)note {
+    (void)note;
+    concord_compat::clearModifierKeyDown();
 }
 
 - (BOOL)windowShouldClose:(NSWindow*)sender {
@@ -823,6 +836,13 @@ namespace {
 // macOS 的硬件键码 → Windows 虚拟键码。只覆盖站点实际会用到的键：
 // 菜单靠鼠标，键盘只需要 Esc / Enter / 方向 / 空格 这几个。
 // 字母和数字走 characters 分支（见下面），不在这张表里。
+//
+// F1..F12（U-07）：不是"顺手补全"，而是绑定表里就有——
+//   View1..View4      = 112..115 = VK_F1..VK_F4   （跳视角）
+//   SetView1..SetView4= Ctrl+F1..F4                （存视角）
+//   Taunt_1..Taunt_8  = 116..123 = VK_F5..VK_F12  （多人语音/嘲讽）
+// 这些键在 characters 分支里拿不到可打印字符，表里没有就会被 `keyCode==0` 丢掉，
+// 表现为"F 键完全没反应"。注意系统可能把 F1/F2 抢去调亮度，那属于用户设置，不是本层问题。
 int translateKeyCode(unsigned short macKeyCode) {
     switch (macKeyCode) {
         case 0x35: return 0x1B;  // Escape
@@ -839,12 +859,43 @@ int translateKeyCode(unsigned short macKeyCode) {
         case 0x74: return 0x21;  // PageUp
         case 0x79: return 0x22;  // PageDown
         case 0x75: return 0x2E;  // Delete
+        case 0x7A: return 0x70;  // F1
+        case 0x78: return 0x71;  // F2
+        case 0x63: return 0x72;  // F3
+        case 0x76: return 0x73;  // F4
+        case 0x60: return 0x74;  // F5
+        case 0x61: return 0x75;  // F6
+        case 0x62: return 0x76;  // F7
+        case 0x64: return 0x77;  // F8
+        case 0x65: return 0x78;  // F9
+        case 0x6D: return 0x79;  // F10
+        case 0x67: return 0x7A;  // F11
+        case 0x6F: return 0x7B;  // F12
         default:   return 0;
     }
 }
 
+// U-07：修饰键状态必须从**每一个**事件同步。
+//
+// macOS 的修饰键不产生 KeyDown/KeyUp，只产生 FlagsChanged；而 Ctrl/Shift/Alt
+// 同时又会挂在鼠标事件上。只处理 FlagsChanged 会漏掉"从别的应用的按键状态切
+// 回来"这种情况，所以按事件携带的 modifierFlags 全量覆盖一遍——它是当前真实
+// 状态的快照，不是增量。
+//
+// 这里只翻成抽象位；AppKit 常量 → VK_* 的映射在 compat 层内部（那边有 windows.h）。
+static void syncModifierState(NSEventModifierFlags flags) {
+    unsigned mask = 0;
+    if ((flags & NSEventModifierFlagShift) != 0) mask |= concord_compat::kModifierShift;
+    if ((flags & NSEventModifierFlagControl) != 0) mask |= concord_compat::kModifierControl;
+    if ((flags & NSEventModifierFlagOption) != 0) mask |= concord_compat::kModifierAlt;
+    if ((flags & NSEventModifierFlagCapsLock) != 0) mask |= concord_compat::kModifierCapsLock;
+    concord_compat::setModifierKeyState(mask);
+}
+
 void emit(NSEvent* event) {
     if (gInputSink == nullptr || gView == nil) return;
+    // 先同步修饰键，再翻译事件：窗口过程处理这条消息时要读到正确的 Ctrl/Shift。
+    syncModifierState(event.modifierFlags);
 
     concord_compat::apple::InputEvent out;
     const NSEventType type = event.type;
