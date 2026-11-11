@@ -36804,12 +36804,18 @@ int runRuntimeResultPresentationSmokeTest(const RuntimeConfig& config) {
     for (std::size_t faction = 0; faction < countries.size(); ++faction) {
         state.config.playerCountry = countries[faction];
         state.config.campaignId = faction == 0 ? "gdi" : faction == 1 ? "nod" : "yuri";
-        state.campaignScore.presentationStartedAtMs = GetTickCount64() - 650;
+        // The score page reads runtimeUiClockNow() (CLOCK_MONOTONIC on macOS),
+        // not GetTickCount64(). Stamping the start from GetTickCount64 made the
+        // two epochs disagree, so runtimeUiScoreElapsed() saw a huge positive
+        // elapsed on both paints and clamped to the last frame: identical
+        // bitmaps, changed=0. Express "N ms ago" in the clock the renderer reads.
+        const RuntimeUiTimeMs scoreClockNow = runtimeUiClockNow(state);
+        state.campaignScore.presentationStartedAtMs = scoreClockNow - 650;
         state.repaintRequested = true;
         const auto first = paint();
         // No simulation tick, input or explicit repaint request between frames.
         // Previously WM_PAINT reused the first bitmap forever in this state.
-        state.campaignScore.presentationStartedAtMs = GetTickCount64() - 1600;
+        state.campaignScore.presentationStartedAtMs = scoreClockNow - 1600;
         state.repaintRequested = false;
         const int renderedBefore = state.renderedFramesThisSecond;
         const auto next = paint();
