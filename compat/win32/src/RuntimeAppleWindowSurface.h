@@ -84,6 +84,10 @@ void pumpEvents();
 // 而不是 [NSCursor hide]：cursor rect 是区域限定的，鼠标移出窗口自动恢复，
 // 不需要配对 unhide，也不会因窗口失焦/切换而把指针永久藏掉。
 // 默认隐藏；CONCORD_HIDE_SYSTEM_CURSOR=0 可关闭（万一某个界面没有自绘指针）。
+//
+// U-05 结论：产品那套 SetCursor 请求**不代表**系统指针该不该出现（世界每秒几十次
+// 请求 StockArrow，而游戏同时自绘箭头；截图实证 hide=0 时两个箭头并排），
+// 所以这里保持"一律隐藏"，不做 SetCursor 镜像。
 void setSystemCursorHidden(bool hidden);
 bool systemCursorHidden();
 

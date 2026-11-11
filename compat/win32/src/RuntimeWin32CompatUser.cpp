@@ -1589,6 +1589,9 @@ LRESULT DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
             if (classCursor == nullptr) {
                 classCursor = reinterpret_cast<HCURSOR>(static_cast<std::uintptr_t>(32512u));
             }
+            // U-05：这里只记账。产品的 SetCursor 请求在这套引擎里不代表"系统指针
+            // 该不该出现"（世界每秒几十次 StockArrow，而游戏同时自绘箭头），
+            // 所以 SetCursor 本身也不再镜像到真实指针，默认过程直接用即可。
             SetCursor(classCursor);
             return TRUE;
         }

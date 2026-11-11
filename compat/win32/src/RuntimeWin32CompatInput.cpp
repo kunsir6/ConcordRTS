@@ -24,9 +24,12 @@
 #include <windows.h>
 
 #include "RuntimeWin32CompatInternal.h"
+#include "RuntimeAppleWindowSurface.h"
 
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 namespace {
 
@@ -124,6 +127,26 @@ BOOL GetCursorPos(LPPOINT lpPoint) {
 HCURSOR SetCursor(HCURSOR hCursor) {
     HCURSOR old = g_cursor;
     g_cursor = hCursor;
+    // U-05 结论：**不要**把这里的请求镜像到真实 macOS 指针。
+    //
+    // 曾按 Windows 语义镜像（nullptr→隐藏、handle→显示箭头），理由看起来很充分：
+    // 产品用 SetCursor 表达每一屏的意图（RuntimeMainMenu 的 WM_SETCURSOR、
+    // CampaignMenuState::setHandCursor）。但截图实测推翻了它：
+    //
+    //   hide=0（显示系统指针）：鼠标处出现**两个**箭头——白色描边系统箭头
+    //                           + 灰色游戏自绘箭头，紧挨着。
+    //   hide=1（隐藏系统指针）：只剩游戏那个灰色箭头，位置一致、大小正常。
+    //
+    // 关键点：世界里产品每秒几十次请求 StockArrow(32512)，而游戏**同时**在帧里
+    // 画了自己的箭头。所以产品的 SetCursor 请求在这套引擎里并不代表"系统指针该
+    // 不该出现"，它只是 Windows 时代的历史痕迹；真正的指针是自绘的那一个。
+    // 因此 macOS 侧一律隐藏系统指针（U-04 的 cursor rect），这里只记账。
+    if (std::getenv("CONCORD_CURSOR_TRACE") != nullptr) {
+        std::fprintf(stderr, "[cursor] SetCursor %s (id=%llu) [not mirrored]\n",
+                     hCursor == nullptr ? "nullptr(hide)" : "handle(show)",
+                     static_cast<unsigned long long>(
+                         reinterpret_cast<std::uintptr_t>(hCursor)));
+    }
     return old;
 }
 
@@ -245,3 +268,4 @@ BOOL DrawFrameControl(HDC hdc, LPRECT lprc, UINT type, UINT state) {
 }
 
 }  // extern "C"
+

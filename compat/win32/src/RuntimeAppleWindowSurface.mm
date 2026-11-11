@@ -308,6 +308,18 @@ void attestPresent(const concord_compat::apple::Surface& surface) {
 // NSView 默认 acceptsFirstMouse: 返回 NO —— 窗口从非激活变激活时，系统会把这次
 // 点击当成"激活动作"吃掉，不派发给 view。对普通文档应用这是体贴，对游戏就是
 // "点了没反应，非得再点一下"，而且第二下才开始有反馈，很容易被误判成输入没打通。
+// U-05：不可见光标（单例）。
+// 不用 +[NSCursor invisibleCursor]：本 SDK 里它不可见（编译报 "no known class
+// method for selector 'invisibleCursor'"）。用 1×1 空图自建，各版本 SDK 都稳定。
+static NSCursor* concordInvisibleCursor() {
+    static NSCursor* cursor = nil;
+    if (cursor == nil) {
+        NSImage* blank = [[NSImage alloc] initWithSize:NSMakeSize(1.0, 1.0)];
+        cursor = [[NSCursor alloc] initWithImage:blank hotSpot:NSZeroPoint];
+    }
+    return cursor;
+}
+
 @interface ConcordGameView : NSView
 @end
 
@@ -330,20 +342,24 @@ static bool gSystemCursorHidden = true;
 - (void)resetCursorRects {
     [super resetCursorRects];
     if (!gSystemCursorHidden) return;
-    // 不用 +[NSCursor invisibleCursor]：本 SDK 里它不可见（编译报
-    // "no known class method for selector 'invisibleCursor'"）。用 1×1 空图
-    // 自建等价光标，只用 initWithImage:hotSpot:，各版本 SDK 都稳定。
-    // 缓存一次：resetCursorRects 会在窗口激活、尺寸变化、invalidate 时反复调用。
-    static NSCursor* invisible = nil;
-    if (invisible == nil) {
-        NSImage* blank = [[NSImage alloc] initWithSize:NSMakeSize(1.0, 1.0)];
-        invisible = [[NSCursor alloc] initWithImage:blank hotSpot:NSZeroPoint];
-    }
-    if (invisible != nil) [self addCursorRect:self.bounds cursor:invisible];
+    if (concordInvisibleCursor() != nil)
+        [self addCursorRect:self.bounds cursor:concordInvisibleCursor()];
 }
 @end
 
 @implementation ConcordWindowCloseDelegate
+// U-05：窗口成为 key 时**重新**挂一次 cursor rect。
+//
+// 为什么需要这一步：cursor rect 是 AppKit 的窗口级状态，窗口激活/失焦/重新
+// orderFront 时可能被整体丢弃，之后若没人 invalidate，AppKit 就退回默认箭头。
+// 症状极具迷惑性——菜单阶段正常（那时窗口早已是 key），进世界后（窗口被 resize、
+// 重新 orderFront）又冒出系统箭头，看起来像"隐藏策略在世界里失效"。
+- (void)windowDidBecomeKey:(NSNotification*)note {
+    (void)note;
+    if (gWindow == nil || gView == nil) return;
+    [gWindow invalidateCursorRectsForView:gView];
+}
+
 - (BOOL)windowShouldClose:(NSWindow*)sender {
     (void)sender;
     if (gInputSink == nullptr) {
@@ -643,6 +659,38 @@ void present(const Surface& surface) {
                     CGImageGetWidth(image), CGImageGetHeight(image));
             }
 
+            // U-05 自测：CONCORD_CURSOR_SELFTEST=1 时周期性投一个合成 mouseMoved，
+            // 用来在无人值守下驱动完整输入链路（AppKit → 翻译 → gInputSink →
+            // WM_SETCURSOR → 产品 SetCursor → 本层指针策略）。
+            // 没有它，"世界/游戏内菜单该显示哪种指针"只能靠人工点选肉眼判断，
+            // 而这正是这一轮反复来回的原因。
+            {
+                static const bool cursorSelfTest =
+                    std::getenv("CONCORD_CURSOR_SELFTEST") != nullptr;
+                static int posted = 0;
+                if (cursorSelfTest && posted < 6 && presentIndex % 30 == 0) {
+                    ++posted;
+                    const NSPoint point =
+                        NSMakePoint(120.0 + posted * 24.0, 90.0 + posted * 12.0);
+                    NSEvent* move = [NSEvent mouseEventWithType:NSEventTypeMouseMoved
+                                                       location:point
+                                                  modifierFlags:0
+                                                      timestamp:[[NSProcessInfo processInfo]
+                                                          systemUptime]
+                                                   windowNumber:gWindow.windowNumber
+                                                        context:nil
+                                                    eventNumber:0
+                                                     clickCount:0
+                                                       pressure:0];
+                    if (move != nil) {
+                        [NSApp postEvent:move atStart:NO];
+                        std::fprintf(stderr,
+                            "[cocoa] cursor self-test: posted mouseMoved #%d at %.0f,%.0f\n",
+                            posted, point.x, point.y);
+                    }
+                }
+            }
+
             // ON-2-05 二分诊断（CONCORD_PRESENT_DIAG=1 才开，生产零开销）：
             //
             // "客户区全黑"有三条互斥的可能，一条日志就能分开：
@@ -932,6 +980,16 @@ void pumpEvents() {
             if (event.type == NSEventTypeKeyDown
                 && [[NSApp mainMenu] performKeyEquivalent:event]) {
                 continue;
+            }
+            // U-05：每个输入事件都重新压一次不可见光标。
+            //
+            // cursor rect 是窗口级状态，窗口激活/失焦/重新 orderFront 时可能被
+            // 整体丢掉；丢掉之后没人 invalidate 就会退回系统箭头，而用户看到的
+            // 就是"世界里又冒出第二个指针"。现场没有可靠的补回时机，所以按
+            // 游戏窗口的常规做法：每次事件主动 set 一次（代价可忽略）。
+            if (gSystemCursorHidden) {
+                NSCursor* hiddenCursor = concordInvisibleCursor();
+                if (hiddenCursor != nil) [hiddenCursor set];
             }
             emit(event);
         }
