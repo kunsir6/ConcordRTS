@@ -943,6 +943,11 @@ struct RuntimeMapRenderStats {
     int voxelShadowMasksResolved = 0;
     int generatedShadowFallbacks = 0;
     int structureShadowsDrawn = 0;
+    // Read-only split for the "drawn>0 but structures=0" case: candidates tell
+    // us whether the structure ever entered the ground-shadow pass, and
+    // emptyMasks whether its authored mask resolved yet darkened no pixel.
+    int structureShadowCandidates = 0;
+    int structureShadowEmptyMasks = 0;
     int unitShadowsDrawn = 0;
     int infantryShadowsDrawn = 0;
     int aircraftShadowsDrawn = 0;

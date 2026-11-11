@@ -24287,6 +24287,9 @@ void recordRuntimeWorldObjectShadowResult(
 ) {
     if (result.candidate) {
         ++stats.shadowCandidates;
+        if (object.kind == WorldObjectKind::Structure) {
+            ++stats.structureShadowCandidates;
+        }
         ++stats.worldObjectShadowOrderTraceCount;
         stats.worldObjectShadowOrderTraceHash ^=
             static_cast<std::uint32_t>(object.instanceId);
@@ -24313,6 +24316,12 @@ void recordRuntimeWorldObjectShadowResult(
     stats.buildingAnimationShadowsDrawn +=
         result.buildingAnimationLayers;
     if (!result.drawn) {
+        // Mask resolved but not a single pixel was darkened: the structure is
+        // on screen yet its authored shadow cast nothing. Count it separately
+        // from "never a candidate" so the two causes stay distinguishable.
+        if (object.kind == WorldObjectKind::Structure && result.shpMask) {
+            ++stats.structureShadowEmptyMasks;
+        }
         return;
     }
 
@@ -27790,6 +27799,8 @@ void emitRuntimeRenderDiagnostics(const RuntimeMapRenderStats& stats) {
               << stats.voxelShadowMasksResolved
               << " generated=" << stats.generatedShadowFallbacks
               << " structures=" << stats.structureShadowsDrawn
+              << " structureCand=" << stats.structureShadowCandidates
+              << " structureEmpty=" << stats.structureShadowEmptyMasks
               << " units=" << stats.unitShadowsDrawn
               << " infantry=" << stats.infantryShadowsDrawn
               << " aircraft=" << stats.aircraftShadowsDrawn

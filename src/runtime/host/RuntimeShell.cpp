@@ -34482,6 +34482,10 @@ int runRuntimeRenderSmokeTest(const RuntimeConfig& config) {
                   << stats.voxelShadowMasksResolved
                   << " structures="
                   << stats.structureShadowsDrawn
+                  << " structureCand="
+                  << stats.structureShadowCandidates
+                  << " structureEmpty="
+                  << stats.structureShadowEmptyMasks
                   << ".\n";
         return 1;
     }
