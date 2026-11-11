@@ -7,6 +7,7 @@
 #include "runtime/menu/RuntimeSkirmishController.h"
 #include "runtime/window/RuntimeSoftwareWindow.h"
 #include <cstdlib>
+#include <atomic>
 #include <stdexcept>
 #include "runtime/host/RuntimeUiClockWin32.h"
 #include "ui/audio/RuntimeSkirmishMusicPolicy.h"
@@ -648,6 +649,19 @@ struct MenuState : RuntimeSkirmishServices, RuntimeSkirmishController {
 
 
     std::unique_ptr<RuntimeMenuResourceWatch> resourceWatch;
+
+    // 诊断用：每个 MenuState 实例的唯一序号。
+    //
+    // 为什么需要它：预载冒烟要证明"换了 edition 之后拿到的是**新对象**，不是
+    // 复用缓存"，原来比的是裸指针地址。而缓存被 reset() 释放后，下一次同尺寸
+    // 分配极可能落在同一个地址上——identity 比较就退化成"永远相同"。实测换了个
+    // 部署目标（minos 27.2 → 12.0）分配顺序一变，fresh 就成了 0，契约报
+    // preload/reentry 失败，而功能完全正常。序号不会被地址复用骗到。
+    static std::uint64_t nextInstanceSerial() {
+        static std::atomic<std::uint64_t> counter{0};
+        return ++counter;
+    }
+    const std::uint64_t instanceSerial = nextInstanceSerial();
 
     RuntimeRandomMapOptions randomOptions;
     std::optional<RuntimeRandomMapResult> randomResult;

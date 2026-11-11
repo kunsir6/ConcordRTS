@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <bit>
+#include <cerrno>
 #include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -160,14 +162,20 @@ double readDoubleField(
         return defaultValue;
     }
 
-    double parsed = defaultValue;
-    const char* begin = value.data();
-    const char* end = value.data() + value.size();
-    const std::from_chars_result result =
-        std::from_chars(begin, end, parsed, std::chars_format::general);
-    if (result.ec != std::errc()
-        || result.ptr != end
-        || !std::isfinite(parsed)) {
+    // 为什么不用 std::from_chars（原本的写法）：libc++ 的**浮点** from_chars 直到
+    // macOS 26 才可用（`__charconv/from_chars_floating_point.h` 里标了
+    // availability(macos 26.0)）。用它就把整份二进制的最低系统钉到 26——
+    // 拷到 macOS 12/13/14 的机器上会直接报"系统版本太低"。
+    // 整数 from_chars 没有这个限制，本文件上面的 parseIntValue 仍然用它。
+    //
+    // strtod 与 from_chars(general) 在本项目的场景下等价：进程从不调 setlocale，
+    // 始终是 "C" 区域，小数点就是 '.'；并且这里显式要求"必须吃完整串"。
+    errno = 0;
+    char* parseEnd = nullptr;
+    const double parsedValue = std::strtod(value.c_str(), &parseEnd);
+    if (parseEnd != value.c_str() + value.size()
+        || errno == ERANGE
+        || !std::isfinite(parsedValue)) {
         warnings.push_back(
             "Map field [" + sectionName + "] " + key
             + " is not a finite number: " + value
@@ -175,7 +183,7 @@ double readDoubleField(
         return defaultValue;
     }
 
-    return parsed;
+    return parsedValue;
 }
 
 void readLightingProfile(

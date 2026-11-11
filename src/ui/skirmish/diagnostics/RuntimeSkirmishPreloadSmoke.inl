@@ -54,7 +54,10 @@ bool runSkirmishPreloadSmoke(const RuntimeConfig& config, const fs::path& output
         || prewarmedMenuState->hwnd != nullptr
         || !prewarmedMenuState->resourceWatch->unchanged(config)) return false;
 
+    // 身份判据用序号而不是地址：reset() 释放之后同尺寸分配会复用同一地址，
+    // 指针相等并不代表"还是同一个对象"（见 MenuState::instanceSerial 的注释）。
     MenuState* const resourceOwner = prewarmedMenuState.get();
+    const std::uint64_t resourceOwnerSerial = resourceOwner->instanceSerial;
     const auto* const maps = resourceOwner->maps.data();
     const auto* const shellPixels = resourceOwner->background.bgra.data();
     const fs::path preferencePath = outputRoot / "preload_preferences.ini";
@@ -124,7 +127,9 @@ bool runSkirmishPreloadSmoke(const RuntimeConfig& config, const fs::path& output
         const double entryMs = milliseconds(entryStarted);
         maxEntryMs = std::max(maxEntryMs, entryMs);
         if (!probe.called || !probe.valid || result.accepted || !IsWindow(host)
-            || prewarmedMenuState.get() != resourceOwner || resourceOwner->hwnd != nullptr
+            || prewarmedMenuState == nullptr
+            || prewarmedMenuState->instanceSerial != resourceOwnerSerial
+            || resourceOwner->hwnd != nullptr
             || resourceOwner->maps.data() != maps
             || resourceOwner->background.bgra.data() != shellPixels) return false;
     }
@@ -150,7 +155,7 @@ bool runSkirmishPreloadSmoke(const RuntimeConfig& config, const fs::path& output
     const bool editionReady = prewarmedMenuState != nullptr
         && prewarmedMenuState->initialized;
     const bool editionFresh = prewarmedMenuState != nullptr
-        && prewarmedMenuState.get() != resourceOwner
+        && prewarmedMenuState->instanceSerial != resourceOwnerSerial
         && lowerAscii(prewarmedMenuState->config.campaignSourceId)
             == otherEdition.campaignSourceId;
     std::cerr << "Edition rebuild probe: ready=" << editionReady
