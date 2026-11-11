@@ -1245,8 +1245,6 @@ void maybePresentClientFrame(CompatWindow* w) {
     if (boundTarget != presented) {
         boundTarget = presented;
         concord_compat::apple::setInputSink(&appleInputDispatch, boundTarget);
-        std::fprintf(stderr, "[cocoa] input target -> %p\n",
-                     reinterpret_cast<void*>(boundTarget));
     }
 }
 

@@ -28,8 +28,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <cstdio>
-#include <cstdlib>
 
 namespace {
 
@@ -141,12 +139,6 @@ HCURSOR SetCursor(HCURSOR hCursor) {
     // 画了自己的箭头。所以产品的 SetCursor 请求在这套引擎里并不代表"系统指针该
     // 不该出现"，它只是 Windows 时代的历史痕迹；真正的指针是自绘的那一个。
     // 因此 macOS 侧一律隐藏系统指针（U-04 的 cursor rect），这里只记账。
-    if (std::getenv("CONCORD_CURSOR_TRACE") != nullptr) {
-        std::fprintf(stderr, "[cursor] SetCursor %s (id=%llu) [not mirrored]\n",
-                     hCursor == nullptr ? "nullptr(hide)" : "handle(show)",
-                     static_cast<unsigned long long>(
-                         reinterpret_cast<std::uintptr_t>(hCursor)));
-    }
     return old;
 }
 

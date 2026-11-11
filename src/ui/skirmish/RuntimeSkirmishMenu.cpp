@@ -4214,51 +4214,8 @@ RuntimeSkirmishSelection runRuntimeSkirmishMenu(const RuntimeConfig& config,Runt
     //
     // 改成 PeekMessage + 有界等待：没消息时最多睡 5ms 就让外层重判一次 IsWindow。
     // 产品里同类循环（主菜单 smoke、preload smoke）本来就是这个写法，这里只是对齐。
-    // U-01 自测（仅当 CONCORD_SKIRMISH_AUTOSTART 置为正整数时启用）：在**真实窗口**
-    // 的大厅里自动点一次「開始遊戲」，走与真人点击完全相同的队列路径
-    // （PostMessageW 入队 → 本循环 PeekMessageW/DispatchMessageW 派发），
-    // 用来验证收尾链路是否真能把控制权交回 RuntimeMain，并顺带证明这个循环确实在
-    // 处理输入。背景见 U-01 报告：大厅循环只 Peek+MsgWait，从不经过 GetMessageW，
-    // 而 pumpEvents 只挂在 GetMessageW 里，于是整段大厅期间没有人排空 AppKit。
-    const char* autoStartEnv = std::getenv("CONCORD_SKIRMISH_AUTOSTART");
-    const int autoStartAfter = autoStartEnv != nullptr ? std::atoi(autoStartEnv) : 0;
-    int autoStartIterations = 0;
-    bool autoStartPosted = false;
-
     MSG message{};
     while (IsWindow(window)) {
-        if (autoStartAfter > 0 && !autoStartPosted && ++autoStartIterations >= autoStartAfter) {
-            const HitRegion* startHit = nullptr;
-            for (const HitRegion& hit : state.hits) {
-                if (hit.target.kind == HitKind::Start) { startHit = &hit; break; }
-            }
-            if (startHit == nullptr) {
-                // 布局还没建好（实测第 5 轮时 hits 只有 19 项、不含 Start）。
-                // 不消耗这次机会，等下一轮；但设上限，避免真缺按钮时无声空转。
-                if (autoStartIterations == autoStartAfter) {
-                    std::cerr << "[autostart] Start not in layout yet (hits="
-                              << state.hits.size() << "), retrying\n";
-                }
-                if (autoStartIterations > autoStartAfter + 600) {
-                    autoStartPosted = true;
-                    std::cerr << "[autostart] gave up: Start never appeared (hits="
-                              << state.hits.size() << ")\n";
-                }
-            } else {
-                autoStartPosted = true;
-                const POINT baseCentre{(startHit->rect.left + startHit->rect.right) / 2,
-                    (startHit->rect.top + startHit->rect.bottom) / 2};
-                const POINT client{
-                    state.viewLeft + baseCentre.x * state.viewWidth / kBaseWidth,
-                    state.viewTop + baseCentre.y * state.viewHeight / kBaseHeight};
-                std::cout << "[autostart] posting Start click at " << client.x << ","
-                          << client.y << " (after " << autoStartIterations << " iterations)\n";
-                PostMessageW(window, WM_MOUSEMOVE, 0, MAKELPARAM(client.x, client.y));
-                PostMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON,
-                    MAKELPARAM(client.x, client.y));
-                PostMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(client.x, client.y));
-            }
-        }
         if (!PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
             MsgWaitForMultipleObjectsEx(0, nullptr, 5, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             continue;

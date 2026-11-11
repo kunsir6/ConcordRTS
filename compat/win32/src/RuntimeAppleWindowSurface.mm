@@ -547,8 +547,6 @@ void present(const Surface& surface) {
                 }();
                 gSystemCursorHidden = hideSystemCursor;
                 [gWindow invalidateCursorRectsForView:gView];
-                std::fprintf(stderr, "[cocoa] system cursor hidden=%d (env CONCORD_HIDE_SYSTEM_CURSOR)\n",
-                             hideSystemCursor ? 1 : 0);
             }
 
             [gWindow center];
@@ -659,37 +657,6 @@ void present(const Surface& surface) {
                     CGImageGetWidth(image), CGImageGetHeight(image));
             }
 
-            // U-05 自测：CONCORD_CURSOR_SELFTEST=1 时周期性投一个合成 mouseMoved，
-            // 用来在无人值守下驱动完整输入链路（AppKit → 翻译 → gInputSink →
-            // WM_SETCURSOR → 产品 SetCursor → 本层指针策略）。
-            // 没有它，"世界/游戏内菜单该显示哪种指针"只能靠人工点选肉眼判断，
-            // 而这正是这一轮反复来回的原因。
-            {
-                static const bool cursorSelfTest =
-                    std::getenv("CONCORD_CURSOR_SELFTEST") != nullptr;
-                static int posted = 0;
-                if (cursorSelfTest && posted < 6 && presentIndex % 30 == 0) {
-                    ++posted;
-                    const NSPoint point =
-                        NSMakePoint(120.0 + posted * 24.0, 90.0 + posted * 12.0);
-                    NSEvent* move = [NSEvent mouseEventWithType:NSEventTypeMouseMoved
-                                                       location:point
-                                                  modifierFlags:0
-                                                      timestamp:[[NSProcessInfo processInfo]
-                                                          systemUptime]
-                                                   windowNumber:gWindow.windowNumber
-                                                        context:nil
-                                                    eventNumber:0
-                                                     clickCount:0
-                                                       pressure:0];
-                    if (move != nil) {
-                        [NSApp postEvent:move atStart:NO];
-                        std::fprintf(stderr,
-                            "[cocoa] cursor self-test: posted mouseMoved #%d at %.0f,%.0f\n",
-                            posted, point.x, point.y);
-                    }
-                }
-            }
 
             // ON-2-05 二分诊断（CONCORD_PRESENT_DIAG=1 才开，生产零开销）：
             //
