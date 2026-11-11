@@ -1350,6 +1350,9 @@ const std::vector<std::filesystem::path>& themeMixPathCandidates(
     const std::filesystem::path root(paths.assetPath());
     candidates.push_back(root / "thememd.mix");
     candidates.push_back(root / "theme.mix");
+    // The prepared export layout keeps the retail Red Alert 2 soundtrack at
+    // <root>/theme/THEME.MIX (next to the YR <root>/thememd loose WAVs).
+    candidates.push_back(root / "theme" / "THEME.MIX");
     candidates.push_back(root / "ra2md" / "thememd.mix");
     candidates.push_back(root / "ra2" / "theme.mix");
     candidates.push_back(root / "GameMD" / "thememd.mix");

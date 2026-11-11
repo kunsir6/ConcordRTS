@@ -592,6 +592,9 @@ void completeMenu(RuntimeSkirmishController& state, bool accepted) {
         if (!state.services.saveNoCooldownPreference(
                 state.config, state.selection.noCooldown, saveError))
             std::cerr << "Could not save skirmish no-cooldown preference: " << saveError << '\n';
+        if (!state.services.saveAiPreference(
+                state.config, state.selection.computerAiEnabled, saveError))
+            std::cerr << "Could not save skirmish computer-AI preference: " << saveError << '\n';
     }
     if (!accepted && !state.smoke) {
         state.services.prewarmMainMenu();
@@ -971,7 +974,7 @@ bool canStart(const RuntimeSkirmishController& state, std::wstring& reason) {
         }
     }
     if (!hasOpponent) {
-        reason = L"至少需要一位敵對玩家。請選擇不同小隊，或將小隊設為「無」。";
+        reason = L"至少需要一位敌对玩家。请选择不同小队，或将小队设为「无」。";
         return false;
     }
     if (state.selectedMode >= 0

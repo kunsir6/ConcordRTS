@@ -86462,7 +86462,22 @@ bool prepareRuntimeLoadingMaterial(
     if (loading.imageId.empty()) loading.imageId = runtimeLoadingScreenAssetForCountry(runtime.config.playerCountry);
     const std::string paletteId = runtimeLoadingPaletteAssetForCountry(runtime.config.playerCountry);
     const std::filesystem::path root(runtimeAssetRootPath(runtime.config));
-    const auto mix = root / "ra2md" / "loadmd.mix";
+    // Edition-aware loading material: RA2 ships its loading screens in
+    // ra2/load.mix with a single shared skirmish palette (ra2/cache.mix!
+    // mpls.pal; the observer screen keeps its own mplsobs.pal), while YR
+    // uses ra2md/loadmd.mix with per-country mpls*.pal palettes.
+    const bool ra2Edition =
+        toLowerAsciiLocal(trimAsciiLocal(runtime.config.campaignSourceId)) == "ra2";
+    const auto mix = ra2Edition
+        ? root / "ra2" / "load.mix"
+        : root / "ra2md" / "loadmd.mix";
+    std::string effectivePaletteId = paletteId;
+    const auto paletteMix = [&]() -> std::filesystem::path {
+        if (!ra2Edition) return mix;
+        if (effectivePaletteId == "mplsobs.pal") return mix;
+        effectivePaletteId = "mpls.pal";
+        return root / "ra2" / "cache.mix";
+    }();
     std::string error, paletteSource;
     bool loaded = false;
     loading.originalImageLoaded = loading.originalImagePcxFallback = false;
@@ -86476,12 +86491,12 @@ bool prepareRuntimeLoadingMaterial(
         loading.imageId, 0, loading.image, loading.imageSource, error);
     bool paletteLoaded = false;
     if (!runtime.config.modRootPath.empty()) {
-        for (const auto& path : {std::filesystem::path(runtime.config.modRootPath) / paletteId,
-                std::filesystem::path(runtime.config.modRootPath) / "pal" / paletteId})
+        for (const auto& path : {std::filesystem::path(runtime.config.modRootPath) / effectivePaletteId,
+                std::filesystem::path(runtime.config.modRootPath) / "pal" / effectivePaletteId})
             if (loadRuntimePaletteFile(pathString(path), loading.palette, error)) { paletteLoaded = true; break; }
     }
-    if (!paletteLoaded) paletteLoaded = loadRuntimePaletteFromMixArchive(pathString(mix), runtime.renderCache,
-        paletteId, loading.palette, paletteSource, error);
+    if (!paletteLoaded) paletteLoaded = loadRuntimePaletteFromMixArchive(pathString(paletteMix), runtime.renderCache,
+        effectivePaletteId, loading.palette, paletteSource, error);
     if (!loaded || !paletteLoaded) {
         // Retain loose/custom resource support when the installed archive is absent.
         auto* fallback = loadRuntimeUiShpFrame(runtime, "", loading.imageId, 0);
@@ -88599,6 +88614,7 @@ int runRuntimeWindowSession(
                   << " requiredViews=" << loading.prewarmRequiredViews
                   << " representatives="
                   << loading.prewarmResourceRepresentatives
+                  << " source=" << loading.imageSource
                   << "\n";
         if (loading.window != nullptr && IsWindow(loading.window)) {
             DestroyWindow(loading.window);

@@ -627,6 +627,7 @@ struct MenuState : RuntimeSkirmishServices, RuntimeSkirmishController {
     void prewarmMainMenu() override;
     bool saveCratePreference(const RuntimeConfig&, bool, std::string&) override;
     bool saveNoCooldownPreference(const RuntimeConfig&, bool, std::string&) override;
+    bool saveAiPreference(const RuntimeConfig&, bool, std::string&) override;
     bool ensurePreview(int) override;
     void loadDefaults(const RuntimeConfig&, RuntimeSkirmishSelection&) override;
     std::wstring text(const std::string&, const std::wstring&) const override;
@@ -1116,25 +1117,48 @@ bool initializeState(MenuState& state, const RuntimeConfig& config, bool smoke, 
     state.audio.assetRoot = state.exportRoot;
     state.audio.cacheRoot = fs::path(config.localDataRootPath) / "runtime_audio_cache";
 
-    const fs::path csfPath = firstExisting({
-        fs::path(config.resourceRootPath) / "GameMD" / "ra2md.csf",
-        state.exportRoot / "langmd" / "ra2md.csf",
-        state.exportRoot / "lang" / "ra2.csf",
-        state.localUiRoot / "ra2md.csf"
-    });
+    const bool ra2 = lowerAscii(config.campaignSourceId) == "ra2";
+    const fs::path csfPath = ra2
+        ? firstExisting({
+            state.exportRoot / "language" / "ra2.csf",
+            state.exportRoot / "lang" / "ra2.csf",
+            fs::path(config.resourceRootPath) / "GameMD" / "ra2md.csf",
+            state.exportRoot / "langmd" / "ra2md.csf",
+            state.localUiRoot / "ra2md.csf"
+        })
+        : firstExisting({
+            fs::path(config.resourceRootPath) / "GameMD" / "ra2md.csf",
+            state.exportRoot / "langmd" / "ra2md.csf",
+            state.exportRoot / "lang" / "ra2.csf",
+            state.localUiRoot / "ra2md.csf"
+        });
     if (!csfPath.empty()) {
         state.csf.load(csfPath);
     }
 
-    const fs::path packetPath = firstExisting({
-        state.exportRoot / "langmd" / "missionsmd.pkt",
-        state.exportRoot / "lang" / "missions.pkt",
-        state.localUiRoot / "missionsmd.pkt"
-    });
+    const fs::path packetPath = ra2
+        ? firstExisting({
+            state.exportRoot / "ra2" / "local" / "missions.pkt",
+            state.exportRoot / "langmd" / "missionsmd.pkt",
+            state.exportRoot / "lang" / "missions.pkt",
+            state.localUiRoot / "missionsmd.pkt"
+        })
+        : firstExisting({
+            state.exportRoot / "langmd" / "missionsmd.pkt",
+            state.exportRoot / "lang" / "missions.pkt",
+            state.localUiRoot / "missionsmd.pkt"
+        });
     const auto packet = loadMapPacket(packetPath);
     {
         RuntimePerfTraceScope trace("skirmish.maps", 0);
-        state.maps = scanMaps(state.exportRoot / "multimd", packet, state.csf);
+        // RA2 retail ships its skirmish maps inside MULTI.MIX; the prepared
+        // export extracts them next to the archive (mix_exports/multi/).
+        // Their packet metadata comes from the RA2 missions.pkt loaded above,
+        // so scan the RA2 directory in RA2 mode and keep YR behavior intact
+        // (multimd + langmd missionsmd.pkt) otherwise.
+        state.maps = ra2
+            ? scanMaps(state.exportRoot / "multi", packet, state.csf)
+            : scanMaps(state.exportRoot / "multimd", packet, state.csf);
     }
     const fs::path resourceRoot(config.resourceRootPath);
     {
@@ -1162,11 +1186,19 @@ bool initializeState(MenuState& state, const RuntimeConfig& config, bool smoke, 
         state.maps.push_back(std::move(map));
     }
 
-    const fs::path rulesPath = firstExisting({
-        fs::path(config.localDataRootPath) / "rulesmd.ini",
-        state.exportRoot / "expandmd01" / "rulesmd.ini",
-        state.localUiRoot / "rulesmd.ini"
-    });
+    const fs::path rulesPath = ra2
+        ? firstExisting({
+            state.exportRoot / "ra2" / "local" / "rules.ini",
+            fs::path(config.localDataRootPath) / "rules.ini",
+            fs::path(config.localDataRootPath) / "rulesmd.ini",
+            state.exportRoot / "expandmd01" / "rulesmd.ini",
+            state.localUiRoot / "rulesmd.ini"
+        })
+        : firstExisting({
+            fs::path(config.localDataRootPath) / "rulesmd.ini",
+            state.exportRoot / "expandmd01" / "rulesmd.ini",
+            state.localUiRoot / "rulesmd.ini"
+        });
     {
         RuntimePerfTraceScope trace("skirmish.countries", 0);
         state.countries = loadCountries(rulesPath, state.csf);
@@ -1316,11 +1348,18 @@ bool initializeState(MenuState& state, const RuntimeConfig& config, bool smoke, 
     for (const CountryInfo& country : state.countries) {
         (void)flagFor(state, country.id);
     }
-    const fs::path soundPath = firstExisting({
-        state.exportRoot / "expandmd01" / "soundmd.ini",
-        state.localUiRoot / "soundmd.ini",
-        fs::path(config.localDataRootPath) / "soundmd.ini"
-    });
+    const fs::path soundPath = ra2
+        ? firstExisting({
+            state.exportRoot / "ra2" / "local" / "sound.ini",
+            state.exportRoot / "expandmd01" / "soundmd.ini",
+            state.localUiRoot / "soundmd.ini",
+            fs::path(config.localDataRootPath) / "soundmd.ini"
+        })
+        : firstExisting({
+            state.exportRoot / "expandmd01" / "soundmd.ini",
+            state.localUiRoot / "soundmd.ini",
+            fs::path(config.localDataRootPath) / "soundmd.ini"
+        });
     state.audio.initialize(soundPath);
     if (nativeFonts) initializeFonts(state);
     state.initialized = !state.maps.empty() && shellLoaded && state.gameFont.valid();
@@ -3710,6 +3749,7 @@ void MenuState::destroyWindow() { if(softwareWindow) softwareWindow->close(); el
 void MenuState::prewarmMainMenu() { if(!softwareWindow) { RuntimeWindowParentWin32 parent(hwnd == nullptr ? nullptr : GetParent(hwnd)); prewarmRuntimeMainMenu(config, parent.id()); } }
 bool MenuState::saveCratePreference(const RuntimeConfig& c, bool value, std::string& error) { return saveRuntimeSkirmishCratePreference(c,value,error); }
 bool MenuState::saveNoCooldownPreference(const RuntimeConfig& c, bool value, std::string& error) { return saveRuntimeSkirmishNoCooldownPreference(c,value,error); }
+bool MenuState::saveAiPreference(const RuntimeConfig& c, bool value, std::string& error) { return saveRuntimeSkirmishAiPreference(c,value,error); }
 bool MenuState::ensurePreview(int index) { return ::ensurePreview(*this,index); }
 void MenuState::loadDefaults(const RuntimeConfig& c, RuntimeSkirmishSelection& value) { loadSkirmishDefaults(c,value); }
 std::wstring MenuState::text(const std::string& key, const std::wstring& fallback) const { return csf.get(key,fallback); }
@@ -4091,9 +4131,16 @@ RuntimeSkirmishSelection runRuntimeSkirmishMenuSdl3(const RuntimeConfig& config,
 }
 
 void prewarmRuntimeSkirmishMenu(const RuntimeConfig& config) {
+    // The edition switch lives inside the same resource roots, so the file
+    // watch cannot see it. Reuse only when the cached state was prepared for
+    // the same campaign edition; otherwise the lobby and the battle it starts
+    // keep serving the previous edition's rules (e.g. YR units in RA2 mode).
+    const std::string requestedSourceId = lowerAscii(config.campaignSourceId);
     if (pendingMenuState.valid()) return;
     if (prewarmedMenuState != nullptr && prewarmedMenuState->initialized
-        && prewarmedMenuState->resourceWatch->unchanged(config)) return;
+        && prewarmedMenuState->resourceWatch->unchanged(config)
+        && lowerAscii(prewarmedMenuState->config.campaignSourceId)
+            == requestedSourceId) return;
     prewarmedMenuState.reset();
     // The worker owns its entire state, including renderer caches. It never
     // creates a window, paints, plays audio, or touches a live menu's state.
@@ -4117,7 +4164,9 @@ bool runtimeSkirmishMenuReady(const RuntimeConfig& config) {
     }
     if (prewarmedMenuState != nullptr
         && prewarmedMenuState->config.resourceRootPath == config.resourceRootPath
-        && prewarmedMenuState->config.localDataRootPath == config.localDataRootPath) {
+        && prewarmedMenuState->config.localDataRootPath == config.localDataRootPath
+        && lowerAscii(prewarmedMenuState->config.campaignSourceId)
+            == lowerAscii(config.campaignSourceId)) {
         // A completed failure is also ready: the caller must handle it,
         // rather than leave the main menu in a never-ending transition.
         return true;

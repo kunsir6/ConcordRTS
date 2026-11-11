@@ -12,7 +12,7 @@ void check(bool value,const char* what) {++checks;if(!value){++failures;std::cer
 struct Host final : RuntimeSkirmishServices {
     RuntimeSkirmishController* controller=nullptr;
     bool captured=false,closed=false,randomReady=false;
-    int repaints=0,previews=0,crateWrites=0,cooldownWrites=0,prewarms=0,warnings=0;
+    int repaints=0,previews=0,crateWrites=0,cooldownWrites=0,aiWrites=0,prewarms=0,warnings=0;
     std::uint64_t now=1000;
     std::vector<std::string> effects;
     CooperativeScenarioDefinition scenario;
@@ -24,6 +24,7 @@ struct Host final : RuntimeSkirmishServices {
     void prewarmMainMenu() override {++prewarms;effects.push_back("prewarm-main");}
     bool saveCratePreference(const RuntimeConfig&,bool,std::string&) override {++crateWrites;return true;}
     bool saveNoCooldownPreference(const RuntimeConfig&,bool,std::string&) override {++cooldownWrites;return true;}
+    bool saveAiPreference(const RuntimeConfig&,bool,std::string&) override {++aiWrites;return true;}
     bool ensurePreview(int) override {++previews;return true;}
     void loadDefaults(const RuntimeConfig& c,RuntimeSkirmishSelection& s) override {
         s.startingCredits=c.startingCredits;s.gameSpeed=c.gameSpeed;s.computerAiEnabled=c.computerAiEnabled;

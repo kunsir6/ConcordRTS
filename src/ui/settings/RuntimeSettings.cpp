@@ -342,3 +342,10 @@ bool saveRuntimeSkirmishNoCooldownPreference(
     return saveRuntimePreferenceSections(
         config, {{"Skirmish", {{"NoCooldown", boolText(enabled)}}}}, errorMessage);
 }
+
+bool saveRuntimeSkirmishAiPreference(
+    const RuntimeConfig& config, bool enabled, std::string& errorMessage
+) {
+    return saveRuntimePreferenceSections(
+        config, {{"Skirmish", {{"ComputerAI", boolText(enabled)}}}}, errorMessage);
+}

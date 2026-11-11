@@ -427,6 +427,9 @@ struct MenuAudio {
     ~MenuAudio() { stopMusic(); }
 
     void initialize(const fs::path& soundIni) {
+        // Sample names are edition-dependent (sound.ini vs soundmd.ini);
+        // drop cached resolutions so a re-initialization re-resolves.
+        waves.clear();
         IniFile ini;
         if (!soundIni.empty() && ini.loadFromPath(soundIni)) {
             for (auto& [eventName, sample] : samples) {
@@ -537,6 +540,7 @@ struct MenuState : RuntimeMainMenuServices, RuntimeMainMenuController {
     bool savePreferences(const RuntimeConfig&, std::string&) override;
     void resizeHost() override;
     void startPageMusic() override;
+    void reloadEditionResources() override;
     bool playMovie(const std::filesystem::path&, std::string&) override;
     void prepareMoviePlayback() override;
     void restartMainVideo() override;
@@ -881,6 +885,149 @@ void loadCredits(MenuState& state) {
     state.creditsPage = 0;
 }
 
+// Single resolution point for every edition-sensitive menu resource (CSF
+// text table, credits text, menu text colors, static fallback frame, menu
+// sound events, theme catalog and per-page music paths). Called once from
+// initializeMenu and again on every edition toggle so the switch is fully
+// in-memory without recreating the menu.
+void applyEditionResources(MenuState& state) {
+    const bool ra2 = lowerAscii(state.config.campaignSourceId) == "ra2";
+    const fs::path resourceRoot = fs::path(state.config.resourceRootPath);
+
+    const fs::path csfPath = ra2
+        ? firstExisting({
+            state.exportRoot / "language" / "ra2.csf",
+            state.exportRoot / "lang" / "ra2.csf",
+            state.exportRoot / "langmd" / "ra2md.csf",
+            resourceRoot / "GameMD" / "ra2md.csf"
+        })
+        : firstExisting({
+            resourceRoot / "GameMD" / "ra2md.csf",
+            state.exportRoot / "langmd" / "ra2md.csf",
+            state.exportRoot / "lang" / "ra2.csf"
+        });
+    if (!csfPath.empty()) state.csf.load(csfPath);
+    loadCredits(state);
+
+    const fs::path rulesPath = ra2
+        ? firstExisting({
+            state.exportRoot / "ra2" / "local" / "rules.ini",
+            fs::path(state.config.localDataRootPath) / "rules.ini",
+            fs::path(state.config.localDataRootPath) / "rulesmd.ini",
+            state.exportRoot / "expandmd01" / "rulesmd.ini",
+            resourceRoot / "GameMD" / "rulesmd.ini"
+        })
+        : firstExisting({
+            fs::path(state.config.localDataRootPath) / "rulesmd.ini",
+            state.exportRoot / "expandmd01" / "rulesmd.ini",
+            resourceRoot / "GameMD" / "rulesmd.ini"
+        });
+    IniFile rules;
+    if (!rulesPath.empty() && rules.loadFromPath(rulesPath)) {
+        state.menuTextColorSource = iniValueNoCase(
+            rules,
+            "Colors",
+            "LightGold"
+        );
+        if (const auto hsv = parseWestwoodHsv(state.menuTextColorSource)) {
+            state.menuTextColors = westwoodFontColorRamp(*hsv);
+        }
+    }
+
+#if defined(_WIN32)
+    loadBmp(state.exportRoot / "langmd" / "ra2ts_l_frame.bmp", state.videoFrame);
+#endif
+    if (ra2) {
+        concord::assets::loadMenuLooseFrame(
+            (state.exportRoot / "ra2" / "glsl.shp").string(),
+            (state.exportRoot / "ra2" / "gls.pal").string(),
+            false,
+            state.staticFallback
+        );
+    } else {
+        concord::assets::loadMenuLooseFrame(
+            (state.exportRoot / "langmd" / "glslmd.shp").string(),
+            (state.exportRoot / "langmd" / "glsmd.pal").string(),
+            false,
+            state.staticFallback
+        );
+    }
+
+    state.audio.assetRoot = state.exportRoot;
+    state.audio.cacheRoot = fs::path(state.config.localDataRootPath)
+        / "runtime_audio_cache";
+    state.audio.initialize(ra2
+        ? firstExisting({
+            state.exportRoot / "ra2" / "local" / "sound.ini",
+            state.exportRoot / "expandmd01" / "soundmd.ini",
+            state.exportRoot / "ra2md" / "localmd" / "soundmd.ini"
+        })
+        : firstExisting({
+            state.exportRoot / "expandmd01" / "soundmd.ini",
+            state.exportRoot / "ra2md" / "localmd" / "soundmd.ini",
+            state.exportRoot / "ra2" / "local" / "sound.ini"
+        }));
+
+    state.themeCatalogPath = ra2
+        ? firstExisting({
+            state.exportRoot / "ra2" / "local" / "theme.ini",
+            resourceRoot / "GameMD" / "thememd.ini",
+            state.exportRoot / "ra2md" / "localmd" / "thememd.ini"
+        })
+        : firstExisting({
+            resourceRoot / "GameMD" / "thememd.ini",
+            state.exportRoot / "ra2md" / "localmd" / "thememd.ini"
+        });
+    IniFile themeCatalog;
+    if (!state.themeCatalogPath.empty()) {
+        themeCatalog.loadFromPath(state.themeCatalogPath);
+    }
+    const std::string introSound = lowerAscii(iniValueNoCase(
+        themeCatalog,
+        "INTRO",
+        "Sound",
+        ra2 ? "Grinder" : "Drok"
+    ));
+    const std::string creditsSound = lowerAscii(iniValueNoCase(
+        themeCatalog,
+        "CREDITS",
+        "Sound",
+        ra2 ? "Ra2-Opt" : "OptionX"
+    ));
+    const std::string scoreSound = lowerAscii(iniValueNoCase(
+        themeCatalog,
+        "SCORE",
+        "Sound",
+        ra2 ? "RA2-Sco" : "ScoreX"
+    ));
+    const auto resolvePhaseTheme = [
+        &state
+    ](
+        const std::string& themeId,
+        const std::string& fallbackSound
+    ) {
+        const AudioBackgroundMusicResolveResult resolved =
+            resolveBackgroundMusicThemeToWaveFromPaths(
+                {state.exportRoot, state.audio.cacheRoot},
+                themeId
+            );
+        if (resolved.success && !resolved.wavFilePath.empty()) {
+            return resolved.wavFilePath;
+        }
+        return firstExisting({
+            state.exportRoot / "thememd" / (fallbackSound + ".wav")
+        });
+    };
+    // Resolve by the edition-specific sound name rather than the section
+    // name ("INTRO"): the track pool merges both catalogs and always scans
+    // the YR thememd.ini first, so a phase lookup would return the YR track
+    // even in RA2 mode. Sound names are unique per edition.
+    state.mainThemePath = resolvePhaseTheme(introSound, introSound);
+    state.moviesThemePath = resolvePhaseTheme(scoreSound, scoreSound);
+    state.creditsThemePath = resolvePhaseTheme(creditsSound, creditsSound);
+    state.optionsThemePath = state.moviesThemePath;
+}
+
 bool initializeMenu(MenuState& state, const RuntimeConfig& config, bool smoke) {
     state.config = config;
     state.resourceWatch = std::make_unique<RuntimeMenuResourceWatch>(config);
@@ -896,36 +1043,14 @@ bool initializeMenu(MenuState& state, const RuntimeConfig& config, bool smoke) {
     allRoots.tileRootPath = runtimeConfigLegacyPathString(state.exportRoot);
     state.allResources.configureRoots(std::move(allRoots));
 
-    const fs::path csfPath = firstExisting({
-        fs::path(config.resourceRootPath) / "GameMD" / "ra2md.csf",
-        state.exportRoot / "langmd" / "ra2md.csf",
-        state.exportRoot / "lang" / "ra2.csf"
-    });
-    if (!csfPath.empty()) state.csf.load(csfPath);
+    applyEditionResources(state);
+
     loadMovieLibrary(state);
-    loadCredits(state);
     const fs::path fontPath = firstExisting({
         fs::path(config.resourceRootPath) / "GameMD" / "game.fnt",
         fs::path(config.resourceRootPath) / "Game" / "game.fnt"
     });
     if (!fontPath.empty()) state.gameFont.load(fontPath);
-
-    const fs::path rulesPath = firstExisting({
-        fs::path(config.localDataRootPath) / "rulesmd.ini",
-        state.exportRoot / "expandmd01" / "rulesmd.ini",
-        fs::path(config.resourceRootPath) / "GameMD" / "rulesmd.ini"
-    });
-    IniFile rules;
-    if (!rulesPath.empty() && rules.loadFromPath(rulesPath)) {
-        state.menuTextColorSource = iniValueNoCase(
-            rules,
-            "Colors",
-            "LightGold"
-        );
-        if (const auto hsv = parseWestwoodHsv(state.menuTextColorSource)) {
-            state.menuTextColors = westwoodFontColorRamp(*hsv);
-        }
-    }
 
     const bool palettesLoaded =
         loadPalette(state, "shell.pal")
@@ -958,72 +1083,8 @@ bool initializeMenu(MenuState& state, const RuntimeConfig& config, bool smoke) {
     );
     loadOne(state, "mouse.shp", "mousepal.pal", true, state.mouse);
 
-#if defined(_WIN32)
-    loadBmp(state.exportRoot / "langmd" / "ra2ts_l_frame.bmp", state.videoFrame);
-#endif
-    concord::assets::loadMenuLooseFrame(
-        (state.exportRoot / "langmd" / "glslmd.shp").string(),
-        (state.exportRoot / "langmd" / "glsmd.pal").string(),
-        false,
-        state.staticFallback
-    );
-
     state.audio.enabled = !smoke;
     state.audio.musicVolumePercent = std::clamp(config.musicVolume, 0, 100);
-    state.audio.assetRoot = state.exportRoot;
-    state.audio.cacheRoot = fs::path(config.localDataRootPath) / "runtime_audio_cache";
-    state.audio.initialize(firstExisting({
-        state.exportRoot / "expandmd01" / "soundmd.ini",
-        state.exportRoot / "ra2md" / "localmd" / "soundmd.ini"
-    }));
-    state.themeCatalogPath = firstExisting({
-        fs::path(config.resourceRootPath) / "GameMD" / "thememd.ini",
-        state.exportRoot / "ra2md" / "localmd" / "thememd.ini"
-    });
-    IniFile themeCatalog;
-    if (!state.themeCatalogPath.empty()) {
-        themeCatalog.loadFromPath(state.themeCatalogPath);
-    }
-    const std::string introSound = lowerAscii(iniValueNoCase(
-        themeCatalog,
-        "INTRO",
-        "Sound",
-        "Drok"
-    ));
-    const std::string creditsSound = lowerAscii(iniValueNoCase(
-        themeCatalog,
-        "CREDITS",
-        "Sound",
-        "OptionX"
-    ));
-    const std::string scoreSound = lowerAscii(iniValueNoCase(
-        themeCatalog,
-        "SCORE",
-        "Sound",
-        "ScoreX"
-    ));
-    const auto resolvePhaseTheme = [
-        &state
-    ](
-        const std::string& themeId,
-        const std::string& fallbackSound
-    ) {
-        const AudioBackgroundMusicResolveResult resolved =
-            resolveBackgroundMusicThemeToWaveFromPaths(
-                {state.exportRoot, state.audio.cacheRoot},
-                themeId
-            );
-        if (resolved.success && !resolved.wavFilePath.empty()) {
-            return resolved.wavFilePath;
-        }
-        return firstExisting({
-            state.exportRoot / "thememd" / (fallbackSound + ".wav")
-        });
-    };
-    state.mainThemePath = resolvePhaseTheme("INTRO", introSound);
-    state.moviesThemePath = resolvePhaseTheme("SCORE", scoreSound);
-    state.creditsThemePath = resolvePhaseTheme("CREDITS", creditsSound);
-    state.optionsThemePath = state.moviesThemePath;
     state.optionWindowWidth = std::max(1, config.windowWidth);
     state.optionWindowHeight = std::max(1, config.windowHeight);
     state.optionTargetFps = std::max(1, config.targetFps);
@@ -1593,6 +1654,7 @@ bool MenuState::skirmishReady() const { return runtimeSkirmishMenuReady(config);
 bool MenuState::savePreferences(const RuntimeConfig& candidate,std::string& error) { return saveRuntimeConfigPreferences(candidate,error); }
 void MenuState::resizeHost() { resizeMenuHostForOptions(*this); }
 void MenuState::startPageMusic() { ::startPageMusic(*this); }
+void MenuState::reloadEditionResources() { applyEditionResources(*this); }
 void MenuState::prepareMoviePlayback() { videoFirstFramePending=false;videoAnimation.stop();audio.stopMusic(); }
 bool MenuState::playMovie(const fs::path& movie,std::string& error) {
     HWND playbackHost=window;
@@ -2676,7 +2738,7 @@ int runRuntimeMainMenuSmokeTest(
         && home[2].label == networkLabel
         && home[2].tooltip == networkTooltip
         && home[2].action == MenuAction::Network;
-    const bool navigationLayout = home.size() == 6
+    const bool navigationLayout = home.size() == 7
         && home.front().action == MenuAction::OpenSinglePlayer
         && home[0].slot == 0
         && home[1].slot == 1
@@ -2685,6 +2747,8 @@ int runRuntimeMainMenuSmokeTest(
         && home[3].action == MenuAction::OpenMovies
         && home[4].slot == 4
         && home[4].action == MenuAction::OpenOptions
+        && home[5].slot == 5
+        && home[5].action == MenuAction::CycleEdition
         && home.back().action == MenuAction::Exit
         && resolvedSlot(state, home.back()) < 0
         && singlePlayer.size() == 4
@@ -2746,15 +2810,35 @@ int runRuntimeMainMenuSmokeTest(
             CsfCatalog{},
             "{CRD_TTL:NETWORK_PROGRAMMING}"
         ) == L"NETWORK PROGRAMMING";
+    const std::string mainThemeName = lowerAscii(
+        state.mainThemePath.filename().string()
+    );
+    const std::string moviesThemeName = lowerAscii(
+        state.moviesThemePath.filename().string()
+    );
+    const std::string creditsThemeName = lowerAscii(
+        state.creditsThemePath.filename().string()
+    );
+    const bool ra2SmokeEdition =
+        lowerAscii(state.config.campaignSourceId) == "ra2";
+    // RA2 tracks are extracted from theme/THEME.MIX into the audio cache,
+    // so the cached file name embeds the sound name rather than being the
+    // bare retail wav name like the YR thememd loose files.
+    const bool themeNamesMatchEdition = ra2SmokeEdition
+        ? mainThemeName.find("grinder") != std::string::npos
+            && moviesThemeName.find("ra2-sco") != std::string::npos
+            && creditsThemeName.find("ra2-opt") != std::string::npos
+        : mainThemeName == "drok.wav"
+            && moviesThemeName == "scorex.wav"
+            && creditsThemeName == "optionx.wav";
     const bool themeContract = regularFile(state.mainThemePath)
         && regularFile(state.moviesThemePath)
         && regularFile(state.creditsThemePath)
         && regularFile(state.optionsThemePath)
         && regularFile(state.themeCatalogPath)
-        && lowerAscii(state.mainThemePath.filename().string()) == "drok.wav"
-        && lowerAscii(state.moviesThemePath.filename().string()) == "scorex.wav"
-        && lowerAscii(state.creditsThemePath.filename().string()) == "optionx.wav"
-        && lowerAscii(state.optionsThemePath.filename().string()) == "scorex.wav";
+        && themeNamesMatchEdition
+        && lowerAscii(state.optionsThemePath.filename().string())
+            == moviesThemeName;
     const bool backHierarchy =
         escapeActionForPage(MenuPage::Home) == MenuAction::Exit
         && escapeActionForPage(MenuPage::SinglePlayer) == MenuAction::OpenHome

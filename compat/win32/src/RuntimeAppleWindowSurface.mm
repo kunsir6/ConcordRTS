@@ -62,6 +62,25 @@ bool gQuitSelfTestPosted = false;
 // 直接发事件会跳过 delegate，那就只测了 compat 那一半。
 bool gCloseSelfTestDone = false;
 
+// L10N-03：真·点击路径的自测开关（CONCORD_CLOSECLICK_SELFTEST=1）。与上面的
+// CONCORD_CLOSE_SELFTEST 互补：那边直接调 performClose:，只测 performClose 之后的
+// 链路；这边合成一对 LeftMouseDown/Up 投进**真实事件队列**，连 emit() 里的
+// 红叉命中判定一起测。红叉点击没反应（用户 2026-11-11 报）就是这一环断了。
+bool gCloseClickSelfTestPosted = false;
+
+// L10N-03：红叉按下武装标记。down 在按钮上时吞掉（游戏不能看到标题栏上的
+// 点击），up 回到按钮上才触发 performClose:；up 落在按钮外则取消——与
+// macOS 系统按钮"按下高亮、抬起在内才生效"的语义一致，也避免游戏收到
+// 没有配对 down 的悬空 up。
+bool gCloseButtonArmed = false;
+
+// 本轮（U-09 复发）：绿灯按下武装标记，语义与 gCloseButtonArmed 完全相同。
+// 起因：U-09 修 collectionBehavior 之后，自测用 performClick: 触发——那是
+// 程序化直调 action，**绕过了真实鼠标事件链**（本项目不调 sendEvent，真实
+// 点击到不了任何标题栏按钮）。于是「绿灯接在全屏上」只对程序成立，用户点
+// 真实鼠标依旧没反应。修法与红叉（L10N-03）同构：事件泵里显式命中。
+bool gZoomButtonArmed = false;
+
 // ON-2-04 全屏自测（CONCORD_FULLSCREEN_SELFTEST=1）。
 // 全屏切换是**异步**的（有系统动画），不能用"发完 toggleFullScreen 立刻检查"来验，
 // 必须在 windowDidEnterFullScreen / windowDidExitFullScreen 回调里逐段推进：
@@ -1055,9 +1074,44 @@ void present(const Surface& surface) {
                     pointer.x, pointer.y, outside ? 1 : 0,
                     [describeCurrentSystemCursor() UTF8String],
                     blank ? 1 : 0, (!outside || !blank) ? 1 : 0);
+                // L10N-02：第三态——标题栏。frame 高出内容的部分就是标题栏 +
+                // 边框；拿不到（全屏/无边框，差值 < 8pt）就跳过这一态。
+                const double titleBarHeight =
+                    frame.size.height - gView.bounds.size.height;
+                if (titleBarHeight < 8.0) {
+                    ++gCursorSelfTestSkips;
+                    cursorSelfTestLog("[cursor] titlebar skip: height=%.1f\n",
+                                      titleBarHeight);
+                    gCursorSelfTestStage = 5;
+                } else {
+                    gCursorSelfTestTicks = 0;
+                    gCursorSelfTestStage = 4;
+                    warpPointerToScreenPoint(
+                        NSMidX(frame), NSMaxY(frame) - titleBarHeight / 2.0);
+                }
+            } else if (gCursorSelfTestStage == 4 && gCursorSelfTestTicks > 3) {
+                const NSPoint pointer = currentPointerScreenPoint();
+                const double titleBarHeight =
+                    frame.size.height - gView.bounds.size.height;
+                const bool overTitleBar = NSPointInRect(pointer, frame)
+                    && pointer.y >= NSMaxY(frame) - titleBarHeight - 2.0;
+                const bool blank = systemCursorIsBlank();
+                if (!overTitleBar) {
+                    ++gCursorSelfTestSkips;
+                } else if (blank) {
+                    // 用户 2026-11-11 报的正是这条：指针在标题栏上，系统箭头
+                    // 被游戏藏掉了，没法拖动/关闭窗口。
+                    ++gCursorSelfTestFailures;
+                }
+                cursorSelfTestLog(
+                    "[cursor] titlebar pointer=%.0f,%.0f overTitleBar=%d titleH=%.1f"
+                    " cursor=%s hidden=%d ok=%d\n",
+                    pointer.x, pointer.y, overTitleBar ? 1 : 0, titleBarHeight,
+                    [describeCurrentSystemCursor() UTF8String],
+                    blank ? 1 : 0, (!overTitleBar || !blank) ? 1 : 0);
                 cursorSelfTestLog("[cursor] done: failures=%d skips=%d\n",
                                   gCursorSelfTestFailures, gCursorSelfTestSkips);
-                gCursorSelfTestStage = 4;
+                gCursorSelfTestStage = 5;
                 std::fflush(stderr);
                 std::_Exit(gCursorSelfTestFailures == 0 ? 0 : 1);
             }
@@ -1081,6 +1135,53 @@ void present(const Surface& surface) {
             }
         }
 
+        // L10N-03 自测：真·点击路径。合成一对 LeftMouseDown/Up 投进真实事件
+        // 队列，覆盖 emit() 的红叉命中判定 → performClose: → WM_CLOSE 全链。
+        if (!gCloseClickSelfTestPosted && gInputSink != nullptr && gWindow != nil) {
+            gCloseClickSelfTestPosted = true;
+            const char* clickTest = std::getenv("CONCORD_CLOSECLICK_SELFTEST");
+            if (clickTest != nullptr && clickTest[0] == '1') {
+                NSButton* closeButton =
+                    [gWindow standardWindowButton:NSWindowCloseButton];
+                if (closeButton != nil) {
+                    const NSRect r =
+                        [closeButton convertRect:closeButton.bounds toView:nil];
+                    const NSPoint center =
+                        NSMakePoint(NSMidX(r), NSMidY(r));
+                    const double now =
+                        [[NSProcessInfo processInfo] systemUptime];
+                    NSEvent* down = [NSEvent
+                        mouseEventWithType:NSEventTypeLeftMouseDown
+                                  location:center
+                             modifierFlags:0
+                                 timestamp:now
+                              windowNumber:gWindow.windowNumber
+                                   context:nil
+                               eventNumber:0
+                                clickCount:1
+                                   pressure:1.0];
+                    NSEvent* up = [NSEvent
+                        mouseEventWithType:NSEventTypeLeftMouseUp
+                                  location:center
+                             modifierFlags:0
+                                 timestamp:now + 0.05
+                              windowNumber:gWindow.windowNumber
+                                   context:nil
+                               eventNumber:1
+                                clickCount:1
+                                   pressure:0.0];
+                    [NSApp postEvent:down atStart:NO];
+                    [NSApp postEvent:up atStart:NO];
+                    std::fprintf(stderr,
+                        "[closebutton] self-test: posted click at (%.0f,%.0f)\n",
+                        center.x, center.y);
+                } else {
+                    std::fprintf(stderr,
+                        "[closebutton] self-test: close button unavailable\n");
+                }
+            }
+        }
+
         // ON-2-04 全屏自测：同样等 sink 就绪（理由同 close selftest），
         // 请求进入全屏后就不再做任何事——后面全靠 delegate 的两个回调推进。
         if (!gFullScreenRequested && gInputSink != nullptr) {
@@ -1098,7 +1199,41 @@ void present(const Surface& surface) {
                 std::fprintf(stderr, "[fullscreen] request via green button hash=%u\n",
                              gHashBeforeFullScreen);
                 if (zoom != nil) {
-                    [zoom performClick:nil];
+                    // 本轮改动：不再 performClick:（程序化直调 action，绕过真实
+                    // 鼠标事件链——用户报的正是「真实点击没反应」）。改为把一对
+                    // LeftMouseDown/Up 合成事件投进**真实事件队列**，走 pumpEvents
+                    // → emit() → 绿灯命中 → toggleFullScreen: 的完整用户路径，
+                    // 与红叉自测（CONCORD_CLOSE_SELFTEST）同一套做法。
+                    const NSRect r = [zoom convertRect:zoom.bounds toView:nil];
+                    const NSPoint center = NSMakePoint(
+                        NSMidX(r), NSMidY(r));
+                    const NSTimeInterval now = [NSProcessInfo processInfo]
+                        .systemUptime;
+                    NSEvent* down = [NSEvent
+                        mouseEventWithType:NSEventTypeLeftMouseDown
+                                  location:center
+                             modifierFlags:0
+                                 timestamp:now
+                              windowNumber:gWindow.windowNumber
+                                   context:nil
+                               eventNumber:0
+                                clickCount:1
+                                   pressure:1.0];
+                    NSEvent* up = [NSEvent
+                        mouseEventWithType:NSEventTypeLeftMouseUp
+                                  location:center
+                             modifierFlags:0
+                                 timestamp:now + 0.05
+                              windowNumber:gWindow.windowNumber
+                                   context:nil
+                               eventNumber:1
+                                clickCount:1
+                                   pressure:0.0];
+                    [NSApp postEvent:down atStart:NO];
+                    [NSApp postEvent:up atStart:NO];
+                    std::fprintf(stderr,
+                        "[fullscreen] posted green-button click at (%.0f,%.0f)\n",
+                        center.x, center.y);
                 } else {
                     gFullScreenViaButton = false;
                     std::fprintf(stderr,
@@ -1120,10 +1255,10 @@ void present(const Surface& surface) {
                 std::fprintf(stderr, "[fullscreen] request exit from present()\n");
                 [gWindow toggleFullScreen:nil];
             }
-            // 兜底一：点了绿灯但没人响应（performClick 走的是按钮的 action，
-            // 若 AppKit 没把它接到 toggleFullScreen: 上就什么也不发生）。
-            // 这时改用 toggleFullScreen: 再试一次，把"哪条路生效"如实打出来——
-            // 若只有 toggleFullScreen: 生效，说明绿灯的语义仍然不对，用户点了还是缩不了。
+            // 兜底一：绿灯合成点击没人响应（真实事件链上的命中判定没生效，
+            // 或 toggleFullScreen: 被窗口形态拒绝）。这时改用 toggleFullScreen:
+            // 再试一次，把"哪条路生效"如实打出来——若只有兜底生效，说明
+            // 用户点的绿灯仍然接不上全屏，要按断链追查。
             if (!gFullScreenStarted && gFullScreenViaButton && ++gFullScreenTicks > 8) {
                 gFullScreenViaButton = false;
                 std::fprintf(stderr,
@@ -1340,6 +1475,74 @@ void emit(NSEvent* event) {
         gCaptureChordSeen = false;
     }
 
+    // L10N-03：标题栏红叉补命中。
+    //
+    // 本项目从不调用 [NSApp sendEvent:]（见 U-10 注释），AppKit 的按钮点击
+    // 响应链从来没被喂过事件——红叉/最小化/缩放点了没反应（用户报的就是
+    // 红叉）。不走 sendEvent 大手术，而是在事件泵里对"左键落在关闭按钮上"
+    // 做显式命中 → performClose:。后续 windowShouldClose: → Close 事件 →
+    // WM_CLOSE → 退出，与 CONCORD_CLOSE_SELFTEST 验证过的链路完全同一条。
+    //
+    // 只做红叉，不做最小化/缩放：没有 NSApp run 的架构下，窗口缩进 Dock 后
+    // 收不到 Dock 图标的恢复点击，补了反而把窗口变成找不回来的死窗。
+    if (gWindow != nil
+        && (event.type == NSEventTypeLeftMouseDown
+            || event.type == NSEventTypeLeftMouseUp)) {
+        NSButton* closeButton = [gWindow standardWindowButton:NSWindowCloseButton];
+        if (closeButton != nil && closeButton.window == gWindow) {
+            const NSRect buttonInWindow =
+                [closeButton convertRect:closeButton.bounds toView:nil];
+            const NSPoint point = (event.window == gWindow)
+                ? event.locationInWindow
+                : [gWindow convertPointFromScreen:[NSEvent mouseLocation]];
+            const bool inButton = NSPointInRect(point, buttonInWindow);
+            if (event.type == NSEventTypeLeftMouseDown) {
+                if (inButton) {
+                    gCloseButtonArmed = true;
+                    return;  // 吞掉：游戏不能看到标题栏上的按下
+                }
+            } else if (gCloseButtonArmed) {
+                gCloseButtonArmed = false;
+                if (inButton) {
+                    std::fprintf(stderr, "[closebutton] click hit, performClose\n");
+                    [gWindow performClose:nil];
+                }
+                return;  // 配对的 up 一并吞掉，无论是否命中
+            }
+        }
+    }
+
+    // 本轮（U-09 复发）：绿灯补命中——与上面的红叉同一个坑，同一种修法。
+    // 命中即 toggleFullScreen:（进入/退出同一个动作，全屏态再点即退回）。
+    // 不做最小化按钮，理由同红叉注释：缩进 Dock 后收不到恢复点击。
+    if (gWindow != nil
+        && (event.type == NSEventTypeLeftMouseDown
+            || event.type == NSEventTypeLeftMouseUp)) {
+        NSButton* zoomButton = [gWindow standardWindowButton:NSWindowZoomButton];
+        if (zoomButton != nil && zoomButton.window == gWindow) {
+            const NSRect buttonInWindow =
+                [zoomButton convertRect:zoomButton.bounds toView:nil];
+            const NSPoint point = (event.window == gWindow)
+                ? event.locationInWindow
+                : [gWindow convertPointFromScreen:[NSEvent mouseLocation]];
+            const bool inButton = NSPointInRect(point, buttonInWindow);
+            if (event.type == NSEventTypeLeftMouseDown) {
+                if (inButton) {
+                    gZoomButtonArmed = true;
+                    return;  // 吞掉：游戏不能看到标题栏上的按下
+                }
+            } else if (gZoomButtonArmed) {
+                gZoomButtonArmed = false;
+                if (inButton) {
+                    std::fprintf(stderr,
+                        "[fullscreen] green button click hit, toggleFullScreen\n");
+                    [gWindow toggleFullScreen:nil];
+                }
+                return;  // 配对的 up 一并吞掉，无论是否命中
+            }
+        }
+    }
+
     // 先同步修饰键，再翻译事件：窗口过程处理这条消息时要读到正确的 Ctrl/Shift。
     syncModifierState(event.modifierFlags);
 
@@ -1451,12 +1654,24 @@ void emit(NSEvent* event) {
 // 也就是说 U-04/U-05 那句"用 cursor rect 而不是 [NSCursor hide]，因为 cursor rect
 // 是区域限定的"在实践上没成立过——真正在起作用的，一直是 U-05 补的那句全局 set。
 // 这轮不去改事件分发（那是大手术），而是把"区域限定"这件事自己实现出来。
+// L10N-02：隐藏区域从"窗口 frame"收窄到"内容区"。
+//
+// 用户 2026-11-11 报障：鼠标移到标题栏上，系统指针不出现。原因正是下面这个
+// 函数用 gWindow.frame 判定——Titled 窗口的 frame 包含标题栏和边框，游戏把
+// 那里也当成"窗口内"藏掉了指针。但标题栏是系统 chrome：拖动/关闭/最小化都
+// 在那里操作，macOS 的惯例是 chrome 上永远用系统箭头。
+//
+// 修法：屏幕点转窗口坐标后与 gView.frame（= contentView）求交。标题栏点在
+// 窗口坐标里 y ≥ 内容高度，落在 view.frame 之外 → 不隐藏 → 收敛器恢复箭头。
+// 全屏时 view 铺满整个窗口（无标题栏），行为与原来完全一致。
 static bool pointerIsOverOurWindow() {
     if (gWindow == nil || gView == nil) return false;
     const NSPoint p = [NSEvent mouseLocation];
     if (!NSPointInRect(p, gWindow.frame)) return false;
     const NSInteger top = [NSWindow windowNumberAtPoint:p belowWindowWithWindowNumber:0];
-    return top == gWindow.windowNumber;
+    if (top != gWindow.windowNumber) return false;
+    const NSPoint inWindow = [gWindow convertPointFromScreen:p];
+    return NSPointInRect(inWindow, gView.frame);
 }
 
 static void syncGlobalCursorForPointer() {

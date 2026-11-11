@@ -111,6 +111,11 @@ std::vector<ButtonSpec> buttons(const RuntimeMainMenuController& state) {
         {4, text("GUI:Options", L"Options"),
             text("STT:MainButtonOptions", L"Customize game settings."),
             MenuAction::OpenOptions},
+        {5, editionButtonLabel(state.config),
+            text("STT:MainButtonGameEdition",
+                L"Switch between Yuri's Revenge and Red Alert 2. Changes "
+                L"rules, campaigns and menu music."),
+            MenuAction::CycleEdition},
         {-1, text("GUI:ExitGame", L"Exit Game"),
             text("STT:MainButtonExitGamemd", L"Quit Yuri's Revenge."), MenuAction::Exit}
     };
@@ -258,6 +263,49 @@ void cycleTargetFps(RuntimeMainMenuController& state) {
     state.optionTargetFps = kOptionTargetFps[next];
 }
 
+namespace {
+std::string normalizedMenuEdition(const RuntimeConfig& config) {
+    std::string edition;
+    edition.reserve(config.campaignSourceId.size());
+    for (const char character : config.campaignSourceId) {
+        edition += static_cast<char>(
+            character >= 'A' && character <= 'Z'
+                ? character - 'A' + 'a'
+                : character);
+    }
+    return edition == "ra2" ? "ra2" : "yr";
+}
+}
+
+std::wstring editionButtonLabel(const RuntimeConfig& config) {
+    // 简体字形已由 ra2mac_docs/scripts/patch_fnt_simplified.py 补入 game.fnt，
+    // 因此这里直接用简体文案（旧版本因字体缺字才写成繁体）。
+    return normalizedMenuEdition(config) == "ra2"
+        ? std::wstring(L"版本：红色警戒")
+        : std::wstring(L"版本：尤里的复仇");
+}
+
+void cycleEdition(RuntimeMainMenuController& state) {
+    RuntimeConfig candidate = state.config;
+    candidate.campaignSourceId = normalizedMenuEdition(candidate) == "ra2"
+        ? "yr"
+        : "ra2";
+    state.config = candidate;
+    // Re-resolve the edition-sensitive shell resources, then restart the
+    // current page's music so the switch is audible immediately.
+    state.services.reloadEditionResources();
+    state.services.stopMusic();
+    state.services.startPageMusic();
+    std::string saveError;
+    if (!state.services.savePreferences(state.config, saveError)) {
+        // Persistence is best-effort; the in-memory switch already applies.
+        state.pageStatus = L"Could not save edition preference: "
+            + state.services.widen(saveError);
+    } else {
+        state.pageStatus.clear();
+    }
+}
+
 std::size_t creditPageCount(const RuntimeMainMenuController& state) {
     return std::max<std::size_t>(
         1,
@@ -319,6 +367,8 @@ bool performImmediateAction(RuntimeMainMenuController& state, MenuAction action)
         cycleTargetFps(state);
     } else if (action == MenuAction::CycleGameSpeed) {
         state.optionGameSpeed = (state.optionGameSpeed + 1) % 7;
+    } else if (action == MenuAction::CycleEdition) {
+        cycleEdition(state);
     } else {
         return false;
     }

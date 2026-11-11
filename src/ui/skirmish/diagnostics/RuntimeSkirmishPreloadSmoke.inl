@@ -129,6 +129,38 @@ bool runSkirmishPreloadSmoke(const RuntimeConfig& config, const fs::path& output
             || resourceOwner->background.bgra.data() != shellPixels) return false;
     }
 
+    // A cached lobby from another edition must never be reused: the edition
+    // switch changes rules/countries/maps inside the same watched roots, so
+    // the resource watch cannot see it (YR units leaked into RA2 mode).
+    RuntimeConfig otherEdition = entryConfig;
+    otherEdition.campaignSourceId = lowerAscii(config.campaignSourceId) == "ra2"
+        ? "yr" : "ra2";
+    prewarmedMenuState.reset();
+    const auto editionStarted = Clock::now();
+    prewarmRuntimeSkirmishMenu(otherEdition);
+    while (!runtimeSkirmishMenuReady(otherEdition)) {
+        if (milliseconds(editionStarted) > 30000.0) return false;
+        MsgWaitForMultipleObjectsEx(0, nullptr, 5, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    const bool editionReady = prewarmedMenuState != nullptr
+        && prewarmedMenuState->initialized;
+    const bool editionFresh = prewarmedMenuState != nullptr
+        && prewarmedMenuState.get() != resourceOwner
+        && lowerAscii(prewarmedMenuState->config.campaignSourceId)
+            == otherEdition.campaignSourceId;
+    std::cerr << "Edition rebuild probe: ready=" << editionReady
+        << " fresh=" << editionFresh << " cachedSourceId='"
+        << (prewarmedMenuState ? prewarmedMenuState->config.campaignSourceId
+            : std::string("(null)"))
+        << "' wanted='" << otherEdition.campaignSourceId << "'\n";
+    const bool editionRebuilt = editionReady && editionFresh;
+    const double editionRebuildMs = milliseconds(editionStarted);
+
     // Use isolated directories to verify freshness without touching the
     // player's maps: adding a map, editing rules, and switching roots all
     // invalidate reuse, while saving ordinary preferences does not.
@@ -188,6 +220,8 @@ bool runSkirmishPreloadSmoke(const RuntimeConfig& config, const fs::path& output
         << " coldWorkerMs=" << coldMs << " responsiveHeartbeats=" << heartbeatCount
         << " visits=4 maxEntryMs=" << maxEntryMs
         << " resourcesReused=yes settingsRefreshed=yes freshness=" << freshnessValid
+        << " editionRebuilt=" << editionRebuilt
+        << " editionRebuildMs=" << editionRebuildMs
         << " closeWhilePending=" << closedWhilePending << '\n';
-    return freshnessValid && closedWhilePending;
+    return freshnessValid && closedWhilePending && editionRebuilt;
 }

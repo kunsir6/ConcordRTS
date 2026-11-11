@@ -101,8 +101,9 @@ struct RuntimeConfig {
     // single-owner behavior for command-line and older INI configurations.
     bool buildOffAlly = false;
     // Offline skirmish option. Disabled computer slots still spawn normally,
-    // but their strategic and passive combat behaviors remain paused.
-    bool computerAiEnabled = false;
+    // but their strategic and passive combat behaviors remain paused.  The
+    // default follows retail skirmish: computer players act and retaliate.
+    bool computerAiEnabled = true;
     // Offline skirmish: only the local player skips production/charge time.
     bool noCooldown = false;
     struct PlayerSlot {
@@ -155,4 +156,6 @@ bool saveRuntimeSkirmishCratePreference(
     std::string& errorMessage
 );
 bool saveRuntimeSkirmishNoCooldownPreference(
+    const RuntimeConfig& config, bool enabled, std::string& errorMessage);
+bool saveRuntimeSkirmishAiPreference(
     const RuntimeConfig& config, bool enabled, std::string& errorMessage);

@@ -88,6 +88,9 @@ void pumpEvents();
 // U-05 结论：产品那套 SetCursor 请求**不代表**系统指针该不该出现（世界每秒几十次
 // 请求 StockArrow，而游戏同时自绘箭头；截图实证 hide=0 时两个箭头并排），
 // 所以这里保持"一律隐藏"，不做 SetCursor 镜像。
+//
+// L10N-02：隐藏区域是**内容区**而非整个窗口 frame——标题栏/边框是系统
+// chrome，指针移上去要恢复系统箭头（拖动、关闭、最小化都在那里操作）。
 void setSystemCursorHidden(bool hidden);
 bool systemCursorHidden();
 

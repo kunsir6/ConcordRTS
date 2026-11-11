@@ -153,6 +153,7 @@ public:
     virtual void prewarmMainMenu() = 0;
     virtual bool saveCratePreference(const RuntimeConfig&, bool, std::string&) = 0;
     virtual bool saveNoCooldownPreference(const RuntimeConfig&, bool, std::string&) = 0;
+    virtual bool saveAiPreference(const RuntimeConfig&, bool, std::string&) = 0;
     virtual bool ensurePreview(int mapIndex) = 0;
     virtual void loadDefaults(const RuntimeConfig&, RuntimeSkirmishSelection&) = 0;
     virtual std::wstring text(const std::string& key, const std::wstring& fallback) const = 0;

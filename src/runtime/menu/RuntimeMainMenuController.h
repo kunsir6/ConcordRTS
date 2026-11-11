@@ -63,6 +63,7 @@ enum class MenuAction {
     CycleResolution,
     CycleTargetFps,
     CycleGameSpeed,
+    CycleEdition,
     ApplyOptions,
     Campaign,
     LoadGame,
@@ -98,6 +99,10 @@ public:
     virtual bool savePreferences(const RuntimeConfig&, std::string&) = 0;
     virtual void resizeHost() = 0;
     virtual void startPageMusic() = 0;
+    // Re-resolves the edition-sensitive shell resources (CSF text, menu sound
+    // events, theme catalog and per-page music paths) from
+    // config.campaignSourceId, without touching navigation state.
+    virtual void reloadEditionResources() = 0;
     virtual bool playMovie(const std::filesystem::path&, std::string&) = 0;
     virtual void prepareMoviePlayback() = 0;
     virtual void restartMainVideo() = 0;
@@ -168,6 +173,8 @@ void publishMenuConfig(const RuntimeMainMenuController& state, RuntimeConfig& ou
 MenuAction escapeActionForPage(MenuPage page);
 void cycleResolution(RuntimeMainMenuController& state);
 void cycleTargetFps(RuntimeMainMenuController& state);
+void cycleEdition(RuntimeMainMenuController& state);
+std::wstring editionButtonLabel(const RuntimeConfig& config);
 std::size_t creditPageCount(const RuntimeMainMenuController& state);
 std::wstring moviePlaybackStatus(const RuntimeMainMenuController& state, bool played, const std::string& error);
 void playSelectedMovie(RuntimeMainMenuController& state);
