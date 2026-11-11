@@ -2369,6 +2369,10 @@ RuntimeMainMenuResult runRuntimeMainMenu(
 #include "ui/main_menu/diagnostics/RuntimeMainVideoFooterSmoke.inl"
 #include "ui/main_menu/diagnostics/RuntimeMainVideoCallerBoundarySmoke.inl"
 #include "ui/main_menu/diagnostics/RuntimeMainMenuPointerNavigationSmoke.inl"
+// ON-4-02a：真实点击驱动「主菜单 → 单人页 → 发起遭遇战转场」。
+// 必须在指针导航之后 include：它复用那边的 pointerNavClientPoint / pointerNavButtonCentre
+// 与 pointerNavRegionDiff（同一 TU 的匿名 namespace）。
+#include "ui/main_menu/diagnostics/RuntimeOnscreenFlowSmoke.inl"
 
 int runRuntimeMainMenuSmokeTest(
     const RuntimeConfig& config,
@@ -2417,6 +2421,14 @@ int runRuntimeMainMenuSmokeTest(
             return 1;
         }
         return runMainMenuPointerNavigationSmoke(config,fs::path(*output));
+    }
+    if (const auto only=mainMenuSmokeEnvironment("CONCORD_ONSCREEN_FLOW_ONLY")) {
+        const auto output=mainMenuSmokeEnvironment("CONCORD_ONSCREEN_FLOW_OUTPUT");
+        if(*only!="1" || !output || output->empty()) {
+            std::cerr<<"Onscreen flow requires ONLY=1 and explicit OUTPUT directory\n";
+            return 1;
+        }
+        return runRuntimeOnscreenFlowSmoke(config,fs::path(*output));
     }
     if (const auto only=mainMenuSmokeEnvironment("CONCORD_MAIN_MENU_PRESENTATION_CLOCK_ONLY")) {
         const auto output=mainMenuSmokeEnvironment("CONCORD_MAIN_MENU_PRESENTATION_CLOCK_OUTPUT");
