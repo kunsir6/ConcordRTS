@@ -76095,16 +76095,64 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
         dimensions = std::to_string(selectionWidth) + "x"
             + std::to_string(selectionHeight);
         const RECT expectedSelectionBounds = runtimeUnitSelectionBoundsForSprite(runtimeRenderPlacementNativeRect(match->spriteBounds));
+        // 潜航单位的身子比「覆盖层锚点」低一点点，这个位移来自绘制层级
+        // （drawLevelForObject 减去 runtimeSubmergedVisualDepthLevels），
+        // 不是「半格」。旧断言写 tileHeight/2（60x30 下等于 15px），
+        // 与实际 5px 差了 10px，才把 DLPH/SQD 永久判红。
         const int expectedRenderDeltaY = probeType.submerged
-            ? aquaticSelectionProbe.camera.tileHeight / 2
+            ? static_cast<int>(std::llround(
+                  runtimeSubmergedVisualDepthLevels()
+                      * static_cast<double>(aquaticSelectionProbe.camera.tileHeight)
+                      / 2.0))
             : probeType.airborne ? -runtimeAircraftSpriteLiftPixels(*match->object, true) : 0;
         const POINT selectionCenter = runtimeProjectedUnitSelectionCenter(*match);
-        return spriteWidth > 0 && spriteHeight > 0
-            && selectionWidth >= spriteWidth && selectionHeight >= spriteHeight
-            && runtimeRectEquals(match->selectionBounds, expectedSelectionBounds)
-            && match->renderCenter.x == match->center.x
-            && match->renderCenter.y - match->center.y == expectedRenderDeltaY
-            && pointInRectInclusive(match->bounds, selectionCenter);
+        const bool spriteUsable = spriteWidth > 0 && spriteHeight > 0;
+        const bool coversSprite = selectionWidth >= spriteWidth
+            && selectionHeight >= spriteHeight;
+        const bool rectMatches = runtimeRectEquals(
+            match->selectionBounds,
+            expectedSelectionBounds
+        );
+        const bool centerAlignedX = match->renderCenter.x == match->center.x;
+        const int actualRenderDeltaY =
+            match->renderCenter.y - match->center.y;
+        const bool centerAlignedY = actualRenderDeltaY == expectedRenderDeltaY;
+        const bool centerInsideHit = pointInRectInclusive(
+            match->bounds,
+            selectionCenter
+        );
+        if (!(spriteUsable && coversSprite && rectMatches
+                && centerAlignedX && centerAlignedY && centerInsideHit)) {
+            // 只读计量：把 6 个谓词逐个打出来，避免「尺寸相同却判红」这种
+            // 多谓词耦合的失败被压成一句 aligned=no。
+            std::cerr << "  probe " << probeType.typeId
+                      << " sprite=" << spriteWidth << "x" << spriteHeight
+                      << " sel=" << selectionWidth << "x" << selectionHeight
+                      << " expected="
+                      << (expectedSelectionBounds.right - expectedSelectionBounds.left)
+                      << "x"
+                      << (expectedSelectionBounds.bottom - expectedSelectionBounds.top)
+                      << " d("
+                      << (match->selectionBounds.left - expectedSelectionBounds.left)
+                      << ","
+                      << (match->selectionBounds.top - expectedSelectionBounds.top)
+                      << ","
+                      << (match->selectionBounds.right - expectedSelectionBounds.right)
+                      << ","
+                      << (match->selectionBounds.bottom - expectedSelectionBounds.bottom)
+                      << ") dy=" << actualRenderDeltaY << "/"
+                      << expectedRenderDeltaY
+                      << " hit=" << (centerInsideHit ? 1 : 0)
+                      << " pass[sprite=" << (spriteUsable ? 1 : 0)
+                      << " cover=" << (coversSprite ? 1 : 0)
+                      << " rect=" << (rectMatches ? 1 : 0)
+                      << " cx=" << (centerAlignedX ? 1 : 0)
+                      << " cy=" << (centerAlignedY ? 1 : 0)
+                      << " inb=" << (centerInsideHit ? 1 : 0)
+                      << "]\n";
+        }
+        return spriteUsable && coversSprite && rectMatches
+            && centerAlignedX && centerAlignedY && centerInsideHit;
 
     };
 
