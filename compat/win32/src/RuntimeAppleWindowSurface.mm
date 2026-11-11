@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <cstdarg>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -147,6 +148,72 @@ static void mapViewPointToSurface(double viewX, double viewY, int& outX, int& ou
 constexpr CGBitmapInfo kSurfaceBitmapInfo = static_cast<CGBitmapInfo>(
     static_cast<std::uint32_t>(kCGBitmapByteOrder32Little)
     | static_cast<std::uint32_t>(kCGImageAlphaNoneSkipFirst));
+
+// ---------------------------------------------------------------------------
+// U-10 系统指针可见性自证（CONCORD_CURSOR_SELFTEST=1）
+//
+// 用户报障：「鼠标在 app 框内隐藏了系统图标，移出去就看不到了」。
+// 判据用 +[NSCursor currentSystemCursor]——它返回系统**此刻正在显示**的游标：
+// 我们把自己的 1×1 空图设上去之后，这里读到的就是 1×1。
+//   · 比截图靠谱：截图要把光标画进去得靠 screencapture -C，而且光标位置随时会
+//     被真实鼠标移走（实测两次采样之间能差 300px）；
+//   · 比 CGCursorIsVisible 准确：那个只反映 CGDisplayHideCursor 那套引用计数，
+//     而"把光标换成透明图"在它眼里仍然是"可见"。
+// 断言两条：窗口内必须是空图（隐藏生效）；窗口外必须不是空图（移出即恢复）。
+// ---------------------------------------------------------------------------
+int gCursorSelfTestStage = 0;
+// 收敛器的调用计数与最近一次判定（诊断用：区分"没被调用"和"判成不该隐藏"）。
+int gCursorSyncCalls = 0;
+bool gCursorWantedBlank = false;
+int gCursorSelfTestTicks = 0;
+int gCursorSelfTestFailures = 0;
+int gCursorSelfTestSkips = 0;
+
+// 自检输出双写：stderr（直接跑二进制时能看见）+ /tmp 下的固定文件。
+// 后者是因为用 LaunchServices 启动（open）的进程 stderr 直接进 /dev/null，
+// 而"窗口是不是 key"恰恰只有在真实启动路径下才有意义——两种启动方式都要能取证。
+static void cursorSelfTestLog(const char* fmt, ...) {
+    char buffer[512];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    std::fputs(buffer, stderr);
+    std::fflush(stderr);
+    static std::FILE* file = std::fopen("/tmp/concord-cursor-selftest.log", "a");
+    if (file != nullptr) {
+        std::fputs(buffer, file);
+        std::fflush(file);
+    }
+}
+
+static NSString* describeCurrentSystemCursor() {
+    NSCursor* cur = [NSCursor currentSystemCursor];
+    if (cur == nil) return @"(nil)";
+    const NSSize size = cur.image.size;
+    return [NSString stringWithFormat:@"%.0fx%.0f", size.width, size.height];
+}
+
+// 空光标 = 我们自己造的那个 1×1 透明图（concordInvisibleCursor）。
+static bool systemCursorIsBlank() {
+    NSCursor* cur = [NSCursor currentSystemCursor];
+    if (cur == nil) return false;
+    const NSSize size = cur.image.size;
+    return size.width <= 1.0 && size.height <= 1.0;
+}
+
+// AppKit 的屏幕坐标原点在左下，CGWarpMouseCursorPosition 用左上原点。
+static void warpPointerToScreenPoint(double nsX, double nsY) {
+    const NSRect screen = [[NSScreen mainScreen] frame];
+    CGWarpMouseCursorPosition(CGPointMake(nsX, screen.size.height - nsY));
+}
+
+static NSPoint currentPointerScreenPoint() {
+    const NSRect screen = [[NSScreen mainScreen] frame];
+    const CGPoint p = CGEventGetLocation(CGEventCreate(nullptr));
+    return NSMakePoint(p.x, screen.size.height - p.y);
+}
+
 
 // ---------------------------------------------------------------------------
 // ON-3-01 上屏自证
@@ -588,6 +655,9 @@ static ConcordWindowCloseDelegate* gWindowCloseDelegate = nil;
 
 namespace concord_compat::apple {
 
+// U-10：系统指针收敛器（定义在文件后部，pump 与 present 都要用）。
+static void syncGlobalCursorForPointer();
+
 void present(const Surface& surface) {
     if (surface.pixels == nullptr || surface.width <= 0 || surface.height <= 0) return;
 
@@ -888,6 +958,77 @@ void present(const Surface& surface) {
             }
         }
 
+        // U-10：系统指针可见性自证。阶段机，每帧推进一步（等 cursor rect 生效
+        // 需要几帧；所有等待都落在 present 里，不额外 sleep）。
+        if (gCursorSelfTestStage == 0) {
+            const char* cursorTest = std::getenv("CONCORD_CURSOR_SELFTEST");
+            if (cursorTest != nullptr && cursorTest[0] == '1' && gInputSink != nullptr) {
+                gCursorSelfTestStage = 1;
+                gCursorSelfTestTicks = 0;
+            }
+        }
+        if (gCursorSelfTestStage > 0) {
+            ++gCursorSelfTestTicks;
+            const NSRect frame = gWindow.frame;
+            const NSRect screen = [[NSScreen mainScreen] frame];
+            // 窗口外的一个点：优先取右边，越界取左边，都越界就贴屏幕右侧。
+            double outsideX = NSMaxX(frame) + 60.0;
+            if (outsideX > NSMaxX(screen) - 40.0) outsideX = NSMinX(frame) - 60.0;
+            if (outsideX < NSMinX(screen) + 40.0) outsideX = NSMaxX(screen) - 60.0;
+            const double outsideY = NSMidY(frame);
+
+            if (gCursorSelfTestStage == 1 && gCursorSelfTestTicks > 3) {
+                gCursorSelfTestTicks = 0;
+                gCursorSelfTestStage = 2;
+                warpPointerToScreenPoint(NSMidX(frame), NSMidY(frame));
+            } else if (gCursorSelfTestStage == 2 && gCursorSelfTestTicks > 3) {
+                const NSPoint pointer = currentPointerScreenPoint();
+                const bool inside = NSPointInRect(pointer, frame);
+                const bool blank = systemCursorIsBlank();
+                // 判"在不在我们窗口上方"要用 WindowServer 的窗口序：指针在框内、
+                // 但窗口被别的应用盖住时不应该隐藏指针，那种情况记为 skip。
+                const NSInteger top =
+                    [NSWindow windowNumberAtPoint:pointer belowWindowWithWindowNumber:0];
+                const bool overUs = top == gWindow.windowNumber;
+                if (!inside || !overUs) {
+                    ++gCursorSelfTestSkips;
+                } else if (!blank) {
+                    ++gCursorSelfTestFailures;
+                }
+                cursorSelfTestLog(
+                    "[cursor] inside pointer=%.0f,%.0f inWindow=%d overUs=%d top=%ld ours=%ld"
+                    " cursor=%s hidden=%d sync=%d want=%d ok=%d\n",
+                    pointer.x, pointer.y, inside ? 1 : 0, overUs ? 1 : 0,
+                    (long)top, (long)gWindow.windowNumber,
+                    [describeCurrentSystemCursor() UTF8String],
+                    blank ? 1 : 0, gCursorSyncCalls, gCursorWantedBlank ? 1 : 0,
+                    (!inside || !overUs || blank) ? 1 : 0);
+                gCursorSelfTestTicks = 0;
+                gCursorSelfTestStage = 3;
+                warpPointerToScreenPoint(outsideX, outsideY);
+            } else if (gCursorSelfTestStage == 3 && gCursorSelfTestTicks > 3) {
+                const NSPoint pointer = currentPointerScreenPoint();
+                const bool outside = !NSPointInRect(pointer, frame);
+                const bool blank = systemCursorIsBlank();
+                if (!outside) {
+                    ++gCursorSelfTestSkips;
+                } else if (blank) {
+                    // 这就是用户报的那条：人已经离开窗口，系统指针还是那张空图。
+                    ++gCursorSelfTestFailures;
+                }
+                cursorSelfTestLog(
+                    "[cursor] outside pointer=%.0f,%.0f outsideWindow=%d cursor=%s hidden=%d ok=%d\n",
+                    pointer.x, pointer.y, outside ? 1 : 0,
+                    [describeCurrentSystemCursor() UTF8String],
+                    blank ? 1 : 0, (!outside || !blank) ? 1 : 0);
+                cursorSelfTestLog("[cursor] done: failures=%d skips=%d\n",
+                                  gCursorSelfTestFailures, gCursorSelfTestSkips);
+                gCursorSelfTestStage = 4;
+                std::fflush(stderr);
+                std::_Exit(gCursorSelfTestFailures == 0 ? 0 : 1);
+            }
+        }
+
         // ON-2-04 自测注入：与 Cmd+Q 的注入并列，但**不要同时开**——两者都会结束进程。
         // 放在 present 末尾：此时本帧的贴图/取证都已完成，销毁窗口不会打断正在进行的绘制。
         //
@@ -967,6 +1108,11 @@ void present(const Surface& surface) {
                 std::_Exit(0);
             }
         }
+
+        // U-10：每帧都收敛一次系统指针。放在 present 末尾而不是只靠 pumpEvents——
+        // 主菜单在 GetMessageW 上阻塞时，pump 可能几秒才转一次，指针离开窗口后
+        // 空图会滞留；present 至少是"画面在动就一定会跑到"的地方。
+        syncGlobalCursorForPointer();
     }
 }
 
@@ -1128,8 +1274,53 @@ void emit(NSEvent* event) {
 
 }  // namespace
 
+// U-10：系统指针"只在窗口内隐藏"的收敛器。
+//
+// 为什么需要它：U-05 为了让窗口"激活/失焦/orderFront"之后不冒出第二个箭头，
+// 在**每个输入事件**上无条件 `[hiddenCursor set]`。而 -[NSCursor set] 是
+// **全局**的"当前游标"——谁最后 set 谁说了算，而且不会因为指针离开窗口而自动
+// 撤销。于是指针一移出游戏窗口，系统就把那张 1×1 空图继续画在别的应用/桌面上，
+// 用户看到的是"鼠标出去了但看不见"（U-10 报障）。
+//
+// 修法不是删掉这条保险，而是把它变成**有边界的往返**：进入窗口才设空图、
+// 离开立刻恢复箭头。判定不用 AppKit 的 isActive/isKeyWindow——那两个标志位在
+// 本项目里并不可靠（见下面 sendEvent 的说明），而用 WindowServer 的事实：
+// +[NSWindow windowNumberAtPoint:belowWindowWithWindowNumber:] 直接问"这个点最上面
+// 是谁的窗口"，等于我们、才隐藏。这样即便窗口被别的应用盖住、或者 AppKit 的标志位
+// 还停在旧值，也不会把别人的光标藏掉。
+//
+// 【U-10 顺带查清的事实】本项目从不调用 [NSApp sendEvent:]，只 nextEventMatchingMask
+// 出队自己处理。实测（/tmp/keyprobe.m）：只出队时 NSApp.isActive=0、window.isKeyWindow=0，
+// 而且 **cursor rect 根本不生效**（指针在窗口内、也 invalidate 过，系统游标仍是箭头）；
+// 同一段代码改成出队后 sendEvent，三个值立刻变成 1/1/空图。
+// 也就是说 U-04/U-05 那句"用 cursor rect 而不是 [NSCursor hide]，因为 cursor rect
+// 是区域限定的"在实践上没成立过——真正在起作用的，一直是 U-05 补的那句全局 set。
+// 这轮不去改事件分发（那是大手术），而是把"区域限定"这件事自己实现出来。
+static bool pointerIsOverOurWindow() {
+    if (gWindow == nil || gView == nil) return false;
+    const NSPoint p = [NSEvent mouseLocation];
+    if (!NSPointInRect(p, gWindow.frame)) return false;
+    const NSInteger top = [NSWindow windowNumberAtPoint:p belowWindowWithWindowNumber:0];
+    return top == gWindow.windowNumber;
+}
+
+static void syncGlobalCursorForPointer() {
+    ++gCursorSyncCalls;
+    if (gWindow == nil || gView == nil) return;
+    NSCursor* blank = concordInvisibleCursor();
+    const bool wantBlank = gSystemCursorHidden && pointerIsOverOurWindow();
+    gCursorWantedBlank = wantBlank;
+    const bool showingBlank = systemCursorIsBlank();
+    if (wantBlank && !showingBlank) {
+        if (blank != nil) [blank set];
+    } else if (!wantBlank && showingBlank) {
+        [[NSCursor arrowCursor] set];
+    }
+}
+
 void pumpEvents() {
     if (gInputSink == nullptr || gWindow == nil) return;
+    syncGlobalCursorForPointer();
     @autoreleasepool {
         // **不要**用 [NSDate distantPast] 当"立刻返回"。
         // 文档说它不阻塞，实测会进 AppKit 的事件循环（采样栈：nextEventMatchingMask →
@@ -1166,16 +1357,10 @@ void pumpEvents() {
                 && [[NSApp mainMenu] performKeyEquivalent:event]) {
                 continue;
             }
-            // U-05：每个输入事件都重新压一次不可见光标。
-            //
-            // cursor rect 是窗口级状态，窗口激活/失焦/重新 orderFront 时可能被
-            // 整体丢掉；丢掉之后没人 invalidate 就会退回系统箭头，而用户看到的
-            // 就是"世界里又冒出第二个指针"。现场没有可靠的补回时机，所以按
-            // 游戏窗口的常规做法：每次事件主动 set 一次（代价可忽略）。
-            if (gSystemCursorHidden) {
-                NSCursor* hiddenCursor = concordInvisibleCursor();
-                if (hiddenCursor != nil) [hiddenCursor set];
-            }
+            // U-10：这里原来每个事件都无条件 `[hiddenCursor set]`，那是全局设置，
+            // 指针离开窗口后不会自动撤销，于是"移出去就看不见指针"。
+            // 现在改由 syncGlobalCursorForPointer() 做有边界的往返（见其注释），
+            // 每轮 pump 已经调过，这里只负责把事件交给 sink。
             emit(event);
         }
     }
