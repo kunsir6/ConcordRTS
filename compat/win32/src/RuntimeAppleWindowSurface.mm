@@ -311,10 +311,35 @@ void attestPresent(const concord_compat::apple::Surface& surface) {
 @interface ConcordGameView : NSView
 @end
 
+// U-04：是否在窗口区域隐藏系统指针。默认隐藏——游戏自己画箭头（Windows 上也是
+// 只有游戏指针）。声明在 .mm 文件作用域，ObjC 方法可以直接读。
+static bool gSystemCursorHidden = true;
+
 @implementation ConcordGameView
 - (BOOL)acceptsFirstMouse:(NSEvent*)event {
     (void)event;
     return YES;
+}
+
+// U-04：游戏自绘指针时把系统指针换成不可见光标。
+//
+// 用 cursor rect 而不是 [NSCursor hide]/unhide：cursor rect 由窗口按区域管理，
+// 鼠标移出窗口自动恢复系统箭头，不需要配对调用；[NSCursor hide] 是全局计数，
+// 一旦某条路径漏了 unhide（窗口失焦、Cmd+Tab、异常退出），指针会永久消失，
+// 用户只能强杀应用。
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    if (!gSystemCursorHidden) return;
+    // 不用 +[NSCursor invisibleCursor]：本 SDK 里它不可见（编译报
+    // "no known class method for selector 'invisibleCursor'"）。用 1×1 空图
+    // 自建等价光标，只用 initWithImage:hotSpot:，各版本 SDK 都稳定。
+    // 缓存一次：resetCursorRects 会在窗口激活、尺寸变化、invalidate 时反复调用。
+    static NSCursor* invisible = nil;
+    if (invisible == nil) {
+        NSImage* blank = [[NSImage alloc] initWithSize:NSMakeSize(1.0, 1.0)];
+        invisible = [[NSCursor alloc] initWithImage:blank hotSpot:NSZeroPoint];
+    }
+    if (invisible != nil) [self addCursorRect:self.bounds cursor:invisible];
 }
 @end
 
@@ -496,6 +521,19 @@ void present(const Surface& surface) {
             // （实测这台机器 backingScaleFactor=2.0 而 layer 默认 1.0。）
             gView.layer.contentsScale = gWindow.backingScaleFactor;
             gWindow.contentView = gView;
+            // U-04：系统指针策略。默认隐藏（与 Windows 上"只有游戏指针"一致）；
+            // CONCORD_HIDE_SYSTEM_CURSOR=0 可恢复系统箭头，留给"某界面没有自绘指针"。
+            // 这里主动失效一次 cursor rect，否则要等用户移动鼠标才生效。
+            {
+                static const bool hideSystemCursor = []() {
+                    const char* value = std::getenv("CONCORD_HIDE_SYSTEM_CURSOR");
+                    return value == nullptr || value[0] != '0';
+                }();
+                gSystemCursorHidden = hideSystemCursor;
+                [gWindow invalidateCursorRectsForView:gView];
+                std::fprintf(stderr, "[cocoa] system cursor hidden=%d (env CONCORD_HIDE_SYSTEM_CURSOR)\n",
+                             hideSystemCursor ? 1 : 0);
+            }
 
             [gWindow center];
             [gWindow makeKeyAndOrderFront:nil];
@@ -899,5 +937,26 @@ void pumpEvents() {
         }
     }
 }
+
+}  // namespace concord_compat::apple
+
+namespace concord_compat::apple {
+
+// U-04：系统指针策略。
+//
+// 默认隐藏：游戏自己画箭头（Windows 上硬件指针本就不显示，玩家只看到一个）。
+// CONCORD_HIDE_SYSTEM_CURSOR=0 可关掉——留给"某个界面确实没有自绘指针"的情况，
+// 例如加载页万一不画光标，用户至少还能看见系统箭头。
+void setSystemCursorHidden(bool hidden) {
+    gSystemCursorHidden = hidden;
+    @autoreleasepool {
+        if (gWindow != nil && gView != nil) {
+            // 让窗口重新询问 resetCursorRects，立即生效（不必等鼠标移动）。
+            [gWindow invalidateCursorRectsForView:gView];
+        }
+    }
+}
+
+bool systemCursorHidden() { return gSystemCursorHidden; }
 
 }  // namespace concord_compat::apple

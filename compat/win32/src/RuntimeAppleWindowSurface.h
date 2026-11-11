@@ -76,6 +76,17 @@ void setInputSink(InputSink sink, void* context);
 // 事件永远待在 AppKit 队列里，窗口看得见但点不动。
 void pumpEvents();
 
+// 隐藏/恢复窗口内的**系统**指针（U-04）。
+//
+// Windows 上游戏把硬件指针关掉、自己画箭头，所以玩家只看到一个指针；
+// macOS 默认两者并存，菜单里会出现"系统箭头 + 游戏箭头"重叠。
+// 这里用 view 的 cursor rect 把窗口区域内的系统指针换成不可见光标，
+// 而不是 [NSCursor hide]：cursor rect 是区域限定的，鼠标移出窗口自动恢复，
+// 不需要配对 unhide，也不会因窗口失焦/切换而把指针永久藏掉。
+// 默认隐藏；CONCORD_HIDE_SYSTEM_CURSOR=0 可关闭（万一某个界面没有自绘指针）。
+void setSystemCursorHidden(bool hidden);
+bool systemCursorHidden();
+
 }  // namespace concord_compat::apple
 
 #endif  // CONCORD_COMPAT_APPLE_WINDOW_SURFACE_H
