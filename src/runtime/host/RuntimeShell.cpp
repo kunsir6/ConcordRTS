@@ -24548,9 +24548,15 @@ std::optional<RuntimeMouseCursorFrame> runtimeMouseCursorFrameForPoint(
 ) {
     if (state.playerCommunication.diplomacyOpen) return std::nullopt;
     const RECT viewport = runtimeMapViewport(clientRect);
-    if (!state.mouseClientPointValid
-        || !pointInRectInclusive(viewport, point)) {
-        return std::nullopt;
+    if (!state.mouseClientPointValid) return std::nullopt;
+    if (!pointInRectInclusive(viewport, point)) {
+        // U-06：地图视口以外（右侧栏/顶栏/底栏）原版仍然是**游戏自绘**的标准
+        // 箭头，不是"没有指针"。此前这里一律 nullopt，在 Windows 上被系统箭头
+        // 遮住了看不出来；macOS 侧系统指针已被隐藏（U-04/U-05），于是指针在
+        // 侧栏区域整个消失——"地图里能看见、移到右边就没了"。
+        // 点在客户区之外才确实不画（拖到窗口外由窗口系统接手）。
+        if (!pointInRectInclusive(clientRect, point)) return std::nullopt;
+        return RuntimeMouseCursorFrame{0, 0, 0};
     }
 
     // The pan cross temporarily overrides targeting without changing its state.
@@ -38334,6 +38340,27 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
         || state.runtimeSoundEvents != soundEventsBeforeCancel) {
         std::cerr << "Interaction smoke test failed: right cancel emitted sound.\n";
         return 1;
+    }
+
+    // U-06：地图视口以外（侧栏等 HUD）必须仍然有指针。
+    // 原版是游戏自绘的标准箭头；macOS 上系统指针被隐藏，若这里返回空，
+    // 指针会在侧栏区域整个消失（实测：地图里能看见，移到右边就没了）。
+    {
+        const RECT hudViewport = runtimeMapViewport(clientRect);
+        const POINT hudPoint{clientRect.right - 8, clientRect.top + 8};
+        if (pointInRectInclusive(hudViewport, hudPoint)) {
+            std::cerr << "Interaction smoke test failed: HUD probe point fell inside the map viewport.\n";
+            return 1;
+        }
+        const std::optional<RuntimeMouseCursorFrame> hudCursor =
+            runtimeMouseCursorFrameForPoint(state, clientRect, hudPoint);
+        if (!hudCursor.has_value() || hudCursor->frameIndex != 0
+            || hudCursor->atlasId != "mouse") {
+            std::cerr << "Interaction smoke test failed: no standard cursor over the HUD\n";
+            return 1;
+        }
+        std::cout << "HUD cursor: right=" << hudPoint.x << " top=" << hudPoint.y
+                  << " frame=0 atlas=mouse\n";
     }
 
     std::optional<POINT> repairCursorPoint;
