@@ -1,17 +1,28 @@
 // Include after drawRuntimeInteractionOverlay and the smoke-state helpers.
 #include "ui/selection/diagnostics/RuntimeSelectedPathBatchContract.inl"
 #include "ui/selection/diagnostics/RuntimeSelectedPathRasterContract.inl"
-#include "ui/selection/diagnostics/RuntimeSelectionFrameRasterContract.inl"
 #include "ui/sidebar/diagnostics/RuntimeHealthPipStripContract.inl"
 #include "ui/selection/diagnostics/RuntimePaintTechTreeMemoContract.inl"
 #include "ui/selection/diagnostics/RuntimeProjectionHistoryContract.inl"
 #include "ui/selection/diagnostics/RuntimePaintProjectionSignatureContract.inl"
 
+namespace {
+// 选中框用的 2px 蓝色画笔（RGB(113,181,255)）。原版选中单位不画外框，
+// 所以叠加层里不该出现这个颜色；出现就说明外框又回来了。
+bool hasRuntimeSelectionFrameColor(const std::uint32_t* pixels, std::size_t count) {
+    const std::uint32_t pen =
+        static_cast<std::uint32_t>(RGB(113, 181, 255)) & 0x00FFFFFFU;
+    for (std::size_t index = 0; index < count; ++index) {
+        if ((pixels[index] & 0x00FFFFFFU) == pen) return true;
+    }
+    return false;
+}
+}
+
 bool runRuntimeIdleOverlayContract(RuntimeWindowState& live, std::string& error) {
     if (!runRuntimePaintTechTreeMemoContract(live, error)) return false;
     if (!runRuntimeSelectedPathBatchPixelContract(error)) return false;
     if (!runRuntimeSelectedPathRasterPixelContract(error)) return false;
-    if (!runRuntimeSelectionFrameRasterContract(error)) return false;
     if (!runRuntimeHealthPipStripPixelContract(error)) return false;
     const auto fail = [&](const std::string& reason) {
         error = "idle interaction overlay: " + reason;
@@ -162,7 +173,6 @@ bool runRuntimeIdleOverlayContract(RuntimeWindowState& live, std::string& error)
     };
     const auto draw = [&](RuntimeBackBuffer& target, bool forceProjection) {
         RuntimeSelectedPathRasterReferenceScope pathRasterPath(forceProjection);
-        RuntimeSelectionFrameReferenceScope selectionFramePath(forceProjection);
         RuntimeHealthPipStripReferenceScope healthPipPath(forceProjection);
         if (coldCamera) probe.camera = {};
         probe.projectedObjectsCache.clear();
@@ -238,7 +248,59 @@ bool runRuntimeIdleOverlayContract(RuntimeWindowState& live, std::string& error)
             || (scenario == 8 && (lazyCounters[1] != 1 || lazyCounters[2] != 1))) {
             return fail(std::string(names[scenario]) + " did not draw its expected visible overlay");
         }
+        // 原版选中单位没有外框、没有中心十字：整幅叠加层里不该出现选中框的蓝色画笔。
+        if (hasRuntimeSelectionFrameColor(lazyPixels, pixelCount)) {
+            return fail(std::string(names[scenario]) + " still paints the unit selection frame");
+        }
     }
+    // 矿车：原版只画血条 + 载矿格，且载矿条只有有矿的格子才占位。
+    // 空载时血条下面一格都不该出现，满载时才排到容量上限。
+    coldCamera = false;
+    probe.world.accessObjects().clear();
+    probe.selectedObjectIds.clear();
+    probe.repairingStructureTicks.clear();
+    probe.mouseClientPointValid = false;
+    const auto* harvesterRules = probe.rules.findUnitType("UnitType", "HARV");
+    if (harvesterRules == nullptr) return fail("stock HARV rules are required");
+    WorldObjectInstance miner = tank;
+    miner.instanceId = 810003;
+    miner.type = "HARV";
+    miner.health = std::max(1, harvesterRules->strength);
+    miner.veterancy = 0;
+    probe.world.accessObjects() = {miner};
+    probe.selectedObjectIds.push_back(miner.instanceId);
+    probe.projectedObjectsCache.clear();
+    invalidateRuntimeObjectProjectionCache(probe);
+    auto& minerTask = probe.harvesterTasks[miner.instanceId];
+    minerTask.cargoCapacity = 40;
+    minerTask.cargoUnits = 0;
+    const auto drawMiner = [&](RuntimeBackBuffer& target) {
+        draw(target, true);
+        return static_cast<const std::uint32_t*>(target.pixels);
+    };
+    {
+        const std::uint32_t* minerPixels = drawMiner(buffers.lazy);
+        if (probe.lastUnitSelectionFrames != 1 || probe.lastSelectedHealthBars != 1
+            || probe.lastSelectedCargoPipSegments != 0
+            || hasRuntimeSelectionFrameColor(minerPixels, pixelCount)) {
+            return fail("empty harvester drew extra pips or a selection frame");
+        }
+        minerTask.cargoUnits = 20;
+        minerPixels = drawMiner(buffers.lazy);
+        if (probe.lastSelectedCargoPipSegments != 5
+            || probe.lastSelectedCargoPipFilledSegments != 5
+            || hasRuntimeSelectionFrameColor(minerPixels, pixelCount)) {
+            return fail("half-loaded harvester did not draw five cargo pips");
+        }
+        minerTask.cargoUnits = 40;
+        minerPixels = drawMiner(buffers.lazy);
+        if (probe.lastSelectedCargoPipSegments != 10
+            || probe.lastSelectedCargoPipFilledSegments != 10
+            || hasRuntimeSelectionFrameColor(minerPixels, pixelCount)) {
+            return fail("full harvester did not draw the capped ten cargo pips");
+        }
+    }
+    probe.harvesterTasks.clear();
     // Commands retain their selection: a moving army paints many health pips
     // even when nothing is hovered. Compare the full uncached resource lookup
     // path with this paint's memo across health, rank and observer changes.
