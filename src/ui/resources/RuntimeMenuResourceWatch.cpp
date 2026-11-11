@@ -22,7 +22,19 @@ namespace fs = std::filesystem;
 fs::path absolutePath(const fs::path& path) {
     std::error_code error;
     const fs::path absolute = fs::absolute(path, error);
-    return error ? path : absolute.lexically_normal();
+    if (error) return path;
+    fs::path normalized = absolute.lexically_normal();
+    // lexically_normal() keeps a trailing separator when the last element was
+    // "..": "/a/b/nested/.." normalises to "/a/b/" (measured, libc++ and MSVC
+    // both). path comparison is element-wise, so "/a/b/" != "/a/b" and
+    // sameRoots() would reject a root the caller spelled with "..". Strip the
+    // empty final element, but never strip a root ("/" or "C:\").
+    while (normalized.filename().empty()
+        && normalized != normalized.root_path()
+        && normalized.has_parent_path()) {
+        normalized = normalized.parent_path();
+    }
+    return normalized;
 }
 
 RuntimeMenuResourcePaths configPaths(const RuntimeConfig& config) {

@@ -38,6 +38,7 @@
 // `HANDLE GetCurrentThread()` 直接冲突，报错信息离真正原因很远。
 #include <FSEvents/FSEvents.h>
 #include <dispatch/dispatch.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -133,6 +134,17 @@ HANDLE FindFirstChangeNotificationW(LPCWSTR lpPathName, BOOL bWatchSubtree, DWOR
     if (::access(path.c_str(), F_OK) != 0) {
         concord_compat::setLastError(ERROR_PATH_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
+    }
+    // Win32 要求这个入参是**目录**，传普通文件会失败。FSEvents 不挑，它会照单
+    // 全收下并"正常"watch 一个文件——于是调用方会得到"树是新鲜的"这种错误认证。
+    // 实测症状：菜单资源契约的 "regular file cannot establish tree freshness" 恒红。
+    // 对齐 Win32：非目录一律拒绝，调用方据此走"不认证、必须重载"。
+    {
+        struct stat info {};
+        if (::stat(path.c_str(), &info) != 0 || !S_ISDIR(info.st_mode)) {
+            concord_compat::setLastError(ERROR_INVALID_PARAMETER);
+            return INVALID_HANDLE_VALUE;
+        }
     }
     if (!bWatchSubtree) {
         // 见文件头"有意偏离 1"：FSEvents 没有单层模式，按子树处理（多报不漏报）。
