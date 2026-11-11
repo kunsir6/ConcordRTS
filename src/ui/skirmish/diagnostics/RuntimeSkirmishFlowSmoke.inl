@@ -150,10 +150,31 @@ bool runRuntimeSkirmishFlowSmoke(
     if (state.selectedMap != chosenMap)
         return fail("returning to Lobby lost the chosen map");
 
-    std::cout << "Skirmish flow: checks=5 failures=0"
-              << " pages=Lobby->MapSelection->Lobby"
+    // ---- 切片 2：点 Start 发起开局 ----
+    //
+    // 实测口径（诊断一次拿到的）：点 Start 之后 closing=1、childAlive=0、map 保持。
+    // 也就是说 Start 的语义是「关闭大厅窗口并把结果交回上层」，
+    // **不在这里**进入加载页/游戏内——那两步由 RuntimeMain 在窗口关闭后启动。
+    // 所以本切片的断言只能是"开场被发起且参数没丢"，
+    // 加载页与游戏内首帧属 ON-4-02d（跨 TU）。
+    const auto* start = nthHitOfKind(HitKind::Start, 0);
+    if (start == nullptr) return fail("Lobby does not expose Start");
+    clickAt(toClient(centreOf(start->rect)));
+
+    if (!waitFor([&] { return state.closing; }, 5000))
+        return fail("posted click on Start did not begin closing the lobby");
+    if (state.selectedMap != chosenMap)
+        return fail("Start cleared the chosen map before handing off (map="
+            + std::to_string(state.selectedMap) + " expected=" + std::to_string(chosenMap) + ")");
+    // 窗口必须真的退场：只 closing 而窗口还在，等于"点了没反应"的另一种形态。
+    if (!waitFor([&] { return !IsWindow(guard.child); }, 5000))
+        return fail("lobby window is still alive after Start (closing flag without destruction)");
+
+    std::cout << "Skirmish flow: checks=6 failures=0"
+              << " pages=Lobby->MapSelection->Lobby->Start"
               << " rows=" << rows
               << " mapBefore=" << beforeMap
-              << " mapChosen=" << chosenMap << "\n";
+              << " mapChosen=" << chosenMap
+              << " closing=1 windowGone=1\n";
     return true;
 }
