@@ -165,6 +165,21 @@ int gCursorSelfTestStage = 0;
 // 收敛器的调用计数与最近一次判定（诊断用：区分"没被调用"和"判成不该隐藏"）。
 int gCursorSyncCalls = 0;
 bool gCursorWantedBlank = false;
+
+// U-11 指针捕获的三态（见 syncGlobalCursorForPointer 后面的长注释）。
+enum PointerState { kPointerFree = 0, kPointerCaptured = 1, kPointerReleased = 2 };
+int gPointerState = kPointerFree;
+// 捕获态的虚拟指针（呈现表面坐标）。硬件指针被冻结，游戏光标靠 delta 推这一个。
+double gVirtualPointerX = 0.0;
+double gVirtualPointerY = 0.0;
+// ⌃⌘ 组合只响应一次（按住不放会连续来 FlagsChanged）。
+bool gCaptureChordSeen = false;
+// 捕获自检的阶段机（CONCORD_CAPTURE_SELFTEST=1）。
+double gCaptureAnchorX = 0.0;
+double gCaptureAnchorY = 0.0;
+int gCaptureSelfTestStage = 0;
+int gCaptureSelfTestTicks = 0;
+int gCaptureSelfTestFailures = 0;
 int gCursorSelfTestTicks = 0;
 int gCursorSelfTestFailures = 0;
 int gCursorSelfTestSkips = 0;
@@ -512,6 +527,15 @@ static bool reportFullScreenAffordance() {
     return ok;
 }
 
+// U-11：delegate 里要用（失焦放人），声明放在这里免得调用点看不见。
+namespace concord_compat::apple {
+static void capturePointer();
+static void releasePointer();
+static NSPoint screenPointForSurfacePoint(double surfaceX, double surfaceY);
+static void advanceVirtualPointer(double dx, double dy);
+static void ensurePointerAssociationRestored();
+}  // namespace concord_compat::apple
+
 @implementation ConcordWindowCloseDelegate
 // U-05：窗口成为 key 时**重新**挂一次 cursor rect。
 //
@@ -531,6 +555,9 @@ static bool reportFullScreenAffordance() {
 - (void)windowDidResignKey:(NSNotification*)note {
     (void)note;
     concord_compat::clearModifierKeyDown();
+    // U-11：捕获态下失焦必须放人。否则用户在别的应用里会遇到"鼠标不能动"，
+    // 而他根本不知道是被谁抓的。
+    if (gPointerState == kPointerCaptured) concord_compat::apple::releasePointer();
 }
 
 - (BOOL)windowShouldClose:(NSWindow*)sender {
@@ -657,6 +684,11 @@ namespace concord_compat::apple {
 
 // U-10：系统指针收敛器（定义在文件后部，pump 与 present 都要用）。
 static void syncGlobalCursorForPointer();
+// U-11：指针捕获（同上，emit/present/delegate 都要用）。
+static void capturePointer();
+static void releasePointer();
+static void advanceVirtualPointer(double dx, double dy);
+static void ensurePointerAssociationRestored();
 
 void present(const Surface& surface) {
     if (surface.pixels == nullptr || surface.width <= 0 || surface.height <= 0) return;
@@ -769,6 +801,8 @@ void present(const Surface& surface) {
                 [gWindow invalidateCursorRectsForView:gView];
             }
 
+            // U-11：关联开关是进程级的，异常退出也必须恢复，否则整机鼠标不能动。
+            std::atexit(ensurePointerAssociationRestored);
             [gWindow center];
             [gWindow makeKeyAndOrderFront:nil];
             [NSApp activateIgnoringOtherApps:YES];
@@ -1109,6 +1143,76 @@ void present(const Surface& surface) {
             }
         }
 
+        // U-11：指针捕获自证（CONCORD_CAPTURE_SELFTEST=1）。
+        // 判据只有一条物理事实：捕获之后 CGWarpMouseCursorPosition 推不动指针，
+        // 释放之后又能推动。这比"看日志里有没有打印"硬得多——它证明的是
+        // CGAssociateMouseAndMouseCursorPosition 真的生效且真的被恢复了。
+        if (gCaptureSelfTestStage == 0) {
+            const char* capTest = std::getenv("CONCORD_CAPTURE_SELFTEST");
+            if (capTest != nullptr && capTest[0] == '1' && gInputSink != nullptr) {
+                gCaptureSelfTestStage = 1;
+                gCaptureSelfTestTicks = 0;
+            }
+        }
+        if (gCaptureSelfTestStage > 0) {
+            ++gCaptureSelfTestTicks;
+            const double expectX = (gPresentedWidth > 0 ? gPresentedWidth : 2) / 2.0 + 37.0;
+            const double expectY = (gPresentedHeight > 0 ? gPresentedHeight : 2) / 2.0 + 21.0;
+            if (gCaptureSelfTestStage == 1 && gCaptureSelfTestTicks > 3) {
+                capturePointer();
+                gCaptureSelfTestTicks = 0;
+                gCaptureSelfTestStage = 2;
+            } else if (gCaptureSelfTestStage == 2 && gCaptureSelfTestTicks > 3) {
+                // 捕获态下"指针不动"没法用 warp 验（warp 是显式定位，绕过关联开关）。
+                // 能验的是我们自己那一半：delta 进来之后虚拟指针有没有按预期推进、
+                // 并且被夹在表面内。这里投一条带 delta 的合成 mouseMoved 事件。
+                CGEventRef cg = CGEventCreateMouseEvent(
+                    nullptr, kCGEventMouseMoved, CGPointZero, kCGMouseButtonLeft);
+                CGEventSetIntegerValueField(cg, kCGMouseEventDeltaX, 37);
+                CGEventSetIntegerValueField(cg, kCGMouseEventDeltaY, -21);
+                NSEvent* synthetic = [NSEvent eventWithCGEvent:cg];
+                CFRelease(cg);
+                [NSApp postEvent:synthetic atStart:NO];
+                gCaptureSelfTestTicks = 0;
+                gCaptureSelfTestStage = 3;
+            } else if (gCaptureSelfTestStage == 3 && gCaptureSelfTestTicks > 6) {
+                const bool advanced = std::fabs(gVirtualPointerX - expectX) < 1.5
+                    && std::fabs(gVirtualPointerY - expectY) < 1.5;
+                if (!advanced) ++gCaptureSelfTestFailures;
+                cursorSelfTestLog(
+                    "[capture] delta virtual=%.0f,%.0f expect=%.0f,%.0f ok=%d\n",
+                    gVirtualPointerX, gVirtualPointerY, expectX, expectY,
+                    advanced ? 1 : 0);
+                // 释放：先把虚拟指针放回表面中心，再做位置断言（避免夹边干扰）
+                gVirtualPointerX = (gPresentedWidth > 0 ? gPresentedWidth : 2) / 2.0;
+                gVirtualPointerY = (gPresentedHeight > 0 ? gPresentedHeight : 2) / 2.0;
+                releasePointer();
+                const NSPoint want = screenPointForSurfacePoint(
+                    gVirtualPointerX, gVirtualPointerY);
+                gCaptureAnchorX = want.x;
+                gCaptureAnchorY = want.y;
+                gCaptureSelfTestTicks = 0;
+                gCaptureSelfTestStage = 4;
+            } else if (gCaptureSelfTestStage == 4 && gCaptureSelfTestTicks > 4) {
+                const NSPoint now = currentPointerScreenPoint();
+                const double dx = std::fabs(now.x - gCaptureAnchorX);
+                const double dy = std::fabs(now.y - gCaptureAnchorY);
+                // 释放应当把硬件指针"接"到游戏光标处；容差放宽到 4px（窗口/背板取整）
+                const bool landed = dx <= 4.0 && dy <= 4.0;
+                if (!landed) ++gCaptureSelfTestFailures;
+                cursorSelfTestLog(
+                    "[capture] release landed=%d want=%.0f,%.0f now=%.0f,%.0f state=%d ok=%d\n",
+                    landed ? 1 : 0, gCaptureAnchorX, gCaptureAnchorY, now.x, now.y,
+                    gPointerState, landed ? 1 : 0);
+                cursorSelfTestLog("[capture] done: failures=%d\n", gCaptureSelfTestFailures);
+                std::fflush(stderr);
+                // _Exit 不跑 atexit：必须在这里自己恢复，否则自测失败时用户的
+                // 鼠标会一直冻着（这正是本轮最怕的失效模式）。
+                ensurePointerAssociationRestored();
+                std::_Exit(gCaptureSelfTestFailures == 0 ? 0 : 1);
+            }
+        }
+
         // U-10：每帧都收敛一次系统指针。放在 present 末尾而不是只靠 pumpEvents——
         // 主菜单在 GetMessageW 上阻塞时，pump 可能几秒才转一次，指针离开窗口后
         // 空图会滞留；present 至少是"画面在动就一定会跑到"的地方。
@@ -1121,6 +1225,8 @@ int onscreenAttestRecords() { return gAttestRecords; }
 
 void shutdown() {
     @autoreleasepool {
+        // U-11：收摊前必须把鼠标关联恢复，否则进程退出后整机指针被冻住。
+        ensurePointerAssociationRestored();
         // 只 flush 不 close：一个 smoke 入口里可能连续跑多个界面，中间会
         // shutdown/重建窗口；关掉文件会让后半个进程静默停止取证。
         // 进程结束由 OS 回收这个 FILE*（与 compat 句柄表同样的取舍）。
@@ -1207,6 +1313,33 @@ static void syncModifierState(NSEventModifierFlags flags) {
 
 void emit(NSEvent* event) {
     if (gInputSink == nullptr || gView == nil) return;
+
+    // U-11：⌃⌘ 组合先于一切处理——它是"把手从游戏里抽出来"的开关，不能先喂给游戏
+    // （否则 Ctrl 会被当成强制攻击的修饰键按下去）。
+    //   · 捕获态：只要出现 ⌃⌘ 就释放；
+    //   · 自由态：⌃⌘G 进入捕获（单按 ⌃⌘ 不抓，避免和系统快捷键抢）。
+    {
+        const NSEventModifierFlags mods = event.modifierFlags;
+        const bool both = (mods & NSEventModifierFlagControl) != 0
+            && (mods & NSEventModifierFlagCommand) != 0;
+        if (both) {
+            if (gPointerState == kPointerCaptured) {
+                releasePointer();
+                gCaptureChordSeen = true;
+                return;
+            }
+            if (!gCaptureChordSeen && event.type == NSEventTypeKeyDown
+                && [[event.charactersIgnoringModifiers lowercaseString] isEqualToString:@"g"]) {
+                gCaptureChordSeen = true;
+                capturePointer();
+                return;
+            }
+            gCaptureChordSeen = true;
+            return;  // 其余 ⌃⌘ 组合仍然吞掉，别让游戏看到 Ctrl 按下
+        }
+        gCaptureChordSeen = false;
+    }
+
     // 先同步修饰键，再翻译事件：窗口过程处理这条消息时要读到正确的 Ctrl/Shift。
     syncModifierState(event.modifierFlags);
 
@@ -1232,12 +1365,34 @@ void emit(NSEvent* event) {
         default: return;  // FlagsChanged / 窗口事件等一律忽略
     }
 
+    // U-11：释放态下"点回游戏窗口"就自动再抓（VMware 同款直觉：点哪儿抓哪儿）。
+    // 先把虚拟指针落到点击位置，再进捕获——否则会从表面中心跳一下。
+    if (gPointerState == kPointerReleased
+        && (event.type == NSEventTypeLeftMouseDown || event.type == NSEventTypeRightMouseDown)) {
+        int clickX = 0, clickY = 0;
+        const NSPoint local = [gView convertPoint:event.locationInWindow fromView:nil];
+        mapViewPointToSurface(local.x, local.y, clickX, clickY);
+        capturePointer();
+        gVirtualPointerX = clickX;
+        gVirtualPointerY = clickY;
+    }
+
     // 坐标：AppKit 的原点在左下，客户区 DIB 的原点在左上，所以要翻 y。
     // 不翻的话点击会落在垂直镜像的位置——菜单上点"单人游戏"会命中"退出"。
     // 翻转+缩放都收在 mapViewPointToSurface 里（U-09 补缩放，见其注释）。
+    //
+    // U-11 捕获态例外：硬件指针被冻结，event.locationInWindow 恒为冻结时的那个点，
+    // 只有 deltaX/deltaY 还在动。所以捕获时用**虚拟指针**（表面坐标，delta 累积、
+    // 夹在表面内）作为游戏光标位置——这正是 Windows 上全屏 RA2 的手感。
     if (type != NSEventTypeKeyDown && type != NSEventTypeKeyUp) {
-        const NSPoint local = [gView convertPoint:event.locationInWindow fromView:nil];
-        mapViewPointToSurface(local.x, local.y, out.x, out.y);
+        if (gPointerState == kPointerCaptured) {
+            advanceVirtualPointer(event.deltaX, event.deltaY);
+            out.x = static_cast<int>(std::lround(gVirtualPointerX));
+            out.y = static_cast<int>(std::lround(gVirtualPointerY));
+        } else {
+            const NSPoint local = [gView convertPoint:event.locationInWindow fromView:nil];
+            mapViewPointToSurface(local.x, local.y, out.x, out.y);
+        }
     }
 
     if (type == NSEventTypeScrollWheel) {
@@ -1308,13 +1463,88 @@ static void syncGlobalCursorForPointer() {
     ++gCursorSyncCalls;
     if (gWindow == nil || gView == nil) return;
     NSCursor* blank = concordInvisibleCursor();
-    const bool wantBlank = gSystemCursorHidden && pointerIsOverOurWindow();
+    // 释放态（用户按了 ⌃⌘）下不隐藏：那时系统箭头就是他要的那个指针。
+    const bool wantBlank = gSystemCursorHidden
+        && gPointerState != kPointerReleased
+        && pointerIsOverOurWindow();
     gCursorWantedBlank = wantBlank;
     const bool showingBlank = systemCursorIsBlank();
     if (wantBlank && !showingBlank) {
         if (blank != nil) [blank set];
     } else if (!wantBlank && showingBlank) {
         [[NSCursor arrowCursor] set];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// U-11 指针捕获（按需捕获，用户 2026-11-11 决策）
+//
+// macOS 没有"把光标限制在某个窗口内"的 API，能做"限制"的只有相对模式：
+// CGAssociateMouseAndMouseCursorPosition(false) 之后硬件指针**完全不动**，
+// 由我们自己的虚拟指针吃 NSEvent.deltaX/deltaY 前进——这就是 VMware/所有 Mac
+// 游戏所谓的"抓住鼠标"。所以"指针出不了窗口"的落地形式是"指针停住 + 游戏接管"。
+//
+// 三态：
+//   kPointerFree     默认。指针自由出入，窗口内隐藏系统箭头（U-04/U-10 的常态）。
+//   kPointerCaptured ⌃⌘G 进入。硬件指针钉在窗口中心并冻结，游戏光标随鼠标位移走。
+//   kPointerReleased ⌃⌘ 释放。硬件指针接回游戏光标所在处并恢复关联，系统箭头可见，
+//                    游戏光标停在原地等下一次点击/⌃⌘G。
+// 为什么默认不捕获：窗口模式常用于边玩边切应用，一进游戏就抓住会让人以为鼠标坏了；
+// 全屏则根本不需要捕获——窗口就是屏幕，指针本来出不去。
+// ---------------------------------------------------------------------------
+// 表面坐标 → 屏幕坐标（释放时把硬件指针"接"到游戏光标处）
+static NSPoint screenPointForSurfacePoint(double surfaceX, double surfaceY) {
+    const double surfaceW = gPresentedWidth > 0 ? gPresentedWidth : 1.0;
+    const double surfaceH = gPresentedHeight > 0 ? gPresentedHeight : 1.0;
+    const double viewW = gView != nil ? gView.bounds.size.width : surfaceW;
+    const double viewH = gView != nil ? gView.bounds.size.height : surfaceH;
+    const NSPoint local = NSMakePoint(surfaceX * viewW / surfaceW, viewH - surfaceY * viewH / surfaceH);
+    const NSPoint inWindow = gView != nil ? [gView convertPoint:local toView:nil] : local;
+    return gWindow != nil ? [gWindow convertPointToScreen:inWindow] : inWindow;
+}
+
+// 虚拟指针推进（捕获态专用）。dx/dy 是 NSEvent 的 delta（点，y 轴朝上），
+// 转到表面坐标要翻 y 并夹在表面内——夹边是刻意的：拖到边上就贴住，不会溢出。
+static void advanceVirtualPointer(double dx, double dy) {
+    const double surfaceW = gPresentedWidth > 0 ? gPresentedWidth : 1.0;
+    const double surfaceH = gPresentedHeight > 0 ? gPresentedHeight : 1.0;
+    gVirtualPointerX += dx;
+    gVirtualPointerY -= dy;
+    if (gVirtualPointerX < 0.0) gVirtualPointerX = 0.0;
+    if (gVirtualPointerY < 0.0) gVirtualPointerY = 0.0;
+    if (gVirtualPointerX > surfaceW - 1.0) gVirtualPointerX = surfaceW - 1.0;
+    if (gVirtualPointerY > surfaceH - 1.0) gVirtualPointerY = surfaceH - 1.0;
+}
+
+static void capturePointer() {
+    if (gWindow == nil || gPointerState == kPointerCaptured) return;
+    // 先把硬件指针钉到窗口中心：随后它就不动了，放在中心最不容易在视觉上"卡在角落"。
+    const NSRect frame = gWindow.frame;
+    warpPointerToScreenPoint(NSMidX(frame), NSMidY(frame));
+    // 虚拟指针从游戏光标当前位置接手（表面中心是安全默认）。
+    gVirtualPointerX = (gPresentedWidth > 0 ? gPresentedWidth : 2) / 2.0;
+    gVirtualPointerY = (gPresentedHeight > 0 ? gPresentedHeight : 2) / 2.0;
+    CGAssociateMouseAndMouseCursorPosition(false);
+    gPointerState = kPointerCaptured;
+    std::fprintf(stderr, "[capture] captured\n");
+}
+
+static void releasePointer() {
+    if (gPointerState != kPointerCaptured) return;
+    // 顺序很关键：先恢复关联，再把指针挪到游戏光标处，否则挪了也不生效。
+    CGAssociateMouseAndMouseCursorPosition(true);
+    const NSPoint target = screenPointForSurfacePoint(gVirtualPointerX, gVirtualPointerY);
+    warpPointerToScreenPoint(target.x, target.y);
+    gPointerState = kPointerReleased;
+    std::fprintf(stderr, "[capture] released pointer=%.0f,%.0f\n", target.x, target.y);
+}
+
+// 无论如何都要把关联恢复回去：这个开关一旦留在 false，用户的鼠标就"不能动"了
+// （只能强杀进程）。所以除了正常释放路径，再挂一条 atexit 兜底。
+static void ensurePointerAssociationRestored() {
+    if (gPointerState == kPointerCaptured) {
+        CGAssociateMouseAndMouseCursorPosition(true);
+        gPointerState = kPointerFree;
     }
 }
 
