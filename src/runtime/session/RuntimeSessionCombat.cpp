@@ -10498,6 +10498,82 @@ const WorldObjectInstance* runtimeFlakImpactBodyTarget(
     return nearest;
 }
 
+// Retail CanRetaliate: a damaged, currently-idle unit fires back at its
+// attacker when the attacker is hostile, visible and inside the victim's
+// weapon range. Together with passive guard acquisition (which never locks a
+// structure) this is the only automatic channel that may target a building,
+// so a tank shelled by a Tesla coil still returns fire without a player order.
+bool runtimeBeginDamageRetaliation(
+    RuntimeProductionHostState& state,
+    WorldObjectInstance& victim,
+    const WorldObjectInstance& attacker) {
+    if (!victim.alive || victim.health <= 0 || !attacker.alive
+        || attacker.health <= 0) {
+        return false;
+    }
+    if (victim.kind != WorldObjectKind::Infantry
+        && victim.kind != WorldObjectKind::Unit) {
+        return false;
+    }
+    if (victim.airborne || victim.tankBunkerHostId >= 0
+        || runtimeObjectIsEnslavedSlaveWorker(state, victim)
+        || runtimeMissionIsDeploying(victim)
+        || runtimeMissionIsUndeploying(victim)
+        || runtimeOwnerIsNeutralForAutoTarget(victim.owner)
+        || runtimeComputerAiPausedForOwner(state, victim.owner)
+        || !runtimeObjectHasOperationalPower(state, victim)) {
+        return false;
+    }
+    const bool travellingAcquire = runtimePlayerTravellingCanAcquire(state, victim);
+    const auto existingBehavior = state.behaviors.find(victim.instanceId);
+    if (!travellingAcquire && existingBehavior != state.behaviors.end()) {
+        return false;
+    }
+    const auto* victimType = findRuntimeUnitType(state.rules, victim);
+    if (victimType == nullptr || !victimType->canRetaliate) {
+        return false;
+    }
+    if (!runtimeOwnersAreHostileForAutoTarget(state, victim.owner, attacker.owner)
+        || !runtimeObjectVisibleToOwner(state, victim.owner, attacker)
+        || runtimeSpyDisguiseConcealsFromObject(state, victim, attacker)) {
+        return false;
+    }
+    const RuntimeWeaponProfile profile =
+        runtimeWeaponProfileForObject(state, victim, &attacker);
+    if (profile.weapon == nullptr || profile.weapon->damage <= 0
+        || !runtimeWeaponHasAttackRange(*profile.weapon)) {
+        return false;
+    }
+    const double distance =
+        runtimeWeaponDistanceToTarget(state, victim, attacker, *profile.weapon);
+    if (distance > runtimeEffectiveWeaponRange(state, victim, attacker, *profile.weapon)
+        + 0.001) {
+        return false;
+    }
+    RuntimeObjectBehavior behavior;
+    behavior.kind = RuntimeBehaviorKind::Attack;
+    behavior.state = RuntimeBehaviorState::Queued;
+    behavior.targetObjectId = attacker.instanceId;
+    behavior.autoAcquired = true;
+    behavior.returnToDeployed =
+        runtimeObjectHasDeployedState(state, victim);
+    if (travellingAcquire) {
+        cancelRuntimeCombatFire(state, victim.instanceId);
+        eraseRuntimeBehavior(state, victim.instanceId);
+    }
+    departRuntimeAircraftDock(state, victim);
+    victim.mission = behavior.returnToDeployed
+        ? "DeployedFire"
+        : runtimeMissionName(RuntimeMissionIntent::Attacking);
+    state.behaviors[victim.instanceId] = std::move(behavior);
+    state.simulationStatus =
+        "retaliation acquired #"
+        + std::to_string(victim.instanceId)
+        + " -> #"
+        + std::to_string(attacker.instanceId);
+    return true;
+}
+
 bool applyRuntimeProjectileImpact(
     RuntimeProductionHostState& state,
     const RuntimeProjectileEffect& projectile,
@@ -11338,7 +11414,11 @@ bool applyRuntimeProjectileImpact(
         if (candidate.health < healthBeforeDamage) {
             runtimeRevealObjectAfterDamage(state, candidate, "damage");
             noteRuntimeTeamMemberDamaged(state, candidate.instanceId, projectile.attackerObjectId);
-            (void)beginRuntimePanic(state, candidate, false, projectile.fromCell.x, projectile.fromCell.y);
+            const bool panicked = beginRuntimePanic(
+                state, candidate, false, projectile.fromCell.x, projectile.fromCell.y);
+            if (!panicked) {
+                (void)runtimeBeginDamageRetaliation(state, candidate, *attacker);
+            }
         }
         ++damagedObjects;
         totalDamage += damage;

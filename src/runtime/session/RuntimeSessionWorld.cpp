@@ -28678,8 +28678,14 @@ bool advanceRuntimeGuardBehavior(RuntimeProductionHostState& state) {
                     continue;
                 }
                 for (const WorldObjectInstance* target : bucketIt->second) {
+                    // Retail passive acquisition never locks a structure: idle
+                    // and attack-moving units engage movable targets only, and
+                    // an enemy building (armed defense tower included) is
+                    // attacked solely through an explicit player order or the
+                    // damage retaliation path.
                     if (target == nullptr
                         || target->instanceId == object.instanceId
+                        || target->kind == WorldObjectKind::Structure
                         || !runtimePlayerGuardDestinationAllowsTarget(state, object, *target)
                         || (!activePsychicStatus
                             && !runtimeOwnersAreHostileForAutoTarget(
