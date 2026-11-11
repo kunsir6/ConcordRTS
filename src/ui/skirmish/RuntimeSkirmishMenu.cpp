@@ -4228,22 +4228,31 @@ RuntimeSkirmishSelection runRuntimeSkirmishMenu(const RuntimeConfig& config,Runt
     MSG message{};
     while (IsWindow(window)) {
         if (autoStartAfter > 0 && !autoStartPosted && ++autoStartIterations >= autoStartAfter) {
-            autoStartPosted = true;
             const HitRegion* startHit = nullptr;
             for (const HitRegion& hit : state.hits) {
                 if (hit.target.kind == HitKind::Start) { startHit = &hit; break; }
             }
             if (startHit == nullptr) {
-                std::cerr << "[autostart] Start button not in layout: hits="
-                          << state.hits.size() << "\n";
+                // 布局还没建好（实测第 5 轮时 hits 只有 19 项、不含 Start）。
+                // 不消耗这次机会，等下一轮；但设上限，避免真缺按钮时无声空转。
+                if (autoStartIterations == autoStartAfter) {
+                    std::cerr << "[autostart] Start not in layout yet (hits="
+                              << state.hits.size() << "), retrying\n";
+                }
+                if (autoStartIterations > autoStartAfter + 600) {
+                    autoStartPosted = true;
+                    std::cerr << "[autostart] gave up: Start never appeared (hits="
+                              << state.hits.size() << ")\n";
+                }
             } else {
+                autoStartPosted = true;
                 const POINT baseCentre{(startHit->rect.left + startHit->rect.right) / 2,
                     (startHit->rect.top + startHit->rect.bottom) / 2};
                 const POINT client{
                     state.viewLeft + baseCentre.x * state.viewWidth / kBaseWidth,
                     state.viewTop + baseCentre.y * state.viewHeight / kBaseHeight};
                 std::cout << "[autostart] posting Start click at " << client.x << ","
-                          << client.y << "\n";
+                          << client.y << " (after " << autoStartIterations << " iterations)\n";
                 PostMessageW(window, WM_MOUSEMOVE, 0, MAKELPARAM(client.x, client.y));
                 PostMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON,
                     MAKELPARAM(client.x, client.y));
