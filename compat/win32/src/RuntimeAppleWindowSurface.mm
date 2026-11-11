@@ -85,6 +85,8 @@ int gAttestFailures = 0;
 int gAttestRecords = 0;
 int gAttestState = 0;  // 0=未探测 1=开 2=关
 int gAttestLimit = 1;
+int gAttestScaleTest = 0;
+bool gScaleTestDone = false;
 std::string gAttestDir;
 std::FILE* gAttestLog = nullptr;
 
@@ -124,6 +126,11 @@ void attestEnsureOpen() {
     if (const char* limit = std::getenv("CONCORD_ONSCREEN_ATTEST_LIMIT")) {
         const int value = std::atoi(limit);
         if (value > 0) gAttestLimit = value;
+    }
+    // ON-2-03 验收：把窗口按 1.7 倍缩放，检查 contentsScale 仍跟随 backing scale、
+    // 内容没有被重采样、且"上次呈现尺寸"没有被用户缩放污染。
+    if (const char* scaleTest = std::getenv("CONCORD_ONSCREEN_ATTEST_SCALE")) {
+        gAttestScaleTest = scaleTest[0] == '1';
     }
     std::fseek(gAttestLog, 0, SEEK_END);
     if (std::ftell(gAttestLog) == 0) {
@@ -191,6 +198,44 @@ void attestPresent(const concord_compat::apple::Surface& surface) {
             gWindow.frame.size.width, gWindow.frame.size.height,
             gView.layer.contents != nil ? "set" : "nil");
         std::fflush(gAttestLog);
+
+        // ON-2-03 缩放验收（CONCORD_ONSCREEN_ATTEST_SCALE=1）。程序化改 frame 等价于
+        // 用户拖动：变的是 window.frame，surface 不变。四项断言各自对应一个可能的
+        // 回归——scale 掉回 1.0（画面糊）、view 没跟着变大（没铺满）、内容被重采样
+        // （hash 变）、呈现尺寸被用户缩放污染（下次换界面被掰回）。
+        // 只做一次：每帧放大 1.7 倍会让窗口尺寸指数爆炸（1024 → 1741 → 2960 …）。
+        // 注意"换界面时 setContentSize 覆盖用户缩放"这一条**没有**在本进程里触发：
+        // 各入口的 surface 尺寸在单次运行内是固定的（20 帧全是 800x600），要等
+        // ON-3-01b 的多界面脚本才测得到。这里只能钉住它的前提——
+        // presentedSizeUnchanged：用户缩放不得污染 gPresentedWidth/Height。
+        if (gAttestScaleTest && !gScaleTestDone && attachedMatchesSurface) {
+            gScaleTestDone = true;
+            const NSRect before = gWindow.frame;
+            [gWindow setFrame:NSMakeRect(before.origin.x, before.origin.y,
+                before.size.width * 1.7, before.size.height * 1.7) display:YES];
+            [gView layoutSubtreeIfNeeded];
+            const NSSize viewSize = gView.bounds.size;
+            const CGFloat scale = gView.layer.contentsScale;
+            const bool scaleOk = std::fabs(scale - gWindow.backingScaleFactor) < 0.001;
+            const bool filled = viewSize.width > surface.width * 1.5
+                && viewSize.height > surface.height * 1.5;
+            const bool contentUnchanged = drawHash() == dibHash;
+            const char* gravity = [gView.layer.contentsGravity isEqualToString:kCAGravityResize]
+                ? "resize" : "other";
+            const bool presentedUnchanged = gPresentedWidth == surface.width
+                && gPresentedHeight == surface.height;
+            const bool ok = scaleOk && filled && contentUnchanged && presentedUnchanged;
+            if (!ok) ++gAttestFailures;
+            std::fprintf(gAttestLog,
+                "# scale-test frame=%.0fx%.0f view=%.0fx%.0f contentsScale=%.1f gravity=%s"
+                " contentUnchanged=%s presentedSizeUnchanged=%s result=%s\n",
+                gWindow.frame.size.width, gWindow.frame.size.height,
+                viewSize.width, viewSize.height, static_cast<double>(scale), gravity,
+                contentUnchanged ? "yes" : "no", presentedUnchanged ? "yes" : "no",
+                ok ? "pass" : "fail");
+            std::fflush(gAttestLog);
+        }
+
         if (gAttestRecords >= gAttestLimit) {
             // 就在 present 里退出，不排队等 pumpEvents：世界视图的主循环不经过
             // 那条路径（实测首帧之后 pumpEvents 不再被调用，进程一直挂着）。
@@ -242,8 +287,14 @@ void present(const Surface& surface) {
         if (gWindow == nil) {
             const NSRect contentRect =
                 NSMakeRect(0, 0, surface.width, surface.height);
+            // ON-2-03：Resizable 是用户决策（缩放取"任意拉伸铺满"，不做整数倍 letterbox）。
+            // 加了这个位之后，用户拖动窗口改变的是 window.frame，**不改变 surface**，
+            // 所以下面那个"surface 变了才 setContentSize"的回写不会被拖动触发——
+            // 两者本来就走不同的判据。千万别在 windowDidResize 里补一句回写，
+            // 那会把用户拖出来的尺寸掰回上一次呈现的尺寸。
             const NSWindowStyleMask style = NSWindowStyleMaskTitled
-                | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
+                | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+                | NSWindowStyleMaskResizable;
             gWindow = [[NSWindow alloc] initWithContentRect:contentRect
                                                   styleMask:style
                                                     backing:NSBackingStoreBuffered
