@@ -76799,10 +76799,20 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
         return 1;
     }
     std::string sidebarLowPowerDiagnostic;
-    if (!validateRuntimeSidebarLowPowerIntegration(
-            state,
-            sidebarLowPowerDiagnostic
-        )) {
+    // 探针要验证的是「低电时侧边栏画红条」，前置的「低电」得由夹具自己建立：
+    // 这张零售图上玩家没有耗电建筑，powerUsed 恒 0、net 恒为正。
+    // 临时把已用电抬到超出产量 50，画完立刻还原，避免污染后续断言。
+    const int savedPowerUsed = state.economy.powerUsed;
+    state.economy.powerUsed = std::max(
+        savedPowerUsed,
+        state.economy.powerProduced + 50
+    );
+    const bool sidebarLowPowerOk = validateRuntimeSidebarLowPowerIntegration(
+        state,
+        sidebarLowPowerDiagnostic
+    );
+    state.economy.powerUsed = savedPowerUsed;
+    if (!sidebarLowPowerOk) {
         std::cerr << "Build smoke test failed: sidebar low-power integration "
                   << sidebarLowPowerDiagnostic
                   << ".\n";
