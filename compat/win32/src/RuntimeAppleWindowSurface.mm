@@ -303,6 +303,21 @@ void attestPresent(const concord_compat::apple::Surface& surface) {
 @interface ConcordWindowCloseDelegate : NSObject <NSWindowDelegate>
 @end
 
+// U-03：游戏窗口必须拿到"激活窗口的那一次点击"。
+//
+// NSView 默认 acceptsFirstMouse: 返回 NO —— 窗口从非激活变激活时，系统会把这次
+// 点击当成"激活动作"吃掉，不派发给 view。对普通文档应用这是体贴，对游戏就是
+// "点了没反应，非得再点一下"，而且第二下才开始有反馈，很容易被误判成输入没打通。
+@interface ConcordGameView : NSView
+@end
+
+@implementation ConcordGameView
+- (BOOL)acceptsFirstMouse:(NSEvent*)event {
+    (void)event;
+    return YES;
+}
+@end
+
 @implementation ConcordWindowCloseDelegate
 - (BOOL)windowShouldClose:(NSWindow*)sender {
     (void)sender;
@@ -464,8 +479,13 @@ void present(const Surface& surface) {
                 ? [NSString stringWithUTF8String:title]
                 : @"Command & Conquer: Yuri's Revenge";
 
-            gView = [[NSView alloc] initWithFrame:contentRect];
+            gView = [[ConcordGameView alloc] initWithFrame:contentRect];
             gView.wantsLayer = YES;
+            // U-03：不打开这一位，AppKit 只在按键按住时才派发 mouseDragged，
+            // 平时根本没有 mouseMoved —— 产品的 WM_MOUSEMOVE 就永远不来，
+            // 悬停高亮、tooltip、地图边沿滚动全部失灵（点击本身仍能用，因为
+            // NSEvent 自带坐标，所以更容易被误判成"只有悬停坏了"）。
+            gWindow.acceptsMouseMovedEvents = YES;
             // Resize 让画面随窗口拉伸，而不是居中留黑边——游戏窗口是
             // "把客户区铺满"的语义，不是"按原始尺寸展示图片"。
             gView.layer.contentsGravity = kCAGravityResize;
