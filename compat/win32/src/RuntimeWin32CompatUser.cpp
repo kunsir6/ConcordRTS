@@ -1424,6 +1424,9 @@ BOOL WaitMessage() {
     // 阻塞直到有消息。与 GetMessageW 共用轮询语义；定时器到期与脏窗口也算"有消息"，
     // 否则 WaitMessage 会永久挂住（真实 API 里 WM_TIMER 正是唤醒它的来源之一）。
     for (;;) {
+        // U-01：与 MsgWaitForMultipleObjectsEx 同理——等待期间不排空 AppKit，
+        // 调用方就永远等不到消息（自己的队列只能由 pumpEvents 填充）。
+        concord_compat::apple::pumpEvents();
         {
             std::lock_guard<std::mutex> lock(userMutex());
             if (!messageQueue().empty()) return TRUE;
@@ -1449,6 +1452,21 @@ DWORD MsgWaitForMultipleObjectsEx(DWORD nCount, const HANDLE* pHandles,
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(dwMilliseconds);
     for (;;) {
+        // U-01（2026-11-11）：等待期间必须排空 AppKit 事件。
+        //
+        // 此前只有 GetMessageW 调 pumpEvents，而遭遇战大厅的主循环是
+        // `PeekMessageW + MsgWaitForMultipleObjectsEx(5ms)`，从不经过 GetMessageW，
+        // 于是从大厅打开那一刻起就没有任何人在排空 AppKit 队列：窗口画面停在最初
+        // 那一帧（看着正常），鼠标点击全部躺在 AppKit 里进不来。用户点「開始遊戲」
+        // 时系统来查应用是否响应，直接给彩虹圈——症状看起来像「点了开始就卡死」，
+        // 实际是整段大厅期间不处理事件（采样：主线程 1196/1198 个样本停在
+        // MsgWaitForMultipleObjectsEx 的 sleep_for）。
+        //
+        // 放在这里而不是各调用点：Win32 的 MsgWaitForMultipleObjects 本身就是
+        // 「等待期间处理消息」，语义一致；而且这是平台层文件（Windows 不编译），
+        // 不必在共享的菜单代码里加 #ifdef __APPLE__（方案 §5.2 禁止）。
+        // pumpEvents 自带 gWindow/gInputSink 前置判断，离屏 smoke 下立即返回。
+        concord_compat::apple::pumpEvents();
         {
             std::lock_guard<std::mutex> lock(userMutex());
             if (!messageQueue().empty()) return WAIT_OBJECT_0;
