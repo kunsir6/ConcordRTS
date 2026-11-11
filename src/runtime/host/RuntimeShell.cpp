@@ -76557,6 +76557,36 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
         }
     );
     if (unitIt == state.economy.catalog.end()) {
+        // 只读计量：先分清「夹具里根本没有可排队的生产建筑」与「有建筑但可用性判定恒 false」。
+        int unitItems = 0;
+        int infantryItems = 0;
+        int structureItems = 0;
+        for (const RuntimeBuildCatalogItem& item : state.economy.catalog) {
+            if (item.kind == RuntimeBuildKind::Unit) ++unitItems;
+            else if (item.kind == RuntimeBuildKind::Infantry) ++infantryItems;
+            else ++structureItems;
+        }
+        std::cerr << "  build catalog: total=" << state.economy.catalog.size()
+                  << " unit=" << unitItems << " infantry=" << infantryItems
+                  << " structure=" << structureItems
+                  << " credits=" << state.economy.credits
+                  << " power=" << state.economy.powerProduced << "/"
+                  << state.economy.powerUsed << "\n";
+        int shown = 0;
+        for (const RuntimeBuildCatalogItem& item : state.economy.catalog) {
+            if (item.kind != RuntimeBuildKind::Unit
+                && item.kind != RuntimeBuildKind::Infantry) continue;
+            if (shown >= 8) break;
+            const RuntimeBuildAvailability availability =
+                runtimeBuildAvailability(state, item);
+            std::cerr << "    " << item.typeId
+                      << " queue=" << formatBool(availability.canQueue)
+                      << " start=" << formatBool(availability.canStart)
+                      << " credits=" << formatBool(availability.enoughCredits)
+                      << " lowPower=" << formatBool(availability.lowPower)
+                      << " reason=\"" << availability.reason << "\"\n";
+            ++shown;
+        }
         std::cerr << "Build smoke test failed: no unit/infantry catalog item.\n";
         return 1;
     }
