@@ -75674,6 +75674,13 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
         << " fallback=" << structureHealthFallbackDraws
         << " selection-edge=yes CABHUT=infinite-hidden\n";
 
+    // The default map this smoke loads ships structures and terrain but no
+    // units, so the hovered-unit path had no subject at all: a fixture gap, not
+    // a product defect.  Borrow one owned vehicle exactly like the aquatic
+    // selection probe below (same authored art path), anchor it next to the
+    // selected structure so the camera keeps it on screen, and drop it again
+    // once these assertions are done so every later stage still sees the map
+    // as it shipped.
     const WorldObjectInstance* unitHoverHealthProbe = nullptr;
     for (const WorldObjectInstance& object : state.world.getObjects()) {
         if (object.alive && object.kind != WorldObjectKind::Structure) {
@@ -75681,6 +75688,130 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
             break;
         }
     }
+    std::optional<std::uint32_t> injectedHoverUnitId;
+    if (unitHoverHealthProbe == nullptr) {
+        const UnitType* hoverUnitType =
+            findRuntimeUnitTypeById(state.rules, "MTNK");
+        const ArtType* hoverUnitArt = state.art.findArtType("MTNK");
+        if (hoverUnitType == nullptr || hoverUnitArt == nullptr) {
+            std::cerr << "Build smoke test failed: hover health fixture could "
+                      << "not borrow a unit type. type=MTNK\n";
+            return 1;
+        }
+        const RuntimeCellPoint structureCell =
+            runtimeCellPointForObject(*selectionVisualProbeObject);
+        // Spawning may reallocate the object vector, which would dangle the
+        // structure probes captured above; keep the identity, not the address.
+        const std::uint32_t structureProbeId =
+            selectionVisualProbeObject->instanceId;
+        WorldObjectInstance* hoverUnit = addRuntimeObjectInstance(
+            state,
+            RuntimeBuildKind::Unit,
+            "MTNK",
+            {structureCell.x + 2, structureCell.y + 2}
+        );
+        if (hoverUnit == nullptr) {
+            std::cerr << "Build smoke test failed: hover health fixture could "
+                      << "not spawn a unit.\n";
+            return 1;
+        }
+        // addRuntimeObjectInstance already assigned a unique dense id; keep it.
+        injectedHoverUnitId = hoverUnit->instanceId;
+        hoverUnit->owner = state.economy.owner;
+        hoverUnit->health = std::max(1, hoverUnitType->strength / 2);
+        hoverUnit->mission = "Sleep";
+        hoverUnit->facing = 32;
+        hoverUnit->turretFacing = hoverUnit->facing;
+        state.projectedObjectsCacheValid = false;
+        if (const WorldObjectInstance* resolvedStructure =
+                findMutableObjectById(state, structureProbeId)) {
+            selectionVisualProbeObject = resolvedStructure;
+        }
+        // The hover probe drives the real point hit test, so the unit's own
+        // bounds centre must resolve back to the unit. Walk a ring of cells
+        // around the structure until that holds; a base clusters its
+        // structures tightly enough that the first offset can land on one.
+        const RECT hoverClient{0, 0, viewportWidth, viewportHeight};
+        const RECT hoverViewport = runtimeMapViewport(hoverClient);
+        const RuntimeMapCamera savedHoverCamera = state.camera;
+        bool hoverReachable = false;
+        for (int radius = 2; radius <= 10 && !hoverReachable; ++radius) {
+            for (int dy = -radius; dy <= radius && !hoverReachable; ++dy) {
+                for (int dx = -radius; dx <= radius && !hoverReachable; ++dx) {
+                    if (std::abs(dx) != radius && std::abs(dy) != radius) {
+                        continue;
+                    }
+                    const RuntimeCellPoint candidate{
+                        structureCell.x + dx,
+                        structureCell.y + dy
+                    };
+                    if (candidate.x < 2 || candidate.y < 2) {
+                        continue;
+                    }
+                    WorldObjectInstance* movableUnit =
+                        findMutableObjectById(state, *injectedHoverUnitId);
+                    if (movableUnit == nullptr) {
+                        break;
+                    }
+                    movableUnit->x = candidate.x;
+                    movableUnit->y = candidate.y;
+                    movableUnit->cell = runtimeCellKey(
+                        movableUnit->x,
+                        movableUnit->y
+                    );
+                    state.projectedObjectsCacheValid = false;
+                    centerRuntimeCameraOnCell(
+                        state,
+                        hoverClient,
+                        candidate
+                    );
+                    const std::vector<RuntimeProjectedObject>& probeObjects =
+                        runtimeProjectedObjectsForViewport(state, hoverViewport);
+                    const RuntimeProjectedObject* unitProjection = nullptr;
+                    for (const RuntimeProjectedObject& projected :
+                            probeObjects) {
+                        if (projected.object != nullptr
+                            && projected.object->instanceId
+                                == *injectedHoverUnitId) {
+                            unitProjection = &projected;
+                            break;
+                        }
+                    }
+                    if (unitProjection == nullptr) {
+                        continue;
+                    }
+                    const POINT probePoint{
+                        (unitProjection->bounds.left
+                            + unitProjection->bounds.right) / 2,
+                        (unitProjection->bounds.top
+                            + unitProjection->bounds.bottom) / 2
+                    };
+                    const RuntimeProjectedObject* hit =
+                        findProjectedObjectAtPoint(probeObjects, probePoint);
+                    hoverReachable = hit != nullptr
+                        && hit->object != nullptr
+                        && hit->object->instanceId == *injectedHoverUnitId;
+                }
+            }
+        }
+        state.camera = savedHoverCamera;
+        state.projectedObjectsCacheValid = false;
+        WorldObjectInstance* settledUnit =
+            findMutableObjectById(state, *injectedHoverUnitId);
+        unitHoverHealthProbe = settledUnit;
+        if (!hoverReachable || unitHoverHealthProbe == nullptr) {
+            std::cerr << "Build smoke test failed: hover health fixture could "
+                      << "not place a hoverable unit near "
+                      << structureCell.x << "," << structureCell.y << ".\n";
+            return 1;
+        }
+        std::cout << "Unit hover fixture: injected " << unitHoverHealthProbe->type
+                  << " id=" << unitHoverHealthProbe->instanceId
+                  << " at " << unitHoverHealthProbe->x << ","
+                  << unitHoverHealthProbe->y
+                  << " (map shipped no units)\n";
+    }
+
     if (unitHoverHealthProbe == nullptr) {
         std::cerr << "Build smoke test failed: no unit available for hover health bar.\n";
         return 1;
@@ -75827,6 +75958,22 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
         << " veteranResource=" << veteranBadgeResourceDraws
         << " veteranFallback=" << veteranBadgeFallbackDraws
         << "\n";
+    if (injectedHoverUnitId.has_value()) {
+        std::vector<WorldObjectInstance>& hoverObjects =
+            state.world.accessObjects();
+        hoverObjects.erase(
+            std::remove_if(
+                hoverObjects.begin(),
+                hoverObjects.end(),
+                [&injectedHoverUnitId](const WorldObjectInstance& object) {
+                    return object.instanceId == *injectedHoverUnitId;
+                }
+            ),
+            hoverObjects.end()
+        );
+        std::cout << "Unit hover fixture: released id=" << *injectedHoverUnitId
+                  << " objects=" << hoverObjects.size() << "\n";
+    }
     applySelection(
         state,
         {selectionVisualProbeObject->instanceId},
