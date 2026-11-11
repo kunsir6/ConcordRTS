@@ -1238,6 +1238,11 @@ int runtimeAircraftSpriteLiftPixels(
     bool aircraft
 );
 
+// 潜航单位的「视觉下沉」深度，以地图层级为单位。绘制侧（drawLevelForObject）
+// 与选择框/命中口径的断言共用这一个来源：它是画面位移，不是世界层级。
+// 60x30 瓦片下等于 5px，因此不能按 tileHeight/2（半格）去算。
+inline double runtimeSubmergedVisualDepthLevels() { return 1.0 / 3.0; }
+
 
 
 bool runtimeGrandCannonBarrelDrawsInFront(int facing);

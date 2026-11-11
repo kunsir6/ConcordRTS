@@ -10257,8 +10257,8 @@ void drawRuntimeWallOverlayFallback(
 double drawLevelForObject(const WorldObjectInstance& object) {
     // A shallow visual offset: five pixels with the normal 60x30 tiles.
     // Revealing changes opacity and this small depth, never the world level.
-    constexpr double submergedVisualDepth = 1.0 / 3.0;
-    return objectRenderLevel(object) - (object.submerged ? submergedVisualDepth : 0.0);
+    return objectRenderLevel(object)
+        - (object.submerged ? runtimeSubmergedVisualDepthLevels() : 0.0);
 }
 
 int runtimeObjectSpriteOpacity(const WorldObjectInstance& object) {
