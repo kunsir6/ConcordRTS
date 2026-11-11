@@ -76545,6 +76545,101 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
     finishRuntimeSmokeStage(smokeTimings, "placementSearch", smokeStageStart);
 
     smokeStageStart = runtimeSmokeNow();
+    // 这张零售图没有任何己方生产基地（Structures 全 Neutral），catalog 里每个
+    // Unit/Infantry 条目都会停在 requiredFactory=InfantryType/UnitType 上。
+    // 这是夹具缺口，不是可用性缺陷：补一栋己方兵营与战车工厂，走产品创建路径，
+    // 落点避开既有建筑地基（结构锚点是地基左上角那一格）。
+    {
+        const auto cellOccupiedByStructure = [&state](int cx, int cy) {
+            for (const WorldObjectInstance& object : state.world.getObjects()) {
+                if (!object.alive
+                    || object.kind != WorldObjectKind::Structure) {
+                    continue;
+                }
+                const RuntimeStructureFootprint footprint =
+                    runtimeStructureFootprintForObject(state, object);
+                const int width = std::max(1, footprint.width);
+                const int height = std::max(1, footprint.height);
+                if (cx >= object.x && cx < object.x + width
+                    && cy >= object.y && cy < object.y + height) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto findFreeFoundationCell = [&cellOccupiedByStructure](
+            int nearX, int nearY) -> std::optional<RuntimeCellPoint> {
+            for (int radius = 2; radius <= 24; ++radius) {
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        if (std::abs(dx) != radius && std::abs(dy) != radius) {
+                            continue;
+                        }
+                        int blocked = 0;
+                        for (int fy = 0; fy < 2 && blocked == 0; ++fy) {
+                            for (int fx = 0; fx < 2; ++fx) {
+                                if (cellOccupiedByStructure(
+                                        nearX + dx + fx, nearY + dy + fy)) {
+                                    blocked = 1;
+                                    break;
+                                }
+                            }
+                        }
+                        if (blocked == 0) {
+                            return RuntimeCellPoint{nearX + dx, nearY + dy};
+                        }
+                    }
+                }
+            }
+            return std::nullopt;
+        };
+        // 以地图里第一栋建筑为参照点，向四周环搜空地基。
+        std::optional<RuntimeCellPoint> anchorCell;
+        for (const WorldObjectInstance& object : state.world.getObjects()) {
+            if (object.alive && object.kind == WorldObjectKind::Structure) {
+                anchorCell = RuntimeCellPoint{object.x, object.y};
+                break;
+            }
+        }
+        const RuntimeCellPoint reference =
+            anchorCell.value_or(RuntimeCellPoint{40, 40});
+        struct FactoryFixture {
+            const char* typeId;
+            const char* label;
+        };
+        const std::array<FactoryFixture, 2> factoryFixtures{{
+            {"GAPILE", "barracks"},
+            {"GAWEAP", "war factory"},
+        }};
+        int injectedFactories = 0;
+        for (const FactoryFixture& fixture : factoryFixtures) {
+            const std::optional<RuntimeCellPoint> cell =
+                findFreeFoundationCell(reference.x, reference.y);
+            if (!cell.has_value()) break;
+            WorldObjectInstance* factory = addRuntimeObjectInstance(
+                state,
+                RuntimeBuildKind::Building,
+                fixture.typeId,
+                *cell
+            );
+            if (factory == nullptr) {
+                std::cerr << "  build fixture: could not spawn owned "
+                          << fixture.label << " (" << fixture.typeId << ")\n";
+                continue;
+            }
+            factory->owner = state.economy.owner;
+            factory->mission = "Guard";
+            factory->health = std::max(1, factory->health);
+            ++injectedFactories;
+        }
+        if (injectedFactories > 0) {
+            refreshRuntimeObjectOccupancyAfterLocalChange(state);
+            state.projectedObjectsCacheValid = false;
+            std::cout << "Build fixture: injected owned factories="
+                      << injectedFactories << " owner="
+                      << state.economy.owner << "\n";
+        }
+    }
     const auto unitIt = std::find_if(
         state.economy.catalog.begin(),
         state.economy.catalog.end(),
