@@ -271,6 +271,12 @@ elseif(APPLE)
     if(TARGET concord_multiplayer_two_process_smoke)
         concord_apple_add_win32_compat_sources(concord_multiplayer_two_process_smoke)
     endif()
+    # ARM-02：窗口父子语义契约只调 Win32（CreateWindowExW 等），Windows 侧靠真 SDK，
+    # macOS 侧靠 compat 层。它同样由 DevelopmentTargets.cmake 创建，那时 compat 辅助
+    # 函数尚未定义，所以只能在这里挂源清单——否则链接期报 `_CreateWindowExW` 未定义。
+    if(TARGET concord_window_parent_win32_contract)
+        concord_apple_add_win32_compat_sources(concord_window_parent_win32_contract)
+    endif()
 endif()
 
 

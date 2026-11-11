@@ -1,3 +1,21 @@
+// NOT BUILT (ARM-02, 2026-11-11). Kept as the specification for ARM-03.
+//
+// This file is intentionally absent from every CMake target. Its second half
+// compares advanceRuntimeModExtensions() between the optimized and the reference
+// history-query route, driving it through a hand-written "small host"
+// (RuntimeWindowState with world/rules/config/specialMechanisms/tick). That
+// contract is gone: advanceRuntimeModExtensions is now a concrete
+// bool advanceRuntimeModExtensions(RuntimeGameSessionState&) in
+// src/runtime/session/RuntimeSessionWorld.cpp, and the host-generic stage it was
+// written against -- simulation/mod_extensions/RuntimeModExtensionsRuntime.inl --
+// has been 0 bytes since the initial source import. So it has never compiled here.
+//
+// The half that only needs the production header (inert-history skip proof plus
+// the fixed-size complete-type cache) now runs as
+// tests/infrastructure/RuntimeModExtensionsNoopStageSmoke.cpp, target
+// concord_mod_noop_stage_smoke. Do not add this file back to a target before
+// ARM-03 moves the comparison into --interaction-smoke-test, which runs on a real
+// session and can therefore reach the production stage.
 #include "simulation/mod_extensions/RuntimeModExtensions.h"
 
 #include <cstdint>

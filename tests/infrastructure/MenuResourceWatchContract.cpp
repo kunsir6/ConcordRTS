@@ -56,7 +56,12 @@ int main(int argc, char** argv) {
     check(!watch.sameRoots(changed) && !watch.unchanged(changed), "resource root mismatch");
     changed = native; changed.localDataRoot /= "different";
     check(!watch.sameRoots(changed) && !watch.unchanged(changed), "local root mismatch");
-#ifdef _WIN32
+// ARM-02: production selects the change-notification backend with
+// `#if defined(_WIN32) || defined(__APPLE__)` -- on Apple it is the compat layer's
+// FSEvents implementation. This contract only knew about _WIN32, so on macOS it
+// fell into the "no backend" branch and asserted the opposite of what the code
+// actually does. Keep the two conditions in step.
+#if defined(_WIN32) || defined(__APPLE__)
     check(watch.unchanged(native), "native Unicode tree initially fresh");
     write(native.localDataRoot / "runtime_config.ini", "[Preferences]\nVolume=37\n");
     write(native.localDataRoot / "campaign_progress.ini", "[Progress]\nMission=1\n");

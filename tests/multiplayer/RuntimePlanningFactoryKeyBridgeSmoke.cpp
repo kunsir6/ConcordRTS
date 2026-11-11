@@ -420,7 +420,16 @@ bool runDelay(SmokeContext& context,int delay) {
     for(const auto& entry:hostWorld.order)evidence<<"planning-factory-key bridge order delay="<<delay<<" peer=host stage="<<entry.first<<" tick="<<entry.second<<'\n';
     for(const auto& entry:clientWorld.order)evidence<<"planning-factory-key bridge order delay="<<delay<<" peer=client stage="<<entry.first<<" tick="<<entry.second<<'\n';
     const std::string trace=evidence.str();std::cout<<trace;
-    char* directory=nullptr;std::size_t directoryLength=0;const auto environmentResult=_dupenv_s(&directory,&directoryLength,"CONCORD_PLANNING_FACTORY_KEY_BRIDGE_OUTPUT");
+    char* directory=nullptr;std::size_t directoryLength=0;
+#if defined(_WIN32)
+    const auto environmentResult=_dupenv_s(&directory,&directoryLength,"CONCORD_PLANNING_FACTORY_KEY_BRIDGE_OUTPUT");
+#else
+    // ARM-02: _dupenv_s is MSVC-only. Mirror its contract on POSIX -- an owned
+    // copy when the variable is set, nullptr when it is not, 0 either way.
+    const char* rawDirectory=std::getenv("CONCORD_PLANNING_FACTORY_KEY_BRIDGE_OUTPUT");int environmentResult=0;
+    if(rawDirectory!=nullptr){directoryLength=std::string(rawDirectory).size();directory=static_cast<char*>(std::malloc(directoryLength+1));
+        if(directory!=nullptr)std::copy(rawDirectory,rawDirectory+directoryLength+1,directory);else environmentResult=12;}
+#endif
     context.expect(environmentResult==0,"isolated bridge evidence environment");
     if(directory&&*directory){std::error_code ec;std::filesystem::create_directories(directory,ec);context.expect(!ec,"isolated bridge evidence directory");
         if(!ec){std::ofstream file(std::filesystem::path(directory)/("bridge-delay-"+std::to_string(delay)+".txt"),std::ios::binary|std::ios::trunc);

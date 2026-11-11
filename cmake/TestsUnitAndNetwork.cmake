@@ -1108,9 +1108,21 @@ add_test(NAME movie_path_contract_test
     COMMAND concord_movie_path_contract "${CMAKE_BINARY_DIR}/movie_path_contract")
 set_tests_properties(movie_path_contract_test PROPERTIES TIMEOUT 60 LABELS "unit;platform;files;movie;fixture")
 
+# ARM-02: the contract deliberately refuses a pre-existing fixture root
+# ("Use a new fixture directory", return 2), so the entry has to clear it first --
+# otherwise the second ctest run in the same build tree fails after 0.00s while the
+# first one passed. FIXTURES_SETUP keeps the reset attached to whoever runs this
+# test, including `ctest -R menu_resource_watch`.
+add_test(NAME menu_resource_watch_fixture_reset
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_BINARY_DIR}/menu-resource-watch-contract")
+set_tests_properties(menu_resource_watch_fixture_reset PROPERTIES
+    FIXTURES_SETUP menu_resource_watch_fixture
+    LABELS "unit;platform;files;menu-watch;fixture")
 add_test(NAME menu_resource_watch_contract_test
     COMMAND concord_menu_resource_watch_contract "${CMAKE_BINARY_DIR}/menu-resource-watch-contract")
-set_tests_properties(menu_resource_watch_contract_test PROPERTIES TIMEOUT 60 LABELS "unit;platform;files;menu-watch;fixture")
+set_tests_properties(menu_resource_watch_contract_test PROPERTIES
+    FIXTURES_REQUIRED menu_resource_watch_fixture
+    TIMEOUT 60 LABELS "unit;platform;files;menu-watch;fixture")
 
 add_test(NAME main_bitmap_text_contract_test COMMAND concord_main_bitmap_text_contract)
 set_tests_properties(main_bitmap_text_contract_test PROPERTIES TIMEOUT 60 LABELS "no-assets;main-bitmap;standard-contract")

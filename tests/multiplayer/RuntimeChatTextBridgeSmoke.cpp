@@ -470,7 +470,16 @@ bool runDelay(SmokeContext& context,int delay) {
         for(const auto& entry:world->order)evidence<<"chat-text bridge order delay="<<delay<<" peer="<<peer<<" stage="<<entry.first<<" tick="<<entry.second<<'\n';
     }
     const auto trace=evidence.str();std::cout<<trace;
-    char* directory=nullptr;std::size_t length=0;const auto envResult=_dupenv_s(&directory,&length,"CONCORD_CHAT_TEXT_BRIDGE_OUTPUT");
+    char* directory=nullptr;std::size_t length=0;
+#if defined(_WIN32)
+    const auto envResult=_dupenv_s(&directory,&length,"CONCORD_CHAT_TEXT_BRIDGE_OUTPUT");
+#else
+    // ARM-02: _dupenv_s is MSVC-only. Mirror its contract on POSIX -- an owned
+    // copy when the variable is set, nullptr when it is not, 0 either way.
+    const char* rawDirectory=std::getenv("CONCORD_CHAT_TEXT_BRIDGE_OUTPUT");int envResult=0;
+    if(rawDirectory!=nullptr){length=std::string(rawDirectory).size();directory=static_cast<char*>(std::malloc(length+1));
+        if(directory!=nullptr)std::copy(rawDirectory,rawDirectory+length+1,directory);else envResult=12;}
+#endif
     context.expect(envResult==0,"isolated owned environment read");
     if(directory&&*directory){std::error_code ec;std::filesystem::create_directories(directory,ec);context.expect(!ec,"isolated bridge directory");
         if(!ec){std::ofstream output(std::filesystem::path(directory)/("bridge-delay-"+std::to_string(delay)+".txt"),std::ios::binary|std::ios::trunc);

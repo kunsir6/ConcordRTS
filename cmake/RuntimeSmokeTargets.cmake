@@ -29,12 +29,23 @@ target_compile_features(concord_subcell_requested_index_smoke PRIVATE cxx_std_20
 if(CONCORD_MSVC_FRONTEND)
     concord_target_compile_options(concord_subcell_requested_index_smoke PRIVATE /utf-8 /W4 /O2 /Ob2 /FS)
 endif()
-add_executable(concord_mod_history_noop_smoke tests/infrastructure/RuntimeModExtensionsHistoryNoopSmoke.cpp
-    src/world/model/GameWorld.cpp src/core/io/IniFile.cpp src/data/maps/MapDatabase.cpp src/data/rules/RulesDatabase.cpp src/data/art/TheaterDatabase.cpp)
-target_include_directories(concord_mod_history_noop_smoke PRIVATE src)
-target_compile_features(concord_mod_history_noop_smoke PRIVATE cxx_std_20)
+# ARM-02: this target used to be concord_mod_history_noop_smoke, whose second
+# half compared advanceRuntimeModExtensions() between the optimized and reference
+# history routes. That comparison can no longer be built: the function is now a
+# concrete overload on RuntimeGameSessionState (src/runtime/session/
+# RuntimeSessionWorld.cpp), while the test drove it through a hand-written small
+# host. The host-generic stage it was written against lived in
+# simulation/mod_extensions/RuntimeModExtensionsRuntime.inl, empty since the
+# initial import. The salvageable half -- the inert-history skip proof and its
+# fixed-size complete-type cache -- is what this target now runs.
+# The removed half is tracked as ARM-03: move it into --interaction-smoke-test,
+# which already runs on a real session.
+add_executable(concord_mod_noop_stage_smoke tests/infrastructure/RuntimeModExtensionsNoopStageSmoke.cpp
+    src/core/io/IniFile.cpp src/data/rules/RulesDatabase.cpp src/data/rules/ProductionRulesLoader.cpp)
+target_include_directories(concord_mod_noop_stage_smoke PRIVATE src)
+target_compile_features(concord_mod_noop_stage_smoke PRIVATE cxx_std_20)
 if(CONCORD_MSVC_FRONTEND)
-    concord_target_compile_options(concord_mod_history_noop_smoke PRIVATE /utf-8 /W4 /O2 /Ob2 /FS)
+    concord_target_compile_options(concord_mod_noop_stage_smoke PRIVATE /utf-8 /W4 /O2 /Ob2 /FS)
 endif()
 
 add_executable(concord_history_owner_census_smoke tests/infrastructure/RuntimeHistoryOwnerCensusSmoke.cpp)
@@ -239,7 +250,6 @@ if(CONCORD_MSVC_FRONTEND)
 endif()
 # S23-01: explicit existing consumers share the independent production loader.
 foreach(s23_production_rules_owner IN ITEMS
-    concord_mod_history_noop_smoke
     concord_water_wake_history_smoke
     concord_simulation_query_reuse_smoke
     concord_random_map_smoke
