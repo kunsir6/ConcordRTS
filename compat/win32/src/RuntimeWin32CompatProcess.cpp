@@ -354,11 +354,54 @@ const char* lookupEnvironment(const std::string& name) {
 }
 
 // 本平台没有码页表。CP_UTF8 与 CP_ACP/CP_OEMCP 都按 UTF-8 处理：macOS 的
-// "ANSI 代码页"就是 UTF-8，这是唯一诚实的映射。其余码页一律拒绝——把它们
-// 当 UTF-8 解会产出"看起来合理"的错字，比失败难查得多。
-bool codePageSupported(UINT codePage) {
-    return codePage == CP_UTF8 || codePage == CP_ACP || codePage == CP_OEMCP;
+// "ANSI 代码页"就是 UTF-8，这是唯一诚实的映射。
+//
+// 例外是 CP1252：零售 ini（evamd.ini 的 Text=、rules.ini 的字符串表）是
+// Windows-1252，里面的 0x85/0x91/0x92/0x93/0x94 是省略号与引号。把它们当
+// UTF-8 解会失败，逐字节 widen 又会变成 U+0085 这类控制字符——字幕里看起来
+// 就是"乱码方块"。所以这一张表必须真实现，而不是继续拒绝。
+// 其余码页仍然一律拒绝：拒绝比"看起来合理的错字"容易查。
+const wchar_t* cp1252HighTable() {
+    static const wchar_t table[32] = {
+        0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+        0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD,
+        0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+        0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178
+    };
+    return table;
 }
+
+// CP1252 → Unicode：0x00-0x7F 与 0xA0-0xFF 是恒等映射（Latin-1），
+// 0x80-0x9F 才需要查表。Windows 对表里 5 个未定义位置（81/8D/8F/90/9D）
+// 也返回替换字符，这里保持一致。
+wchar_t cp1252ToUnicode(unsigned char byte) {
+    if (byte < 0x80U || byte >= 0xA0U) return static_cast<wchar_t>(byte);
+    return cp1252HighTable()[byte - 0x80U];
+}
+
+// Unicode → CP1252：表内可逆；不可逆时给 '?' 并报 "used default char"。
+bool unicodeToCp1252(wchar_t code, unsigned char& out) {
+    if (code < 0x80U) { out = static_cast<unsigned char>(code); return true; }
+    if (code >= 0xA0U && code <= 0xFFU) {
+        out = static_cast<unsigned char>(code);
+        return true;
+    }
+    const wchar_t* table = cp1252HighTable();
+    for (int index = 0; index < 32; ++index) {
+        if (table[index] == code && table[index] != 0xFFFD) {
+            out = static_cast<unsigned char>(0x80 + index);
+            return true;
+        }
+    }
+    out = '?';
+    return false;
+}
+
+bool codePageSupported(UINT codePage) {
+    return codePage == CP_UTF8 || codePage == CP_ACP || codePage == CP_OEMCP
+        || codePage == 1252U;
+}
+
 
 }  // namespace
 
@@ -546,6 +589,23 @@ int MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr, int
         ? std::strlen(lpMultiByteStr) + 1
         : static_cast<std::size_t>(cbMultiByte);
 
+    if (CodePage == 1252U) {
+        // 单字节码页：一个字节一个字符，没有"非法序列"这回事，
+        // 所以 MB_ERR_INVALID_CHARS 在这里永远不报错（与 Windows 一致）。
+        const int needed = static_cast<int>(count);
+        if (cchWideChar == 0) return needed;
+        if (cchWideChar < needed) {
+            concord_compat::setLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        for (std::size_t index = 0; index < count; ++index) {
+            lpWideCharStr[index] = cp1252ToUnicode(
+                static_cast<unsigned char>(lpMultiByteStr[index])
+            );
+        }
+        return needed;
+    }
+
     const concord_compat::DecodedText decoded = concord_compat::decodeUtf8(lpMultiByteStr, count);
     if ((dwFlags & MB_ERR_INVALID_CHARS) != 0 && decoded.anyInvalid()) {
         // 严格模式必须失败：调用点 toWide() 正是靠这次失败判定"不是 UTF-8"。
@@ -583,6 +643,38 @@ int WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr, int
     const std::size_t count = (cchWideChar < 0)
         ? std::wcslen(lpWideCharStr) + 1
         : static_cast<std::size_t>(cchWideChar);
+
+    if (CodePage == 1252U) {
+        // 反向：不可映射的宽字符给 lpDefaultChar（默认 '?'），并置 usedDefault。
+        // 严格模式（WC_ERR_INVALID_CHARS）下不可映射必须失败，否则调用点
+        // 会拿着带 '?' 的字节去写文件。
+        const char substitute = (lpDefaultChar != nullptr) ? *lpDefaultChar : '?';
+        std::string encoded;
+        encoded.reserve(count);
+        bool usedDefault = false;
+        for (std::size_t index = 0; index < count; ++index) {
+            unsigned char byte = 0;
+            if (unicodeToCp1252(lpWideCharStr[index], byte)) {
+                encoded.push_back(static_cast<char>(byte));
+            } else {
+                encoded.push_back(substitute);
+                usedDefault = true;
+            }
+        }
+        if (usedDefault && (dwFlags & WC_ERR_INVALID_CHARS) != 0) {
+            concord_compat::setLastError(ERROR_NO_UNICODE_TRANSLATION);
+            return 0;
+        }
+        if (lpUsedDefaultChar != nullptr) *lpUsedDefaultChar = usedDefault ? TRUE : FALSE;
+        const int needed = static_cast<int>(encoded.size());
+        if (cbMultiByte == 0) return needed;
+        if (cbMultiByte < needed) {
+            concord_compat::setLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        if (needed > 0) std::memcpy(lpMultiByteStr, encoded.data(), static_cast<std::size_t>(needed));
+        return needed;
+    }
 
     const concord_compat::DecodedText decoded = concord_compat::decodeWide(lpWideCharStr, count);
     const bool strict = (dwFlags & WC_ERR_INVALID_CHARS) != 0;
