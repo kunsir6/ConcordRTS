@@ -22843,6 +22843,10 @@ struct RuntimeStructureHealthBarLayout {
     bool valid = false;
 };
 
+// Gap between the raised crown edge and the health bar strip.  Shared with the
+// build smoke assertion so the two cannot drift apart.
+constexpr int kStructureHealthBarClearance = 3;
+
 RuntimeStructureHealthBarLayout runtimeStructureHealthBarLayout(
     const RuntimeStructureSelectionFrameGeometry& frameGeometry
 ) {
@@ -22851,7 +22855,7 @@ RuntimeStructureHealthBarLayout runtimeStructureHealthBarLayout(
         return layout;
     }
 
-    constexpr int barClearance = 3;
+    constexpr int barClearance = kStructureHealthBarClearance;
     layout.topEnd = runtimeStructureFrameCrownPoint(
         frameGeometry.top,
         frameGeometry.verticalHeight,
@@ -75573,10 +75577,16 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
         std::max(1, finiteHealthBarFootprint.height)
             * std::max(1, state.camera.tileWidth / 2)
         + 1;
+    // The strip follows the crown edge's slope, so its bounding box spans the
+    // whole slanted edge (depth * tileHeight/2) plus the clearance gap above the
+    // crown corner; the last pip is inset by one pip step, whose own descent
+    // cancels the remaining slope within a pixel.  The previous formula
+    // (depth * tileHeight/2 + 1) described a *horizontal* bar and therefore
+    // undercounted the real strip by 2px.
     const int expectedHealthBarHeight =
         std::max(1, finiteHealthBarFootprint.height)
             * std::max(1, state.camera.tileHeight / 2)
-        + 1;
+        + kStructureHealthBarClearance;
     const int finiteHealthBarWidth =
         state.lastStructureHealthBarBounds.right
         - state.lastStructureHealthBarBounds.left;
