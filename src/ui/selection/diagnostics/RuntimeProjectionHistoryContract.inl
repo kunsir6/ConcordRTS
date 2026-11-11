@@ -375,9 +375,35 @@ static bool runRuntimeProjectionHistoryContract(RuntimeWindowState& probe,
             || probe.world.deterministicSimulationStateHash() != beforeDraw)
             return fail("actual rubble/selling map and paint-to-projection replay differ");
         std::unordered_map<int, std::vector<RuntimeSpriteHitSpan>> actualSpans;
-        if (!resolveRuntimeBuildingVisibleHitSpansWin32(probe.world, viewport, context, probe.camera,
-                probe.renderCache, actualSpans) || !actualSpans.contains(base.instanceId))
-            return fail("actual rubble/selling structure did not participate in scene-Z replay");
+        const bool spansResolved = resolveRuntimeBuildingVisibleHitSpansWin32(
+            probe.world, viewport, context, probe.camera, probe.renderCache, actualSpans);
+        // ON-4-05：两种状态在 scene-Z replay 里的期望**不同**，不能共用一条断言。
+        //
+        // replay 的参与者在 RuntimeStructureSpriteGeometry.inl:361 就被筛掉了：
+        //   runtimeObjectIsGroundRubble(object, context) → continue
+        // 地面残骸没有立体遮挡体，让它参与 replay 会凭空产生遮挡（它会挡住本来
+        // 该被看见的像素）。所以"rubble 不参与"是**正确行为**，不是缺陷。
+        //
+        //   rubble=false（Sold，建筑还立着）→ 必须参与，否则选中它时算不到遮挡
+        //   rubble=true （Destroyed，地面残骸）→ 必须**不**参与
+        //
+        // 原先只有"必须参与"一条，跑 rubble=true 时必然红——那是断言写错，
+        // 不是渲染错了。实测数字：rubble=1 时 spans 只有 {810002:139}，不含 810502。
+        if (!spansResolved)
+            return fail("actual rubble/selling scene-Z replay did not resolve");
+        if (rubble) {
+            if (actualSpans.contains(base.instanceId))
+                return fail("ground rubble must be excluded from scene-Z replay");
+        } else if (!actualSpans.contains(base.instanceId)) {
+            std::string diag = "actual selling structure did not participate in scene-Z replay";
+            diag += " [id=" + std::to_string(base.instanceId) + " spans="
+                + std::to_string(actualSpans.size()) + " entries=[";
+            for (const auto& entry : actualSpans) {
+                diag += std::to_string(entry.first) + ":" + std::to_string(entry.second.size()) + " ";
+            }
+            diag += "]";
+            return fail(diag);
+        }
         const auto placement = runtimeRenderPlacementNative(runtimeObjectWorldRenderPlacementWin32(base, probe.world, viewport,
             context, probe.camera, probe.renderCache));
         RuntimeStructureSpriteGeometry body;
