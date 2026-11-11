@@ -1394,7 +1394,29 @@ BOOL PeekMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax
                   UINT wRemoveMsg) {
     if (lpMsg == nullptr) return FALSE;
     const bool remove = (wRemoveMsg & PM_REMOVE) != 0;
-    return popMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, remove) ? TRUE : FALSE;
+    if (popMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, remove)) return TRUE;
+    // U-02（2026-11-11）：队列空了才排空 AppKit，再重试一次出队。
+    //
+    // 世界主循环不走 GetMessageW：它每帧 `drainMessages()` = PeekMessageW 一圈
+    // + `sleepForIdleSlice()` = 裸 sleep_for(1ms)。于是进世界之后同样没有任何人
+    // 排空 AppKit —— 画面在动（present 是 active 触发的），但鼠标键盘进不来，
+    // 系统也认定应用无响应（采样：世界循环 557/1226 样本在 sleepForIdleSlice，
+    // pumpEvents 出现 0 次）。症状就是"进了游戏之后鼠标一直是彩虹圈"。
+    //
+    // 节流 4ms：PeekMessageW 在 smoke 的空转轮询里可能被高频调用，而 pumpEvents
+    // 内部最多等 2ms，不节流会把那些循环拖慢一个量级。4ms 对 60fps（16.7ms/帧）
+    // 足够——每帧至少还能排空一次。
+    {
+        static thread_local std::chrono::steady_clock::time_point lastPeekPump{};
+        const auto now = std::chrono::steady_clock::now();
+        if (lastPeekPump.time_since_epoch().count() == 0
+            || now - lastPeekPump >= std::chrono::milliseconds(4)) {
+            lastPeekPump = now;
+            concord_compat::apple::pumpEvents();
+            if (popMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, remove)) return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 BOOL GetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax) {
