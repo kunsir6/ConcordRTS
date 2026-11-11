@@ -25,7 +25,7 @@
     <key>CFBundleIdentifier</key>
     <string>@CONCORD_BUNDLE_ID@</string>
     <key>CFBundleIconFile</key>
-    <string>ConcordRTS</string>
+    <string>@CONCORD_APP_NAME@</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>
