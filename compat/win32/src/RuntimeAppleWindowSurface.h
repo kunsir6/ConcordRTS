@@ -50,7 +50,12 @@ int onscreenAttestFailures();
 struct InputEvent {
     enum class Kind {
         MouseMove, LeftDown, LeftUp, RightDown, RightUp, MiddleDown, MiddleUp,
-        Wheel, KeyDown, KeyUp
+        Wheel, KeyDown, KeyUp,
+        // ON-2-04：用户点了窗口关闭按钮（红叉）。没有坐标也没有键码——
+        // 它不是"输入"，但它必须和输入走同一条通道：.mm 拿不到 HWND，
+        // 唯一被允许的跨界方式就是这套事件描述（理由见文件头）。
+        // compat 侧收到后投 WM_CLOSE，之后的一切与 Windows 上关窗口完全一致。
+        Close
     };
     Kind kind = Kind::MouseMove;
     int x = 0;           // 客户区坐标，原点在**左上**（已从 AppKit 左下原点翻转过）

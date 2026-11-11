@@ -48,6 +48,38 @@ std::string gPresentedTitle;
 // 注入的事件走的就是同一条队列与同一个处理分支，只有事件来源是合成的。
 bool gQuitSelfTestPosted = false;
 
+// ON-2-04: 一次性注入"点红叉"的自测开关（CONCORD_CLOSE_SELFTEST=1）。
+// 用 performClose: 而不是直接发 Close 事件，是为了让自测走**与真实点击完全一样**
+// 的路径：performClose: → windowShouldClose: → Close 事件 → WM_CLOSE → 窗口销毁。
+// 直接发事件会跳过 delegate，那就只测了 compat 那一半。
+bool gCloseSelfTestDone = false;
+
+// ON-2-04 全屏自测（CONCORD_FULLSCREEN_SELFTEST=1）。
+// 全屏切换是**异步**的（有系统动画），不能用"发完 toggleFullScreen 立刻检查"来验，
+// 必须在 windowDidEnterFullScreen / windowDidExitFullScreen 回调里逐段推进：
+//     present → toggleFullScreen → didEnter（检查一次，再 toggle 退回）→ didExit（检查并收尾）
+// 判据是"内容没丢"，不是"窗口变大了"：全屏期间游戏通常不重绘，
+// 所以要比对的是 layer.contents 还在不在、CGImage 尺寸是否仍等于呈现尺寸、
+// 以及最后一次 present 的内容 hash 是否没变。
+bool gFullScreenTest = false;
+bool gFullScreenRequested = false;
+std::uint32_t gLastPresentHash = 0;
+std::uint32_t gHashBeforeFullScreen = 0;
+std::uint32_t gHashAfterEnter = 0;
+std::uint32_t gHashAfterExit = 0;
+int gFullScreenFailures = 0;
+// 切换进行中（willEnter 之后、didEnter 之前）。全屏切换是 AppKit 的**动画状态机**，
+// 必须靠 run loop 持续喂才能走完。本项目不跑 [NSApp run]，pumpEvents 每轮只给
+// 2ms 的 nextEventMatchingMask——实测这就是卡点：willEnter 触发了，走到一半没有
+// 后续 run loop 时间，didEnter 永远不到（自测 90s 超时退出 124）。
+// 所以在切换期间把这一轮的等待放宽，等状态机走完再恢复 2ms。
+bool gFullScreenTransition = false;
+// 自测兜底：撤掉 FullScreenPrimary 之后 toggleFullScreen 会**什么都不做**，
+// 既没有 willEnter 也没有 didEnter。不设上限的话自测会永远等下去（实测 90s 超时 124，
+// 那种"挂住"看起来像缺陷，其实是"这个能力不存在"）。60 帧 ≈ 菜单 4 秒。
+bool gFullScreenStarted = false;
+int gFullScreenTicks = 0;
+
 // 32bpp DIB 的字节序是 B,G,R,X（小端），所以 CGImage 用
 // kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst：
 //   · Little 让 CG 按 B,G,R 顺序读字节；
@@ -227,10 +259,12 @@ void attestPresent(const concord_compat::apple::Surface& surface) {
             const bool ok = scaleOk && filled && contentUnchanged && presentedUnchanged;
             if (!ok) ++gAttestFailures;
             std::fprintf(gAttestLog,
-                "# scale-test frame=%.0fx%.0f view=%.0fx%.0f contentsScale=%.1f gravity=%s"
+                "# scale-test frame=%.0fx%.0f view=%.0fx%.0f contentsScale=%.1f"
+                " backing=%.1f gravity=%s"
                 " contentUnchanged=%s presentedSizeUnchanged=%s result=%s\n",
                 gWindow.frame.size.width, gWindow.frame.size.height,
-                viewSize.width, viewSize.height, static_cast<double>(scale), gravity,
+                viewSize.width, viewSize.height, static_cast<double>(scale),
+                static_cast<double>(gWindow.backingScaleFactor), gravity,
                 contentUnchanged ? "yes" : "no", presentedUnchanged ? "yes" : "no",
                 ok ? "pass" : "fail");
             std::fflush(gAttestLog);
@@ -251,6 +285,104 @@ void attestPresent(const concord_compat::apple::Surface& surface) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// ON-2-04 红叉：把 AppKit 的"关窗口"翻译成一次真正的 Win32 关闭
+// ---------------------------------------------------------------------------
+// 不实现 windowShouldClose: 时，点红叉的结果是 **AppKit 自己 orderOut**：
+// 窗口从屏幕上消失，而 compat 的 GetMessageW 完全不知道这件事（它只认 Win32 消息），
+// 于是进程继续跑、主循环继续转——用户看到的就是"点了红叉关不掉"。
+//
+// 这里拦下来、返回 NO（不让 AppKit 关），改发一个 Close 事件交给 compat 侧投
+// WM_CLOSE。之后 WM_CLOSE → DestroyWindow → WM_DESTROY 全是既有的 Win32 链路，
+// 与鼠标键盘走同一条通道，边界上不新增任何约定。
+//
+// 放在匿名 namespace 外面：ObjC 类不能在 C++ namespace 里定义。
+// 但它仍然能直接引用 gInputSink / gInputContext——匿名 namespace 的成员
+// 在同一个 TU 的文件作用域内是可见的。
+@interface ConcordWindowCloseDelegate : NSObject <NSWindowDelegate>
+@end
+
+@implementation ConcordWindowCloseDelegate
+- (BOOL)windowShouldClose:(NSWindow*)sender {
+    (void)sender;
+    if (gInputSink == nullptr) {
+        // 纯呈现、没接输入的场合（离屏 smoke）：没有接收方就退回 AppKit 默认行为，
+        // 否则窗口会变成关不掉的死窗口。
+        return YES;
+    }
+    concord_compat::apple::InputEvent event;
+    event.kind = concord_compat::apple::InputEvent::Kind::Close;
+    gInputSink(event, gInputContext);
+    return NO;
+}
+
+// ON-2-04 全屏自测的分段推进。两段都只做"检查 + 打日志 + 决定下一步"，
+// 不在这里改窗口状态以外的任何东西。
+- (void)checkFullScreenState:(const char*)phase {
+    CGImageRef attached = (__bridge CGImageRef)gView.layer.contents;
+    const bool contentsKept = attached != nullptr;
+    const bool sizeKept = contentsKept
+        && CGImageGetWidth(attached) == static_cast<std::size_t>(gPresentedWidth)
+        && CGImageGetHeight(attached) == static_cast<std::size_t>(gPresentedHeight);
+    const bool hashKept = gLastPresentHash == gHashBeforeFullScreen;
+    if (!contentsKept || !sizeKept || !hashKept) ++gFullScreenFailures;
+    std::fprintf(stderr,
+        "[fullscreen] %s window=%.0fx%.0f view=%.0fx%.0f contents=%s size=%s"
+        " hash=%u/%u before=%u ok=%d\n",
+        phase,
+        gWindow.frame.size.width, gWindow.frame.size.height,
+        gView.frame.size.width, gView.frame.size.height,
+        contentsKept ? "kept" : "lost",
+        sizeKept ? "kept" : "changed",
+        gLastPresentHash, gHashBeforeFullScreen, gHashBeforeFullScreen,
+        (!contentsKept || !sizeKept || !hashKept) ? 0 : 1);
+}
+
+- (void)windowWillEnterFullScreen:(NSNotification*)note {
+    (void)note;
+    // 诊断探针：区分"AppKit 根本没开始切换"和"开始了但动画没走完"。
+    // 前者说明 toggleFullScreen 被忽略（窗口/collectionBehavior/run loop），
+    // 后者说明状态机在推进，只是没人喂 run loop。
+    std::fprintf(stderr, "[fullscreen] willEnter styleMask=0x%lx\n",
+                 static_cast<unsigned long>(gWindow.styleMask));
+    gFullScreenTransition = true;
+    gFullScreenStarted = true;
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification*)note {
+    (void)note;
+    gFullScreenTransition = false;
+    if (!gFullScreenTest) return;
+    gHashAfterEnter = gLastPresentHash;
+    [self checkFullScreenState:"entered"];
+    // 立刻退回：自测要的是"进出都不丢"，只停在进入态证明不了一半。
+    [gWindow toggleFullScreen:nil];
+}
+
+- (void)windowWillExitFullScreen:(NSNotification*)note {
+    (void)note;
+    gFullScreenTransition = true;
+}
+
+- (void)windowDidExitFullScreen:(NSNotification*)note {
+    (void)note;
+    gFullScreenTransition = false;
+    if (!gFullScreenTest) return;
+    gHashAfterExit = gLastPresentHash;
+    [self checkFullScreenState:"exited"];
+    std::fprintf(stderr,
+        "[fullscreen] done: enter=%u exit=%u before=%u failures=%d\n",
+        gHashAfterEnter, gHashAfterExit, gHashBeforeFullScreen, gFullScreenFailures);
+    // 与 attest 同样的退出纪律：退出码必须带失败数，否则 fail 会被掩盖成成功。
+    std::fflush(stderr);
+    std::_Exit(gFullScreenFailures == 0 ? 0 : 1);
+}
+@end
+
+// NSWindow.delegate 是 weak 引用：不在这里持有，delegate 会在 autoreleasepool
+// 退出后被回收，红叉就会静默回到"AppKit 自己 orderOut"的老行为。
+static ConcordWindowCloseDelegate* gWindowCloseDelegate = nil;
 
 namespace concord_compat::apple {
 
@@ -299,9 +431,30 @@ void present(const Surface& surface) {
                                                   styleMask:style
                                                     backing:NSBackingStoreBuffered
                                                       defer:NO];
+            // ON-2-04：**刻意不设** NSWindowCollectionBehaviorFullScreenPrimary。
+            //
+            // 设了之后绿灯会变成"进入全屏"，而本项目的系统全屏是**走不完**的：
+            // 实测 windowWillEnterFullScreen 触发了、windowDidEnterFullScreen 永远不到，
+            // 哪怕把 pumpEvents 的 run loop 时间从 2ms 放宽到 20ms 也一样。
+            // 根因是切换依赖 [NSApp run] 的完整生命周期（Space 切换 + 动画状态机），
+            // 而本项目的主循环是 compat 自己的 GetMessageW，从不跑 NSApp run ——
+            // 那是整个兼容层的前提，不能为一个窗口形态去动它。
+            //
+            // 不设这一位时绿灯是 "zoom"（同步 setFrame，纯窗口操作，不需要 run loop）。
+            // 但实测 NSWindowCollectionBehaviorDefault **挡不住**：全屏照样开始
+            // （willEnter 仍然触发），照样走不完。必须用 FullScreenNone 显式禁止，
+            // 否则用户按 Ctrl+Cmd+F 会卡在半途。
+            // "系统全屏"因此不可用，已单独记为 ON-2-04b（blocked），见 queue。
+            gWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone;
             // releasedWhenClosed=NO：窗口关闭后我们仍要能重用它，
             // 否则第二次 ShowWindow 会往一个已释放的对象发消息。
             gWindow.releasedWhenClosed = NO;
+            // ON-2-04：delegate 必须在 makeKeyAndOrderFront 之前挂上，
+            // 否则第一帧窗口已经是 key 了才有"关窗口"的可能。
+            if (gWindowCloseDelegate == nil) {
+                gWindowCloseDelegate = [[ConcordWindowCloseDelegate alloc] init];
+            }
+            gWindow.delegate = gWindowCloseDelegate;
             const char* title = surface.titleUtf8;
             // ON-2-05：空白首绘被过滤之后，**第一个真正有内容的窗口通常是主菜单的
             // 子窗口**，而子窗口没有标题（titleUtf8 为空）。此时若退回进程名，用户
@@ -354,6 +507,26 @@ void present(const Surface& surface) {
             && gPresentedTitle != currentTitle) {
             gPresentedTitle = currentTitle;
             gWindow.title = [NSString stringWithUTF8String:currentTitle];
+        }
+
+        // ON-2-03 补丁：contentsScale 不能只在建窗口时抓一次。
+        //
+        // 实测（arm64，无人值守运行，2026-11-11）：同一个进程里
+        // `layer.contentsScale=2.0` 而 `window.backingScaleFactor=1.0`，
+        // scale-test 因此报 fail。原因就是上面那句只在创建时赋值——窗口的
+        // backing 属性会变（系统状态/显示器切换/启动方式都会影响），
+        // 而 layer 停在旧值上，两者一旦脱节，画面要么糊要么错。
+        //
+        // 每帧同步一次，代价只是一个浮点比较。disableActions 压掉隐式动画，
+        // 否则改 contentsScale 会带出一次淡入（与 ON-2-05 的每帧贴图同理）。
+        const CGFloat backingScale = gWindow.backingScaleFactor;
+        if (gView.layer.contentsScale != backingScale) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            gView.layer.contentsScale = backingScale;
+            [CATransaction commit];
+            std::fprintf(stderr, "[cocoa] contentsScale -> %.1f (backing changed)\n",
+                         static_cast<double>(backingScale));
         }
 
         CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
@@ -491,6 +664,56 @@ void present(const Surface& surface) {
                 std::fprintf(stderr, "[cocoa] quit self-test: posted synthetic Cmd+Q\n");
             }
         }
+
+        // ON-2-04 自测注入：与 Cmd+Q 的注入并列，但**不要同时开**——两者都会结束进程。
+        // 放在 present 末尾：此时本帧的贴图/取证都已完成，销毁窗口不会打断正在进行的绘制。
+        //
+        // 必须等 gInputSink 就绪：compat 侧的 setInputSink 是在 present **返回之后**
+        // 才调用的（它要用刚呈现的那个窗口做 context）。第一次 present 时 sink 还是空，
+        // delegate 会走"没人接就放行"的分支——实测就是窗口被 AppKit 关掉、进程继续跑，
+        // 而日志里 close self-test 已经打出来了，看着像"注入成功但没效果"。
+        if (!gCloseSelfTestDone && gInputSink != nullptr) {
+            gCloseSelfTestDone = true;
+            const char* closeTest = std::getenv("CONCORD_CLOSE_SELFTEST");
+            if (closeTest != nullptr && closeTest[0] == '1') {
+                std::fprintf(stderr, "[cocoa] close self-test: performClose\n");
+                // 走真实路径：performClose: → windowShouldClose: → Close 事件
+                // → compat 投 WM_CLOSE → DestroyWindow → WM_DESTROY → PostQuitMessage。
+                [gWindow performClose:nil];
+            }
+        }
+
+        // ON-2-04 全屏自测：同样等 sink 就绪（理由同 close selftest），
+        // 请求进入全屏后就不再做任何事——后面全靠 delegate 的两个回调推进。
+        if (!gFullScreenRequested && gInputSink != nullptr) {
+            gFullScreenRequested = true;
+            const char* fsTest = std::getenv("CONCORD_FULLSCREEN_SELFTEST");
+            if (fsTest != nullptr && fsTest[0] == '1') {
+                gFullScreenTest = true;
+                gHashBeforeFullScreen = attestHash24(
+                    surface.pixels, surface.width, surface.height, surface.bytesPerRow);
+                gLastPresentHash = gHashBeforeFullScreen;
+                std::fprintf(stderr, "[fullscreen] request toggleFullScreen hash=%u\n",
+                             gHashBeforeFullScreen);
+                [gWindow toggleFullScreen:nil];
+            }
+        }
+
+        // 全屏期间若游戏自己重绘，把最新帧的 hash 记下来供回调比对。
+        // 同一画面重绘 hash 不变，所以判据仍然成立；画面真的变了反而该报警。
+        if (gFullScreenTest) {
+            gLastPresentHash = attestHash24(
+                surface.pixels, surface.width, surface.height, surface.bytesPerRow);
+            // 兜底：既没 willEnter 也没有任何回调，说明这个窗口形态在此架构下不存在。
+            // 报结论并正常退出（退出码 0），不把它伪装成"卡住"。
+            if (!gFullScreenStarted && ++gFullScreenTicks > 60) {
+                std::fprintf(stderr,
+                    "[fullscreen] unsupported: no windowWillEnterFullScreen after %d frames"
+                    " (needs [NSApp run]; see ON-2-04b)\n", gFullScreenTicks);
+                std::fflush(stderr);
+                std::_Exit(0);
+            }
+        }
     }
 }
 
@@ -626,13 +849,23 @@ void pumpEvents() {
         //
         // 用"现在 + 2ms"这种**有界**超时：最坏多等 2ms，但绝不会无限挂。
         // 取不到事件就 break，等价于非阻塞；取到就一次排空。
+        //
+        // 例外：全屏切换期间放宽到 20ms（见 gFullScreenTransition 的注释）。
+        // 那段时间需要的不是"取事件"，而是"让 AppKit 的动画状态机有 run loop 可用"，
+        // 2ms 的碎片推进走不完，didEnter 永远不来。
+        const NSTimeInterval timeout = gFullScreenTransition ? 0.02 : 0.002;
         for (;;) {
             NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                                untilDate:[NSDate dateWithTimeIntervalSinceNow:0.002]
+                                                untilDate:[NSDate dateWithTimeIntervalSinceNow:timeout]
                                                    inMode:NSDefaultRunLoopMode
                                                   dequeue:YES];
             if (event == nil) break;
-            // 窗口关闭按钮走标准关闭路径：转成 quit，否则点了红叉没反应。
+            // AppKit 内部事件（NSEventTypeAppKitDefined）不是用户输入，直接丢。
+            // 红叉**不在这条路径上**处理：它由 ConcordWindowCloseDelegate 的
+            // windowShouldClose: 拦下并发出 Close 事件（ON-2-04）。这一行此前
+            // 写着"窗口关闭按钮走标准关闭路径：转成 quit"，那句话是错的——
+            // 它的实际作用是丢弃，而 AppKit 自己在没人拦的情况下 orderOut，
+            // 于是"点了红叉窗口消失、进程还在"。注释与代码脱节就是这么埋出来的。
             if (event.type == NSEventTypeAppKitDefined) continue;
             if (event.window != nil && event.window != gWindow) continue;
             // ON-1-03：菜单键等价物（Cmd+Q）必须自己派发。本进程没有 [NSApp run]，

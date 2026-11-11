@@ -1074,6 +1074,25 @@ void appleInputDispatch(const concord_compat::apple::InputEvent& event, void* co
         break;
     case Kind::KeyDown:    PostMessageW(gInputTarget, WM_KEYDOWN, static_cast<WPARAM>(event.keyCode), 0); break;
     case Kind::KeyUp:      PostMessageW(gInputTarget, WM_KEYUP, static_cast<WPARAM>(event.keyCode), 0); break;
+    case Kind::Close:
+        // ON-2-04：红叉 = 关掉呈现窗口 + 退出应用（macOS 单窗口应用的常规语义）。
+        //
+        // 用 SendMessageW 而不是 PostMessageW：要在这里就能判定"窗口到底关没关"，
+        // 下面那句 IsWindow 才有意义。Post 的话只能看到消息入队，关没关要等下一轮。
+        //
+        // 之后的链路全是既有的：产品侧没有 WM_CLOSE 分支（实测 RuntimeMainMenu.cpp
+        // 全文无 WM_CLOSE/WM_DESTROY 处理）→ DefWindowProc 调 DestroyWindow →
+        // WM_DESTROY 按 Q-11 的结论**不投** WM_QUIT。
+        //
+        // 所以这里补一句 PostQuitMessage——但只在**窗口真的没了**的时候。
+        // 这不违反 Q-11：那条否定的是"DefWindowProc 里任何窗口销毁都代劳 quit"
+        // （子窗口、smoke 自建的 STATIC 壳会被误杀）；这里是"用户明确关掉了呈现窗口"
+        // 这个具体事件的处理者，而且先验证了销毁已经发生。
+        // 若将来产品在 WM_CLOSE 里弹确认框、返回 0 阻止销毁，IsWindow 仍为真，
+        // 这里就不会退出——语义正确，不需要改。
+        SendMessageW(gInputTarget, WM_CLOSE, 0, 0);
+        if (!IsWindow(gInputTarget)) PostQuitMessage(0);
+        break;
     }
 }
 
