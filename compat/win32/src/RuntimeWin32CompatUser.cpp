@@ -1228,13 +1228,25 @@ void maybePresentClientFrame(CompatWindow* w) {
         last.valid = true;
     }
     concord_compat::apple::present(surface);
-    // 第一次（也是唯一一次）把输入目标绑到这个窗口，并注册翻译回调。
-    // 放在 present 之后：present 已经完成了 NSApp/NSWindow 的初始化，
-    // 此时 AppKit 才可能开始产生事件。
+    // 输入目标跟随**当前正在呈现的窗口**。
+    //
+    // U-03（2026-11-11）：这里原本是"只在第一次绑一次"：
+    //     static HWND boundTarget = nullptr;
+    //     if (boundTarget == nullptr) { ... setInputSink(..., boundTarget); }
+    // 于是输入永远投给第一个 present 的窗口（主菜单/大厅那个）。主菜单→大厅→世界
+    // 每一跳都换 HWND，世界渲染完全正常（present 跟着新窗口走），但鼠标键盘全部
+    // PostMessageW 到那个已经退场的旧句柄，被丢弃 —— 症状就是"进了游戏画面在动，
+    // 点哪儿都没反应"，且不报错、日志里没有任何异常。
+    //
+    // 改成一变化就重绑。放在 present 之后：present 已完成 NSApp/NSWindow 初始化，
+    // 此时 AppKit 才可能产生事件。
     static HWND boundTarget = nullptr;
-    if (boundTarget == nullptr) {
-        boundTarget = toHwnd(w);
+    const HWND presented = toHwnd(w);
+    if (boundTarget != presented) {
+        boundTarget = presented;
         concord_compat::apple::setInputSink(&appleInputDispatch, boundTarget);
+        std::fprintf(stderr, "[cocoa] input target -> %p\n",
+                     reinterpret_cast<void*>(boundTarget));
     }
 }
 
