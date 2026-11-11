@@ -62500,6 +62500,20 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
         return 1;
     }
     if (std::getenv("CONCORD_COMMAND_SMOKE_TANK_BUNKER_ONLY") != nullptr) return 0;
+    // 两个新冒烟放在既知的 amphibious KNOWN-RED 之前，保证全量 command 冒烟
+    // 即使在既有红点上中止，也已经跑过本轮的守卫索敌策略与编队编号角标。
+    std::string guardPolicyError;
+    if (!runRuntimeGuardAcquisitionPolicySmoke(state, guardPolicyError)) {
+        std::cerr << "Command smoke failed: guard acquisition policy: "
+                  << guardPolicyError << ".\n";
+        return 1;
+    }
+    std::string teamNumberBadgeError;
+    if (!runRuntimeTeamNumberBadgeSmoke(state, teamNumberBadgeError)) {
+        std::cerr << "Command smoke failed: team number badge: "
+                  << teamNumberBadgeError << ".\n";
+        return 1;
+    }
     std::string amphibiousTransportError;
     if (!runRuntimeAmphibiousTransportSmokeProbe(state, amphibiousTransportError)) {
         std::cerr << "Command smoke failed: " << amphibiousTransportError << '\n';
@@ -62722,18 +62736,6 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
     if (!runRuntimeAirstrikeHostSmokeProbe(airstrikeHostError)) {
         std::cerr << "Command smoke failed: Airstrike host: "
                   << airstrikeHostError << ".\n";
-        return 1;
-    }
-    std::string guardPolicyError;
-    if (!runRuntimeGuardAcquisitionPolicySmoke(state, guardPolicyError)) {
-        std::cerr << "Command smoke failed: guard acquisition policy: "
-                  << guardPolicyError << ".\n";
-        return 1;
-    }
-    std::string teamNumberBadgeError;
-    if (!runRuntimeTeamNumberBadgeSmoke(state, teamNumberBadgeError)) {
-        std::cerr << "Command smoke failed: team number badge: "
-                  << teamNumberBadgeError << ".\n";
         return 1;
     }
     traceStage("before-startup-timing");
