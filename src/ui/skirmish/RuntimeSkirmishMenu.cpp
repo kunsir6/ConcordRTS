@@ -4251,11 +4251,32 @@ RuntimeSkirmishSelection runRuntimeSkirmishMenu(const RuntimeConfig& config,Runt
 #endif
 #include "ui/skirmish/diagnostics/skirmish_clock_original/Timer.original.inl"
 #include "ui/skirmish/diagnostics/RuntimeSkirmishPresentationClockSmoke.inl"
+// ON-4-02c：大厅内走队列完成选图往返（切片 1）。
+#include "ui/skirmish/diagnostics/RuntimeSkirmishFlowSmoke.inl"
 
 int runRuntimeSkirmishMenuSmokeTest(
     const RuntimeConfig& config,
     const std::string& bmpPath
 ) {
+    // ON-4-02c 切片 1：选图往返。放在最前面：它只依赖 initializeState，
+    // 不参与下面的 shell/cursor/mode 链，失败时能立刻与其他契约区分开。
+    if (const char* flowOutput = std::getenv("CONCORD_SKIRMISH_FLOW_OUTPUT")) {
+        if (flowOutput[0] == '\0') {
+            std::cerr << "Skirmish flow smoke requires a non-empty output directory.\n";
+            return 1;
+        }
+        MenuState flowState;
+        if (!initializeState(flowState, config, true)) {
+            std::cerr << "Skirmish flow smoke failed: maps or original shell assets are missing.\n";
+            return 1;
+        }
+        std::string flowError;
+        if (!runRuntimeSkirmishFlowSmoke(flowState, config, fs::path(flowOutput), flowError)) {
+            std::cerr << "Skirmish flow smoke failed: " << flowError << '\n';
+            return 1;
+        }
+        return 0;
+    }
     if (const auto only=skirmishPresentationEnvironment("CONCORD_SKIRMISH_PRESENTATION_CLOCK_ONLY")) {
         const auto output=skirmishPresentationEnvironment("CONCORD_SKIRMISH_PRESENTATION_CLOCK_OUTPUT");
         if(*only!="1" || !output || output->empty()) {
