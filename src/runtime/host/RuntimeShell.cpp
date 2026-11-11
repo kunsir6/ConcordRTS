@@ -36825,6 +36825,16 @@ int runRuntimeResultPresentationSmokeTest(const RuntimeConfig& config) {
         if (changed < 1000 || state.tick != frozenTick
             || state.renderedFramesThisSecond != renderedBefore + 1
             || !save(outputs[faction], next)) {
+            // 只读计量：把四个子条件分别打出来，「停在缓存」与「tick 被推进」
+            // 是完全不同的成因，一句 stalled 分不清。
+            std::cerr << "  score probe " << countries[faction]
+                      << " changed=" << changed << "(need>=1000)"
+                      << " tick=" << state.tick << "/" << frozenTick
+                      << " frames=" << state.renderedFramesThisSecond
+                      << "/" << (renderedBefore + 1)
+                      << " saved=" << formatBool(save(outputs[faction], next))
+                      << " firstSize=" << first.size()
+                      << " nextSize=" << next.size() << "\n";
             return fail("original score animation stalled behind paused-frame cache");
         }
         std::cout << "Paused score animation " << countries[faction]
