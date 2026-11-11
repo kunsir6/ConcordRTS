@@ -127,6 +127,63 @@ bool runRuntimeSkirmishCursorSmoke(
     if (state.draggingSlider != HitKind::None)
         return fail("slider drag did not release");
 
+    // ---- ON-4-02b：把「同步投递」换成「队列投递」 ----
+    //
+    // 上面每一句都是 SendMessageW：它**直接调窗口过程**，绕开
+    // GetMessageW/DispatchMessageW 这一段。菜单侧（Q-07）早就证明队列路径能工作，
+    // 但大厅侧从来没有——而两者的窗口过程不是同一份代码。
+    //
+    // 这里用 PostMessageW 只入队，再由真实消息泵取出派发。目标选 credits 滑块：
+    // 与上面那段 SendMessageW 拖动**一一对应**，是同一动作的两种投递方式，
+    // 差异只可能来自队列路径本身。
+    //
+    // （实测：Lobby 页的 hits 里没有 CreditsPlus/Minus，只有三个滑块 + 各 Toggle，
+    //  kinds=[6 8 9 10 5 6 8 9 10 20 18 19 21 22 23 24 25 26 27 44 28 45]。
+    //  所以"点加号"这条路不存在，别照按钮名硬找。）
+    {
+        const int beforeCredits = state.selection.startingCredits;
+
+        auto pumpQueue = [&](int milliseconds) {
+            const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>(milliseconds);
+            do {
+                MSG message{};
+                while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                    if (message.message == WM_QUIT) return;
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                if (!IsWindow(guard.child)) return;
+                MsgWaitForMultipleObjectsEx(0, nullptr, 4, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            } while (GetTickCount64() < deadline && IsWindow(guard.child));
+        };
+        const auto waitForQueue = [&](auto&& predicate, int milliseconds) {
+            const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>(milliseconds);
+            while (!predicate() && GetTickCount64() < deadline && IsWindow(guard.child)) {
+                pumpQueue(10);
+            }
+            return predicate();
+        };
+
+        // 从滑块当前所在的 +20 处按下，再往回拖 —— 与上面那段同一坐标系。
+        const int grabX = sliderX + 20;
+        if (!PostMessageW(guard.child, WM_MOUSEMOVE, 0, MAKELPARAM(grabX, sliderY)))
+            return fail("queue path: move was not posted");
+        pumpQueue(30);
+        if (!PostMessageW(guard.child, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(grabX, sliderY)))
+            return fail("queue path: down was not posted");
+        if (!waitForQueue([&] { return state.draggingSlider == HitKind::CreditsSlider; }, 2000))
+            return fail("queue path: posted down did not start the credits drag");
+        if (!PostMessageW(guard.child, WM_MOUSEMOVE, MK_LBUTTON,
+                MAKELPARAM(sliderX - 40, sliderY)))
+            return fail("queue path: drag move was not posted");
+        if (!waitForQueue([&] { return state.selection.startingCredits != beforeCredits; }, 3000))
+            return fail("queue path: posted drag did not change starting credits");
+        if (!PostMessageW(guard.child, WM_LBUTTONUP, 0, MAKELPARAM(sliderX - 40, sliderY)))
+            return fail("queue path: up was not posted");
+        if (!waitForQueue([&] { return state.draggingSlider == HitKind::None; }, 2000))
+            return fail("queue path: posted up did not release the drag");
+    }
+
     const std::array<SkirmishPage, 5> pages{{SkirmishPage::Lobby,
         SkirmishPage::MapSelection, SkirmishPage::RandomMap,
         SkirmishPage::RandomMapPreview, SkirmishPage::RandomMapLoad}};
