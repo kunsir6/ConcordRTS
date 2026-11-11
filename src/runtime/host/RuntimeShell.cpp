@@ -39463,6 +39463,17 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
             return 1;
         }
         const bool diagonal = direction.x != 0 && direction.y != 0;
+        // A physical map edge carries a *negative* reveal reserve on purpose:
+        // the camera stops half a tile early so the renderer's saw-tooth
+        // boundary stays outside the client area (locked separately by the
+        // physical-edge probe below).  The extreme cell/corner may therefore
+        // overhang the viewport by exactly that reserve, never more.  The
+        // user-facing guarantee stays "no edge-connected void", measured
+        // independently through runtimeCurrentCameraVoidCoverage.
+        const int allowedOverhangLeft = std::max(0, -cameraReveal.left);
+        const int allowedOverhangRight = std::max(0, -cameraReveal.right);
+        const int allowedOverhangTop = std::max(0, -cameraReveal.top);
+        const int allowedOverhangBottom = std::max(0, -cameraReveal.bottom);
         if (diagonal) {
             const RuntimeProjectedPoint corner{
                 direction.x < 0 ? cameraBounds.left : cameraBounds.right,
@@ -39475,10 +39486,10 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
             );
             cameraEnvelopeCornersFullyVisible =
                 cameraEnvelopeCornersFullyVisible
-                && cornerScreen.x >= viewport.left
-                && cornerScreen.x <= viewport.right
-                && cornerScreen.y >= viewport.top
-                && cornerScreen.y <= viewport.bottom;
+                && cornerScreen.x >= viewport.left - allowedOverhangLeft
+                && cornerScreen.x <= viewport.right + allowedOverhangRight
+                && cornerScreen.y >= viewport.top - allowedOverhangTop
+                && cornerScreen.y <= viewport.bottom + allowedOverhangBottom;
             ++cameraEnvelopeCornersChecked;
         } else {
             const TerrainCell* directionalEdgeCell = nullptr;
@@ -39554,11 +39565,34 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
                 );
                 const int halfTileWidth = std::max(1, state.camera.tileWidth / 2);
                 const int halfTileHeight = std::max(1, state.camera.tileHeight / 2);
+                // The extreme cell must reach the viewport edge; at a physical
+                // map edge the documented half-tile early stop lets it overhang
+                // by the (negative) reserve and no more.
+                const int cellOverhangLeft = std::max(
+                    0,
+                    viewport.left - (edgeCellScreen.x - halfTileWidth)
+                );
+                const int cellOverhangRight = std::max(
+                    0,
+                    (edgeCellScreen.x + halfTileWidth) - viewport.right
+                );
+                const int cellOverhangTop = std::max(
+                    0,
+                    viewport.top - (edgeCellScreen.y - halfTileHeight)
+                );
+                const int cellOverhangBottom = std::max(
+                    0,
+                    (edgeCellScreen.y + halfTileHeight) - viewport.bottom
+                );
                 directionalEdgeCellFullyVisible =
-                    edgeCellScreen.x - halfTileWidth >= viewport.left
-                    && edgeCellScreen.x + halfTileWidth <= viewport.right
-                    && edgeCellScreen.y - halfTileHeight >= viewport.top
-                    && edgeCellScreen.y + halfTileHeight <= viewport.bottom;
+                    edgeCellScreen.x >= viewport.left
+                    && edgeCellScreen.x <= viewport.right
+                    && edgeCellScreen.y >= viewport.top
+                    && edgeCellScreen.y <= viewport.bottom
+                    && cellOverhangLeft <= allowedOverhangLeft
+                    && cellOverhangRight <= allowedOverhangRight
+                    && cellOverhangTop <= allowedOverhangTop
+                    && cellOverhangBottom <= allowedOverhangBottom;
                 cameraEdgeCellDetails
                     << (cameraEdgeCellsChecked == 0 ? "" : ",")
                     << direction.label << "="
