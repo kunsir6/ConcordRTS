@@ -40473,6 +40473,37 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
                 const POINT probePoint = runtimeRenderPlacementNativePoint(
                     projectedObject.footprintHitCenters.front()
                 );
+                // 只读计量：命中像素在四层 spans 里各是什么待遇。
+                // sprite = 完整几何；foreground = 前墙层（bunker 类前墙单独绘制）；
+                // visible = 深度重放后的可见层（buildingPixelVisible 的实际门）。
+                int visibleMinY = INT_MAX;
+                int visibleMaxY = INT_MIN;
+                for (const RuntimeSpriteHitSpan& span :
+                        projectedObject.visibleBuildingHitSpans) {
+                    visibleMinY = std::min(visibleMinY, span.y);
+                    visibleMaxY = std::max(visibleMaxY, span.y);
+                }
+                std::cerr << "  spansSprite="
+                          << projectedObject.structureSpriteHitSpans.size()
+                          << " spansForeground="
+                          << projectedObject.structureForegroundHitSpans.size()
+                          << " spansVisible="
+                          << projectedObject.visibleBuildingHitSpans.size()
+                          << " visibleRows="
+                          << (projectedObject.visibleBuildingHitSpans.empty()
+                              ? std::string("none")
+                              : std::to_string(visibleMinY) + ".."
+                                  + std::to_string(visibleMaxY))
+                          << " inSprite="
+                          << formatBool(runtimeSpriteHitSpansContainWin32(
+                                 projectedObject.structureSpriteHitSpans, probePoint))
+                          << " inForeground="
+                          << formatBool(runtimeSpriteHitSpansContainWin32(
+                                 projectedObject.structureForegroundHitSpans, probePoint))
+                          << " inVisible="
+                          << formatBool(runtimeSpriteHitSpansContainWin32(
+                                 projectedObject.visibleBuildingHitSpans, probePoint))
+                          << "\n";
                 std::cerr << "  rightClickProbe=(" << probePoint.x << ","
                           << probePoint.y << ") objects=" << projectedObjects.size()
                           << "\n";
