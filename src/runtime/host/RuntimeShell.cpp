@@ -74810,14 +74810,30 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
                     * expectedMultiplier
                     * acceleratedRate.denominator;
     };
+    // 期望值直接取常量，不再写字面量：BUILD-01 把 16/8 改成 1 时，正是这里的
+    // 硬编码 16/16/8/8 把"改回正版节奏"判成红。
     const bool sidebarProductionSpeedAccelerated =
         infantryTimingIt != state.economy.catalog.end()
         && vehicleTimingIt != state.economy.catalog.end()
         && defenseTimingIt != state.economy.catalog.end()
-        && sidebarProductionRateAccelerated(*buildingIt, 16)
-        && sidebarProductionRateAccelerated(*defenseTimingIt, 16)
-        && sidebarProductionRateAccelerated(*infantryTimingIt, 8)
-        && sidebarProductionRateAccelerated(*vehicleTimingIt, 8);
+        && sidebarProductionRateAccelerated(
+            *buildingIt,
+            static_cast<std::uint64_t>(
+                runtimeSidebarBuildingProductionSpeedMultiplier)
+        )
+        && sidebarProductionRateAccelerated(
+            *defenseTimingIt,
+            static_cast<std::uint64_t>(
+                runtimeSidebarBuildingProductionSpeedMultiplier)
+        )
+        && sidebarProductionRateAccelerated(
+            *infantryTimingIt,
+            static_cast<std::uint64_t>(runtimeSidebarProductionSpeedMultiplier)
+        )
+        && sidebarProductionRateAccelerated(
+            *vehicleTimingIt,
+            static_cast<std::uint64_t>(runtimeSidebarProductionSpeedMultiplier)
+        );
     if (!sidebarProductionSpeedAccelerated) {
         std::cerr << "Build smoke test failed: sidebar building, defense, "
                   << "infantry, or vehicle production did not apply the "

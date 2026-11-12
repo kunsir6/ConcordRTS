@@ -349,9 +349,13 @@ inline constexpr int runtimePathBatchExpandedNodeBudget = 2048;
 inline constexpr int runtimeTerrainOccupantIdBase =
     std::numeric_limits<int>::min() / 2;
 
-inline constexpr int runtimeSidebarProductionSpeedMultiplier = 8;
+// BUILD-01：这两个乘数原先是 8（单位/步兵）与 16（建筑/防御），等于把侧栏生产
+// 提速到正版的 8~16 倍——兵营 0.43s、矿场 1.69s 就落地，而正版同档是 5.3s / 21s。
+// 现在回到 1：时长只剩 rules(md).ini 的 BuildSpeed=.7 与 gameSpeed 的帧节奏，
+// 与正版同源（速度 4：兵营 6.7s、矿场 26.9s、光棱塔 20.2s）。
+inline constexpr int runtimeSidebarProductionSpeedMultiplier = 1;
 
-inline constexpr int runtimeSidebarBuildingProductionSpeedMultiplier = 16;
+inline constexpr int runtimeSidebarBuildingProductionSpeedMultiplier = 1;
 
 inline constexpr int runtimeProjectileSaveSchemaV1 = 1;
 
