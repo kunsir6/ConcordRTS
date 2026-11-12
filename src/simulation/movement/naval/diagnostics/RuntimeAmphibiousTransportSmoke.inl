@@ -40,12 +40,19 @@ bool runRuntimeAmphibiousTransportSmokeProbe(RuntimeWindowState& live, std::stri
         applySelection(s, passengers, false, false);
         const auto* host = findObjectById(s, hostId);
         if (host == nullptr || !queueRuntimeTargetAbility(s, *host)) return false;
-        for (int t = 0; t < s.config.fixedTickHz * 40 && !s.pendingTransportTargets.empty(); ++t) step(s);
-        host = findObjectById(s, hostId);
-        return host != nullptr && std::all_of(passengers.begin(), passengers.end(), [&](int id) {
-            return std::find(host->transportPassengerIds.begin(), host->transportPassengerIds.end(), id)
-                != host->transportPassengerIds.end();
-        });
+        // pendingTransportTargets 清空只代表「订单已受理」，不代表「人已进舱」——
+        // 步兵/载具是逐个人走到舱门口再进去的。旧写法一看到 pending 空就判完成，
+        // 于是 10/12 上船时被当成失败。改成等到「每个人都出现在乘客表里」为止。
+        const auto allAboard = [&](const RuntimeWindowState& state) {
+            const auto* now = findObjectById(state, hostId);
+            if (now == nullptr) return false;
+            return std::all_of(passengers.begin(), passengers.end(), [&](int id) {
+                return std::find(now->transportPassengerIds.begin(),
+                    now->transportPassengerIds.end(), id) != now->transportPassengerIds.end();
+            });
+        };
+        for (int t = 0; t < s.config.fixedTickHz * 40 && !allAboard(s); ++t) step(s);
+        return allAboard(s);
     };
     const auto move = [&](RuntimeWindowState& s, int hostId, RuntimeCellPoint destination) {
         applySelection(s, {hostId}, false, false); issueRuntimeMoveCommand(s, destination);
@@ -111,7 +118,23 @@ bool runRuntimeAmphibiousTransportSmokeProbe(RuntimeWindowState& live, std::stri
             if (!move(s, hostId, {23, 16}) || !executeRuntimeSecondaryAction(s, hostId))
                 return fail("transport could not cross water and unload at destination");
             host = findMutableObjectById(s, hostId);
-            if (!host->transportPassengerIds.empty()) return fail("shore unload left tanks aboard");
+            // 单位船（kind==Unit）的卸载是**逐人推进**的：unloadRuntimeUnitTransportMotion
+            // 一趟只放一辆，放完就 `break`，剩下的等下一步的机身让位
+            // （"Later cargo waits on real body clearance, not a fixed delay"），
+            // advanceRuntimeTransportUnloading 每拍再调一次。
+            // 所以「按一下空仓」这个断言在结构上不可能成立——旧写法把
+            // 「一次点击 = 全员下船」当成了产品语义。这里按拍推进到放空为止，
+            // 仍然用「放不空就失败」保住原本要防的缺陷。
+            if (host == nullptr) return fail("transport vanished during shore unload");
+            int unloadTicks = 0;
+            for (; unloadTicks < hz * 20 && !host->transportPassengerIds.empty(); ++unloadTicks) {
+                step(s);
+                host = findMutableObjectById(s, hostId);
+                if (host == nullptr) return fail("transport vanished during shore unload");
+            }
+            if (!host->transportPassengerIds.empty())
+                return fail("shore unload left tanks aboard after " + std::to_string(unloadTicks)
+                    + " ticks: " + s.simulationStatus);
             std::set<int> exits;
             for (int i = 0; i < 4; ++i) {
                 tank = findMutableObjectById(s, tanks[i]);
@@ -131,7 +154,13 @@ bool runRuntimeAmphibiousTransportSmokeProbe(RuntimeWindowState& live, std::stri
     std::vector<int> infantry;
     for (int i = 0; i < 12; ++i) infantry.push_back(add(s, RuntimeBuildKind::Infantry, "E1", {9 + i % 4, 12 + i / 4}));
     initializeRuntimeNavigation(s);
-    if (!board(s, hostId, infantry)) return fail("twelve infantry did not board");
+    if (!board(s, hostId, infantry)) {
+        const auto* stuckHost = findObjectById(s, hostId);
+        std::size_t aboard = stuckHost != nullptr ? stuckHost->transportPassengerIds.size() : 0;
+        return fail("twelve infantry did not board: aboard=" + std::to_string(aboard)
+            + "/12 pending=" + std::to_string(s.pendingTransportTargets.size())
+            + " status=" + s.simulationStatus);
+    }
     if (!roundTrip(s)) return false;
     std::vector<int> blockers;
     for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
