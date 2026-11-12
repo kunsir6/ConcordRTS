@@ -37664,7 +37664,7 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
             gameSpeedSlider.trackRight + 50
         )
         && state.config.gameSpeed == 6
-        && runtimeSimulationPacingTickRate(state.config) == 0
+        && runtimeSimulationPacingTickRate(state.config) == 281
         && state.config.fixedTickHz == originalTickRate;
     const bool gameSpeedSliderCoordinates = gameSpeedSliderLeft
         && gameSpeedSliderMiddle
@@ -37673,8 +37673,10 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
     RuntimeConfig multiplayerPacingProbe = state.config;
     multiplayerPacingProbe.multiplayerActive = true;
     multiplayerPacingProbe.fixedTickHz = 30;
+    // 七档全部有限：31 / 37.5 / 46.88 / 62.5 / 93.75 / 187.5 / 281.25 拍每秒，
+    // 6 档 = 5 档 × 1.5，不再有"6 档不限速"的哨兵（BUILD-03）。
     constexpr std::array<int, 7> expectedGameSpeedPacing{{
-        31, 38, 47, 63, 94, 188, 0
+        31, 38, 47, 63, 94, 188, 281
     }};
     bool gameSpeedGlobalPacing = true;
     for (std::size_t index = 0;

@@ -97,10 +97,10 @@ bool runRuntimeSupportPowerSmokeProbe(RuntimeWindowState& live, std::string& err
         return fail("source/sidebar inventory: "+found);
     }
     // Exercise the runtime pacing rate against actual charging sources. The
-    // same ten scheduled wall seconds must consume more charge at the six
-    // finite speeds. Original speed 6 has rate 0 (unlimited); its explicitly
-    // bounded simulation ticks make no uncapped wall-time/throughput claim.
-    // Changing either pacing mode must not jump the displayed game time.
+    // same ten scheduled wall seconds must consume more charge at every speed.
+    // BUILD-03：不再有"不限速"的 6 档——6 档 = 5 档 × 1.5（281 拍/秒），
+    // 因此每一档都必须报出有限正速率，速率随档位严格单调递增。
+    // Changing speed must not jump the displayed game time.
     for (const int hz : {30, 60}) {
         int previousConsumed = -1;
         for (int speed = 0; speed <= 6; ++speed) {
@@ -112,17 +112,16 @@ bool runRuntimeSupportPowerSmokeProbe(RuntimeWindowState& live, std::string& err
                 return fail("nuclear timer did not start at ten game minutes");
             const int before = initial->remainingTicks;
             const int initialRate = runtimeSimulationPacingTickRate(s.config);
-            const bool initiallyUncapped = speed == 6;
-            if (initiallyUncapped ? initialRate != 0 : initialRate <= 0)
-                return fail("original finite/unlimited pacing rate contract");
-            const int scheduledTicks = initiallyUncapped ? hz * 10 : initialRate * 10;
+            if (initialRate <= 0)
+                return fail("game speed pacing rate must stay finite and positive");
+            const int scheduledTicks = initialRate * 10;
             for (int i = 0; i < scheduledTicks; ++i) { ++s.tick; advanceRuntimeSuperWeapons(s); }
             const auto* after = s.superWeapons.findSidebarSnapshot("Commander", "NukeSpecial");
             if (!after || after->state != SuperWeaponRuntimeState::Charging
                     || before - after->remainingTicks != scheduledTicks
-                    || (!initiallyUncapped && scheduledTicks <= previousConsumed))
+                    || scheduledTicks <= previousConsumed)
                 return fail("game speed did not pace the actual nuclear charge");
-            if (!initiallyUncapped) previousConsumed = scheduledTicks;
+            previousConsumed = scheduledTicks;
             const int beforeChange = after->remainingTicks;
             const int secondsBeforeChange = runtimeSuperWeaponRemainingSeconds(*after, hz);
             s.config.gameSpeed = (speed + 3) % 7;
@@ -130,10 +129,9 @@ bool runRuntimeSupportPowerSmokeProbe(RuntimeWindowState& live, std::string& err
                     || runtimeSuperWeaponRemainingSeconds(*after, s.config.fixedTickHz) != secondsBeforeChange)
                 return fail("changing game speed jumped the nuclear timer");
             const int changedRate = runtimeSimulationPacingTickRate(s.config);
-            const bool changedUncapped = s.config.gameSpeed == 6;
-            if (changedUncapped ? changedRate != 0 : changedRate <= 0)
-                return fail("changed finite/unlimited pacing rate contract");
-            const int changedSpeedTicks = changedUncapped ? hz * 2 : changedRate * 2;
+            if (changedRate <= 0)
+                return fail("changed game speed pacing rate must stay finite and positive");
+            const int changedSpeedTicks = changedRate * 2;
             for (int i = 0; i < changedSpeedTicks; ++i) { ++s.tick; advanceRuntimeSuperWeapons(s); }
             after = s.superWeapons.findSidebarSnapshot("Commander", "NukeSpecial");
             if (!after || after->state != SuperWeaponRuntimeState::Charging
@@ -144,9 +142,8 @@ bool runRuntimeSupportPowerSmokeProbe(RuntimeWindowState& live, std::string& err
 
             // A low-power source stays paused at every speed, with the same
             // remaining game time surviving serialization and restoration.
-            // Unlimited pacing still executes actual positive ticks; rate 0
-            // must never turn the pause transition into an empty loop.
-            const int lowPowerTicks = changedUncapped ? hz : changedRate;
+            // The rate must never turn the pause transition into an empty loop.
+            const int lowPowerTicks = changedRate;
             if (lowPowerTicks <= 0) return fail("low power requires actual simulation ticks");
             for (int i = 0; i < lowPowerTicks; ++i) {
                 ++s.tick;
@@ -175,9 +172,9 @@ bool runRuntimeSupportPowerSmokeProbe(RuntimeWindowState& live, std::string& err
                 return fail("reload changed the remaining game time");
             std::cout << "Superweapon timer: hz=" << hz << " speed=" << speed
                 << " actualPacingRate=" << initialRate
-                << (initiallyUncapped ? " simulationTickBudget=" : " scheduledWallSeconds=10 chargeTicks=") << scheduledTicks
+                << " scheduledWallSeconds=10 chargeTicks=" << scheduledTicks
                 << " changedSpeed=" << s.config.gameSpeed << " changedPacingRate=" << changedRate
-                << (changedUncapped ? " changedSimulationTickBudget=" : " changedScheduledWallSeconds=2 chargeTicks=") << changedSpeedTicks
+                << " changedScheduledWallSeconds=2 chargeTicks=" << changedSpeedTicks
                 << " lowPowerTicks=" << lowPowerTicks
                 << " remaining=" << runtimeFormatSuperWeaponTimer(secondsBeforeChange)
                 << " speedChange/lowPower/reload passed\n";
