@@ -33781,6 +33781,88 @@ int runRuntimeRenderSmokeTest(const RuntimeConfig& config) {
     );
     finishRuntimeSmokeStage(smokeTimings, "renderCheck", smokeStageStart);
 
+    // The frame above is centred on the ore-probe line, and the probe picks a
+    // run of cells precisely because nothing is built on them (no overlay).
+    // A structure shadow therefore cannot appear in it: the last measurement
+    // showed both structure candidates with an authored mask, sitting entirely
+    // off-screen (structureOff=2). Asking this frame for structure coverage was
+    // asking for something its own framing excludes. Give the property its own
+    // frame, aimed at the widest real structure on the map, and keep the two
+    // verdicts separate so neither can hide the other.
+    smokeStageStart = runtimeSmokeNow();
+    RuntimeMapRenderStats structureShadowStats;
+    const WorldObjectInstance* structureShadowFocus = nullptr;
+    int structureShadowFrames = 0;
+    int structureShadowFramesTried = 0;
+    const auto renderStructureShadowFrame =
+        [&](const WorldObjectInstance& focus) -> RuntimeMapRenderStats {
+        RuntimeMapRenderStats frameStats;
+        void* structurePixels = nullptr;
+        HBITMAP structureBitmap = CreateDIBSection(
+            screenDc, &bitmapInfo, DIB_RGB_COLORS, &structurePixels, nullptr, 0);
+        if (structureBitmap == nullptr) {
+            return frameStats;
+        }
+        HGDIOBJ previousBitmap = SelectObject(memoryDc, structureBitmap);
+        RuntimeMapRenderContext structureContext = context;
+        structureContext.surfacePixels =
+            static_cast<std::uint32_t*>(structurePixels);
+        RuntimeMapCamera structureCamera = camera;
+        const RuntimeProjectedPoint structureCenter = runtimeProjectCellXY(
+            focus.x, focus.y, focus.level, structureCamera);
+        // runtimeProjectCellXY returns the un-offset projected point, so the
+        // offset is assigned, never accumulated (same idiom as the two camera
+        // initialisations above). Accumulating pushed the whole map out of the
+        // viewport and silently produced zero candidates for every structure.
+        structureCamera.worldOffsetX = structureCenter.x - (width / 2);
+        structureCamera.worldOffsetY = structureCenter.y - (height / 2);
+        structureCamera.initialized = true;
+        RuntimeMapRenderCache structureCache;
+        frameStats = drawRuntimeMapWin32(
+            memoryDc,
+            viewport,
+            world,
+            structureContext,
+            structureCamera,
+            structureCache
+        );
+        SelectObject(memoryDc, previousBitmap);
+        DeleteObject(structureBitmap);
+        return frameStats;
+    };
+    // Walk the map's real structures until one actually casts. A building whose
+    // theater art is missing legitimately casts nothing (M-19), so stopping at
+    // the first structure would keep conflating that asset gap with the shadow
+    // pipeline; the property being asserted is "some real structure on this map
+    // darkens pixels", and each attempt reports its own four buckets.
+    for (const WorldObjectInstance& object : world.getObjects()) {
+        if (object.kind != WorldObjectKind::Structure || !object.alive) {
+            continue;
+        }
+        ++structureShadowFramesTried;
+        structureShadowStats = renderStructureShadowFrame(object);
+        ++structureShadowFrames;
+        std::cout << "Natural-map structure shadow frame: focus=" << object.type
+                  << " instance=" << object.instanceId
+                  << " candidates=" << structureShadowStats.structureShadowCandidates
+                  << " drawn=" << structureShadowStats.structureShadowsDrawn
+                  << " pixels=" << structureShadowStats.shadowPixelsDarkened
+                  << " noArt=" << structureShadowStats.structureShadowEmptyBodies
+                  << " off=" << structureShadowStats.structureShadowOffScreen
+                  << " clip=" << structureShadowStats.structureShadowClippedOut
+                  << " empty=" << structureShadowStats.structureShadowEmptyMasks
+                  << "\n";
+        if (structureShadowStats.structureShadowsDrawn > 0
+            && structureShadowStats.shadowPixelsDarkened > 0) {
+            structureShadowFocus = &object;
+            break;
+        }
+        if (structureShadowFramesTried >= 12) {
+            break;
+        }
+    }
+    finishRuntimeSmokeStage(smokeTimings, "structureShadow", smokeStageStart);
+
     bool remapComparisonRequested = false;
     bool remapComparisonPassed = true;
     int remapChangedPixels = 0;
@@ -34470,12 +34552,15 @@ int runRuntimeRenderSmokeTest(const RuntimeConfig& config) {
     // defect would be wrong, but so is excusing it: the measurement shows the
     // recorded candidates are NOT the empty-bodied ones (structureNoArt=0), so
     // the gate keeps its single meaning until the record-side set is identified.
+    // Two separate verdicts on purpose. The ore-probe frame proves the general
+    // shadow pipeline ran (candidates, SHP masks, pixels), the structure frame
+    // proves a building actually casts one. Merging them made the second
+    // property unsatisfiable by construction and painted the whole smoke red.
     if (!terrainCoverageMode
         && (stats.shadowCandidates <= 0
             || stats.shadowsDrawn <= 0
             || stats.shadowPixelsDarkened <= 0
-            || stats.shpShadowsDrawn <= 0
-            || stats.structureShadowsDrawn <= 0)) {
+            || stats.shpShadowsDrawn <= 0)) {
         std::cerr << "Render smoke test failed: natural-map shadow pipeline "
                   << "did not draw its visible SHP/structure coverage. candidates="
                   << stats.shadowCandidates
@@ -34510,6 +34595,20 @@ int runRuntimeRenderSmokeTest(const RuntimeConfig& config) {
                   << " of " << stats.structureShadowCandidates
                   << " candidates have a 0x0 sprite frame for this theater "
                   << "(nothing to cast; asset gap, not a shadow defect)\n";
+    }
+    if (!terrainCoverageMode) {
+        if (structureShadowFrames <= 0) {
+            std::cerr << "Render smoke test failed: natural map has no "
+                      << "structure to aim the shadow frame at.\n";
+            return 1;
+        }
+        if (structureShadowFocus == nullptr) {
+            std::cerr << "Render smoke test failed: none of the "
+                      << structureShadowFrames
+                      << " natural-map structures drew a shadow (see the "
+                      << "per-structure buckets above).\n";
+            return 1;
+        }
     }
     std::cout << "Runtime custom-ID shadow asset contract: drawn="
               << shadowAssetRenderStats.shadowsDrawn
