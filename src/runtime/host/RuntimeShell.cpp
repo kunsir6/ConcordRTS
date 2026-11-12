@@ -38495,19 +38495,149 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
         return 1;
     }
 
-    std::vector<int> boxSelectionIds;
+    // 框选断言必须穿过消息循环。
+    // 旧写法在这里**重新实现**了一遍「包围盒与矩形相交」再直接 applySelection，
+    // 于是产品的拖选路径（runtimeWindowProc → handleRuntimeMapLeftPointerUp →
+    // boxProjectionItems → applySelection）从来没有被测过：真把它整条改坏，这个断言照样绿。
+    // 现在改为投递 WM_LBUTTONDOWN / WM_MOUSEMOVE / WM_LBUTTONUP，让真实手势跑一遍。
+    //
+    // 顺带把 M-02（「框选结果和画面上框住的单位对不上」）的计量做在同一处。
+    // 产品口径是「单位包围盒与拖拽框相交」，而包围盒含精灵帧的透明留白（移动帧还会变宽变矮，
+    // 见 M-14 的 SQD 92x51 vs 100x41），所以「框里其实一个像素都没有」的单位也会被选中。
+    // 这里把两种口径分开计数，只计量、不改产品：
+    //   bbox   = 包围盒与拖拽框相交（产品现行口径，也就是本期断言的期望值）
+    //   center = 包围盒中心落在拖拽框内（零售「框住谁」的手感口径）
+    const RECT bandRect{
+        viewport.left + 8,
+        viewport.top + 8,
+        viewport.left + ((viewport.right - viewport.left) * 3) / 5,
+        viewport.bottom - 8
+    };
+    std::vector<int> expectedBoxIds;
+    std::vector<int> centerBoxIds;
+    std::vector<int> outsideCenterIds;
     for (const RuntimeProjectedObject& projectedObject : projectedObjects) {
-        if (projectedObject.object != nullptr
-            && runtimeObjectCanBeBoxSelected(*projectedObject.object)
-            && rectsIntersect(projectedObject.bounds, viewport)) {
-            boxSelectionIds.push_back(projectedObject.object->instanceId);
+        if (projectedObject.object == nullptr
+            || !runtimeObjectCanBeBoxSelected(*projectedObject.object)) {
+            continue;
+        }
+        const RECT bounds = runtimeRenderPlacementNativeRect(projectedObject.bounds);
+        if (!rectsIntersect(bounds, bandRect)) continue;
+        expectedBoxIds.push_back(projectedObject.object->instanceId);
+        const POINT center{
+            (bounds.left + bounds.right) / 2,
+            (bounds.top + bounds.bottom) / 2
+        };
+        if (pointInRectInclusive(bandRect, center)) {
+            centerBoxIds.push_back(projectedObject.object->instanceId);
+        } else {
+            outsideCenterIds.push_back(projectedObject.object->instanceId);
         }
     }
-    applySelection(state, boxSelectionIds, false, false);
+    if (expectedBoxIds.empty()) {
+        std::cerr << "Interaction smoke test failed: drag band covers no box-selectable unit."
+                  << " band=" << bandRect.left << ',' << bandRect.top << ' '
+                  << bandRect.right << ',' << bandRect.bottom
+                  << " viewport=" << viewport.left << ',' << viewport.top << ' '
+                  << viewport.right << ',' << viewport.bottom << ".\n";
+        return 1;
+    }
+
+    std::vector<int> boxSelectionIds;
+    {
+        const HINSTANCE dragInstance = GetModuleHandleW(nullptr);
+        const wchar_t* dragClassName = L"ConcordInteractionSmokeDragBand";
+        WNDCLASSW dragWindowClass{};
+        dragWindowClass.lpfnWndProc = runtimeWindowProc;
+        dragWindowClass.hInstance = dragInstance;
+        dragWindowClass.lpszClassName = dragClassName;
+        if (RegisterClassW(&dragWindowClass) == 0
+            && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            std::cerr << "Interaction smoke test failed: cannot register drag-band window class.\n";
+            return 1;
+        }
+        HWND dragWindow = CreateWindowExW(0, dragClassName, L"Drag band test", WS_POPUP,
+            0, 0, clientRect.right, clientRect.bottom, nullptr, nullptr, dragInstance, nullptr);
+        if (dragWindow == nullptr) {
+            UnregisterClassW(dragClassName, dragInstance);
+            std::cerr << "Interaction smoke test failed: cannot create drag-band window.\n";
+            return 1;
+        }
+        SetWindowLongPtrW(dragWindow, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&state));
+        applySelection(state, {}, false, false);
+        state.leftPointer.active = false;
+        state.leftPointer.moved = false;
+        const auto pumpPointer = [&](UINT message, WPARAM wparam, POINT point) {
+            if (PostMessageW(dragWindow, message, wparam, MAKELPARAM(point.x, point.y)) == FALSE) {
+                return false;
+            }
+            MSG queued{};
+            while (PeekMessageW(&queued, dragWindow, message, message, PM_REMOVE) != FALSE) {
+                TranslateMessage(&queued);
+                DispatchMessageW(&queued);
+            }
+            return true;
+        };
+        const POINT dragStart{bandRect.left, bandRect.top};
+        const POINT dragEnd{bandRect.right, bandRect.bottom};
+        bool dragPumped = pumpPointer(WM_LBUTTONDOWN, MK_LBUTTON, dragStart)
+            && pumpPointer(WM_MOUSEMOVE, MK_LBUTTON, dragEnd)
+            && pumpPointer(WM_LBUTTONUP, 0, dragEnd);
+        if (!dragPumped) {
+            std::cerr << "Interaction smoke test failed: cannot post drag-band messages.\n";
+        }
+        boxSelectionIds = state.selectedObjectIds;
+        DestroyWindow(dragWindow);
+        UnregisterClassW(dragClassName, dragInstance);
+        // WM_DESTROY 会 PostQuitMessage，把这条测试制造出来的 WM_QUIT 吃掉。
+        MSG drained{};
+        while (PeekMessageW(&drained, nullptr, 0, 0, PM_REMOVE) != FALSE) {
+            if (drained.message == WM_QUIT) break;
+        }
+        if (!dragPumped) return 1;
+    }
+
+    const auto sameIdSet = [](std::vector<int> left, std::vector<int> right) {
+        std::sort(left.begin(), left.end());
+        std::sort(right.begin(), right.end());
+        return left == right;
+    };
+    std::cout << "Box drag (message loop): band="
+              << bandRect.left << ',' << bandRect.top << ' '
+              << bandRect.right << ',' << bandRect.bottom
+              << " bbox=" << expectedBoxIds.size()
+              << " center=" << centerBoxIds.size()
+              << " bboxOnly=" << outsideCenterIds.size()
+              << " picked=" << boxSelectionIds.size() << "\n";
+    if (!outsideCenterIds.empty()) {
+        // 只读计量：这些单位包围盒进了框、中心却在框外 —— 即「看着没框住却被选中」的候选。
+        std::cout << "Box drag bbox-only units:";
+        for (int objectId : outsideCenterIds) {
+            const WorldObjectInstance* object = findObjectById(state, objectId);
+            const auto found = std::find_if(projectedObjects.begin(), projectedObjects.end(),
+                [objectId](const RuntimeProjectedObject& candidate) {
+                    return candidate.object != nullptr && candidate.object->instanceId == objectId;
+                });
+            if (found == projectedObjects.end()) {
+                std::cout << " #" << objectId << "(no-projection)";
+                continue;
+            }
+            const RECT bounds = runtimeRenderPlacementNativeRect(found->bounds);
+            std::cout << " #" << objectId
+                      << "(" << bounds.left << ',' << bounds.top << ' '
+                      << bounds.right << ',' << bounds.bottom;
+            if (object != nullptr) {
+                std::cout << " x" << object->x << ',' << object->y;
+            }
+            std::cout << ")";
+        }
+        std::cout << "\n";
+    }
     std::cout << "Box selection: " << buildSelectionLine(state) << "\n";
-    if (state.selectedObjectIds.empty()
-        || state.selectedObjectIds.size() != boxSelectionIds.size()) {
-        std::cerr << "Interaction smoke test failed: box selection mismatch.\n";
+    if (boxSelectionIds.empty() || !sameIdSet(boxSelectionIds, expectedBoxIds)) {
+        std::cerr << "Interaction smoke test failed: box drag selection mismatch."
+                  << " expected=" << expectedBoxIds.size()
+                  << " picked=" << boxSelectionIds.size() << ".\n";
         return 1;
     }
     for (int objectId : state.selectedObjectIds) {
