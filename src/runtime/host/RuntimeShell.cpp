@@ -89803,21 +89803,26 @@ int runRuntimeWindowSession(
             && !multiplayerRuntime && state.world.getSummary().loaded
             && !IsIconic(window);
         const auto simulationBatchStarted = clock::now();
-        const double requestedPresentationTickHz = gameSpeedTiming.unlimited()
-            ? 1.0 / runtimeGameSpeedTiming(5, state.config.fixedTickHz).secondsPerTick
-            : 1.0 / gameSpeedTiming.secondsPerTick;
+        // BUILD-03：所有档位（含最快的 6 档）都有有限的每拍墙钟配额，
+        // 不再有"拿 5 档速率当无上限参考"的特例。
+        const double requestedPresentationTickHz =
+            gameSpeedTiming.secondsPerTick > 0.0
+                ? 1.0 / gameSpeedTiming.secondsPerTick
+                : 1.0 / runtimeGameSpeedTiming(5, state.config.fixedTickHz)
+                    .secondsPerTick;
         const RuntimePresentationWorkBudget presentationBudget(
             frameStep.count(), state.perf.lastPaintMs,
             simulationCostEstimateMs, requestedPresentationTickHz);
         const bool remainderServiceEligible = usePresentationBudget
-            && !gameSpeedTiming.unlimited() && !state.runtimeMenuOpen
+            && !state.runtimeMenuOpen
             && !state.skirmishMatchFinished && state.pendingCampaignVideoPaths.empty()
             && !runtimePresentationRemainderReference();
         presentationRemainder.begin(presentationBudget, frameStep.count(),
             state.perf.lastPaintMs, extraServiceEstimateMs,
             simulationCostEstimateMs, requestedPresentationTickHz,
             remainderServiceEligible && extraServiceEstimateValid,
-            gameSpeedTiming.unlimited(), state.config.gameSpeed);
+            // 6 档不再是"无上限"，余量服务对每一档都按有限速率记账。
+            false, state.config.gameSpeed);
         if (liveBenchmark.enabled() && presentationRemainder.enabled())
             ++remainderEnabledBatches;
         int simulationTicksThisLoop = 0;
@@ -90086,10 +90091,9 @@ int runRuntimeWindowSession(
             extraServiceSincePaintMs = extraServiceEstimateMs = 0.0;
             extraServiceEstimateValid = false;
         }
-        const bool unlimitedAuthorityAdvanced = gameSpeedTiming.unlimited()
-            && tickAdvanced
-            && (!multiplayerRuntime
-                || state.multiplayerBridge->localPeerIsHost());
+        // BUILD-03：不再有"无上限档"，循环可以放心按帧截止时间睡；
+        // 此前最快档要靠不睡来多跑仿真拍，那正是"速度跟机器跑"的来源。
+        constexpr bool unlimitedAuthorityAdvanced = false;
         if (runtimeHostLoopShouldIdleSleep(paintQueued, unlimitedAuthorityAdvanced)) {
             hostLoop.sleepForIdleSlice();
         }

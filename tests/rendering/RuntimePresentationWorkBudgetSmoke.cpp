@@ -13,7 +13,7 @@ void require(bool value, const char* message) {
 void scenario(int speed, double tickMs, double paintMs) {
     const auto timing = runtimeGameSpeedTiming(speed, 30);
     RuntimePresentationWorkBudget budget(1.0 / 60.0, paintMs, tickMs,
-        speed == 6 ? 1.0 / runtimeGameSpeedTiming(5, 30).secondsPerTick : 1.0 / timing.secondsPerTick);
+        1.0 / timing.secondsPerTick);
     double wall = 0.0, priorWall = 0.0, credit = 0.0, deadline = 1.0 / 60.0;
     int ticks = 0, paints = 0, maximumTicks = 0;
     for (int batch = 0; batch < 2000; ++batch) {
@@ -44,9 +44,9 @@ void scenario(int speed, double tickMs, double paintMs) {
     }
     require(ticks > 0 && paints > 0, "simulation or presentation was starved");
     require(maximumTicks <= 16, "catch-up cap changed");
-    if (speed == 6 && tickMs <= 4.0)
-        require(maximumTicks > 1, "stale deadline caused one tick per paint");
-    if (speed != 6 && tickMs == 0.1 && paintMs == 1.0) {
+    // BUILD-03：最快档现在是有限速率，"靠不睡多跑拍"的路径已经不存在，
+    // 因此不再要求 maxTicks>1——一帧只够一拍就是正确结果。
+    if (tickMs == 0.1 && paintMs == 1.0) {
         const double expected = wall / timing.secondsPerTick;
         require(std::abs(ticks - expected) <= 2.0, "finite authored speed changed");
     }
@@ -80,7 +80,7 @@ int main() {
                 for (double paintMs : {1.0, 10.0, 30.0, 100.0})
                     scenario(speed, tickMs, paintMs);
         std::cout << "Presentation service budget passed: 84 clock scenarios, "
-            "finite cadence, retained tick credit, unlimited service, slow paints.\n";
+            "finite cadence, retained tick credit, finite fastest setting, slow paints.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

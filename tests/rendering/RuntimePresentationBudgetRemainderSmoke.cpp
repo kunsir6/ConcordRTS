@@ -122,8 +122,9 @@ int main() {
                         const auto b=RemainderClock::run(speed,tick,paint,extra,RemainderClock::Route::Reference);
                         const auto c=RemainderClock::run(speed,tick,paint,extra,RemainderClock::Route::Optimized);
                         require(a.sameTimeline(b),"reference changed complete original timeline");
-                        if(speed==6) require(a.sameTimeline(c),"unlimited scheduling/throughput changed");
-                        else {
+                        {
+                            // BUILD-03：最快档也是有限速率，走和其它档一样的
+                            // "TPS 不得低于 min(requested, old)" 契约。
                             const double requested=1.0/runtimeGameSpeedTiming(speed,30).secondsPerTick;
                             const double floor=std::min(requested,a.tps());
                             const double quantization=16.0/std::min(a.wall,c.wall);
@@ -150,7 +151,7 @@ int main() {
         }
         std::cout<<"Presentation remainder clock: original84=unchanged comparisons="<<comparisons
             <<" positiveEnabledCases="<<enabled
-            <<" finiteTPS=min(requested,old)-catchUpQuantization referenceTimeline=exact unlimitedTimeline=exact passed=yes\n";
+            <<" finiteTPS=min(requested,old)-catchUpQuantization referenceTimeline=exact fastestFinite=checked passed=yes\n";
         return 0;
     } catch(const std::exception& e) {
         std::cerr<<e.what()<<'\n';return 1;

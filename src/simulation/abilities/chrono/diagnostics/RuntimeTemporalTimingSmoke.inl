@@ -295,7 +295,7 @@ bool runRuntimeTemporalTimingSmokeProbe(RuntimeWindowState& live, std::string& e
     // This proves pacing integration, not achieved wall-clock performance.
     int previousProgress = -1;
     int previousScheduledTicks = -1;
-    for (int speed = 0; speed < 6; ++speed) {
+    for (int speed = 0; speed <= 6; ++speed) {
         auto storage = fixture(30, 0, "MTNK", 1);
         auto& s = *storage;
         if (!establish(s, 1)) return fail("speed fixture did not connect");
@@ -317,25 +317,35 @@ bool runRuntimeTemporalTimingSmokeProbe(RuntimeWindowState& live, std::string& e
             << " progress=" << actual << " budgetSeconds=1\n";
     }
 
-    // The retail maximum is an unlimited/no-wait sentinel, not a fixed rate.
-    // A zero-elapsed scheduler batch still advances real temporal simulation,
-    // while the same input-service caps used by the loop remain authoritative.
+    // BUILD-03：最快档不再照抄 retail 的"零等待哨兵"。哨兵意味着"一帧只跑一拍"，
+    // 于是游戏速度等于机器帧率；现在 6 档是有限速率（5 档的 1.5 倍），
+    // 零墙钟批次必须一拍都不推，一秒墙钟也只该给 281 拍（30Hz 基）。
     for (const int budget : {8, 16}) {
         auto storage = fixture(30, 0, "MTNK", 1);
         auto& s = *storage;
-        if (!establish(s, 1)) return fail("unlimited speed fixture did not connect");
+        if (!establish(s, 1)) return fail("fastest speed fixture did not connect");
         const auto initial = targetStatus(s);
         s.config.gameSpeed = 6;
         const auto timing = runtimeGameSpeedTiming(s.config.gameSpeed, s.config.fixedTickHz);
         if (targetStatus(s).progress != initial.progress
-            || !timing.unlimited() || timing.nativeWaitQuanta != 0
-            || timing.secondsPerTick != 0.0 || timing.roundedTickRate() != 0
-            || runtimeSimulationPacingTickRate(s.config) != 0)
-            return fail("speed=6 must retain progress and use the unlimited no-wait sentinel");
+            || timing.unlimited() || timing.secondsPerTick <= 0.0
+            || timing.roundedTickRate() != 281
+            || runtimeSimulationPacingTickRate(s.config) != 281)
+            return fail("speed=6 must be a finite 1.5x rate, not the no-wait sentinel");
+        if (timing.ready(timing.accumulate(0.0, 0.0, budget), 0, budget))
+            return fail("speed=6 advanced a zero-elapsed batch");
+        double oneSecond = timing.accumulate(0.0, 1.0, 400);
+        int scheduledTicks = 0;
+        while (timing.ready(oneSecond, scheduledTicks, 400)) {
+            oneSecond = timing.consume(oneSecond);
+            ++scheduledTicks;
+        }
+        if (scheduledTicks != 281)
+            return fail("speed=6 wall clock does not schedule 281 ticks per second");
         const int startTick = s.tick;
-        double accumulated = timing.accumulate(0.0, 0.0, budget);
+        double accumulated = timing.accumulate(0.0, 1.0, budget);
         int advanced = 0;
-        while (advanced <= budget && timing.ready(accumulated, advanced, budget)) {
+        while (timing.ready(accumulated, advanced, budget)) {
             step(s);
             ++advanced;
             accumulated = timing.consume(accumulated);
@@ -345,15 +355,15 @@ bool runRuntimeTemporalTimingSmokeProbe(RuntimeWindowState& live, std::string& e
             if (!target || target->health != 300 || status.progress != expected
                 || status.requiredProgress != 3000 || !s.specialMechanisms.isTemporalFrozen(2)
                 || !s.specialMechanisms.hasTemporalAttacker(1, 2))
-                return fail("speed=6 zero-wait batch changed exact temporal progress or intact target");
+                return fail("speed=6 batch changed exact temporal progress or intact target");
         }
-        if (advanced != budget || s.tick - startTick != budget || accumulated != 0.0
+        if (advanced != budget || s.tick - startTick != budget
             || timing.ready(accumulated, advanced, budget)
-            || !timing.ready(accumulated, 0, budget)
             || targetStatus(s).progress <= initial.progress)
-            return fail("speed=6 zero-wait simulation did not honor the complete finite input batch cap");
-        std::cout << "Temporal speed: speed=6 unlimited=yes elapsedSeconds=0 batchCap=" << budget
-            << " advancedTicks=" << advanced << " progress=" << targetStatus(s).progress << '\n';
+            return fail("speed=6 finite batch did not honor the input batch cap");
+        std::cout << "Temporal speed: speed=6 unlimited=no ticksPerSecond=" << scheduledTicks
+            << " batchCap=" << budget << " advancedTicks=" << advanced
+            << " progress=" << targetStatus(s).progress << '\n';
     }
 
     std::cout << "Temporal timing: passed cases=" << timingCases << " reloads=" << reloadCases

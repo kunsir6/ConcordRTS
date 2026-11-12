@@ -62,8 +62,14 @@ int originalFrameCount(int delay, int untilMilliseconds) {
 // The user selected 50% faster finite speeds on top of the audited retail
 // cadence. Keep this expectation in integer time, independent of the runtime
 // helper and its floating-point accumulation (some rates yield partial ticks).
+// BUILD-03：最快档不再是零等待，而是"速度 5 的 1.5 倍"——它的等待是 2/3 个
+// 量子，所以这里把延迟单位从"整量子"换成"三分之一量子"，最快档传 2。
+int acceleratedFrameCountThirds(int delayThirds, int tickHz, int untilMilliseconds) {
+    return untilMilliseconds * tickHz * 3 * 3 / (16 * delayThirds * 15 * 2);
+}
+
 int acceleratedFrameCount(int delay, int tickHz, int untilMilliseconds) {
-    return untilMilliseconds * tickHz * 3 / (16 * delay * 15 * 2);
+    return acceleratedFrameCountThirds(delay * 3, tickHz, untilMilliseconds);
 }
 }
 
@@ -101,17 +107,24 @@ int main(int argc, char** argv) {
         constexpr std::array<int, 6> referenceFrames{{10,12,15,20,30,60}};
         constexpr std::array<int, 3> tickRates{{15,30,60}};
         constexpr std::array<int, 2> batchBudgets{{8,16}};
-        constexpr double expectedMilliseconds[3][6] = {
-            {64,160.0/3.0,128.0/3.0,32,64.0/3.0,32.0/3.0},
-            {32,80.0/3.0,64.0/3.0,16,32.0/3.0,16.0/3.0},
-            {16,40.0/3.0,32.0/3.0,8,16.0/3.0,8.0/3.0}
+        // 第 7 列是最快档：速度 5 的每拍墙钟再除以 1.5（= 2/3 个量子）。
+        constexpr double expectedMilliseconds[3][7] = {
+            {64,160.0/3.0,128.0/3.0,32,64.0/3.0,32.0/3.0,64.0/9.0},
+            {32,80.0/3.0,64.0/3.0,16,32.0/3.0,16.0/3.0,32.0/9.0},
+            {16,40.0/3.0,32.0/3.0,8,16.0/3.0,8.0/3.0,16.0/9.0}
         };
-        constexpr int expectedRoundedTickRates[3][6] = {
-            {16,19,23,31,47,94}, {31,38,47,63,94,188}, {63,75,94,125,188,375}
+        constexpr int expectedRoundedTickRates[3][7] = {
+            {16,19,23,31,47,94,141},
+            {31,38,47,63,94,188,281},
+            {63,75,94,125,188,375,563}
         };
-        for (int speed = 0; speed < 6; ++speed) {
-            require(originalFrameCount(6 - speed, 960) == referenceFrames[speed],
-                "original integer-clock reference count differs", checks);
+        for (int speed = 0; speed < 7; ++speed) {
+            // 0..5 有对应的 retail 档位；最快档没有 retail 等价物（retail 是零等待哨兵），
+            // 因此只核对"它是 5 档的 1.5 倍"和墙钟排程，不去比 retail 帧数。
+            if (speed < 6) {
+                require(originalFrameCount(6 - speed, 960) == referenceFrames[speed],
+                    "original integer-clock reference count differs", checks);
+            }
             for (std::size_t rate = 0; rate < tickRates.size(); ++rate) {
                 const auto timing = runtimeGameSpeedTiming(speed, tickRates[rate]);
                 require(!timing.unlimited()
@@ -120,9 +133,11 @@ int main(int argc, char** argv) {
                     "finite slider interval does not apply the requested 50% speedup", checks);
                 require(timing.roundedTickRate() == expectedRoundedTickRates[rate][speed],
                     "diagnostic rounded tick rate differs", checks);
-                require(acceleratedFrameCount(6 - speed, tickRates[rate], 960)
-                    == referenceFrames[speed] * tickRates[rate] * 3 / (15 * 2),
-                    "accelerated integer-clock reference count differs", checks);
+                if (speed < 6) {
+                    require(acceleratedFrameCount(6 - speed, tickRates[rate], 960)
+                        == referenceFrames[speed] * tickRates[rate] * 3 / (15 * 2),
+                        "accelerated integer-clock reference count differs", checks);
+                }
                 for (const int budget : batchBudgets) {
                     double accumulated = 0.0;
                     int advanced = 0;
@@ -137,7 +152,10 @@ int main(int argc, char** argv) {
                             accumulated = timing.consume(accumulated);
                         }
                     }
-                    require(advanced == acceleratedFrameCount(6 - speed, tickRates[rate], 961),
+                    // 速度 0..5 的延迟是 3/3..18/3 个量子；6 档是 2/3 个量子。
+                    const int delayThirds = speed >= 6 ? 2 : 3 * (6 - speed);
+                    require(advanced == acceleratedFrameCountThirds(
+                            delayThirds, tickRates[rate], 961),
                         "wall-clock schedule does not preserve the requested speedup", checks);
                     accumulated = timing.accumulate(0.0, 3600.0, budget);
                     int caughtUp = 0;
@@ -158,29 +176,38 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // BUILD-03：最快档不再是零等待哨兵——它必须是有限速率，且恰好是 5 档的
+        // 1.5 倍；零墙钟批次（accumulate==0 却仍 ready）必须彻底消失。
         for (const int hz : tickRates) {
             const auto fastest = runtimeGameSpeedTiming(6, hz);
-            require(fastest.unlimited() && fastest.secondsPerTick == 0.0
-                && fastest.roundedTickRate() == 0,
-                "fastest has an artificial fixed rate", checks);
-            for (const int budget : batchBudgets) {
-                double accumulated = fastest.accumulate(0.0, 0.0, budget);
-                int advanced = 0;
-                while (fastest.ready(accumulated, advanced, budget)) {
-                    ++advanced;
-                    accumulated = fastest.consume(accumulated);
-                }
-                require(advanced == budget && accumulated == 0.0,
-                    "unlimited zero-wall-time batch does not preserve input budget", checks);
+            const auto next = runtimeGameSpeedTiming(5, hz);
+            require(!fastest.unlimited() && fastest.secondsPerTick > 0.0
+                && fastest.roundedTickRate() > next.roundedTickRate(),
+                "fastest is no longer finite and faster than the previous setting", checks);
+            require(std::abs(fastest.secondsPerTick * 1.5 - next.secondsPerTick) < 1e-12,
+                "fastest is not exactly 1.5x the previous setting", checks);
+            require(!fastest.ready(0.0, 0, 16),
+                "fastest still advances a zero-wall-time batch", checks);
+        }
+        // 七档阶梯严格单调（tick 率递增），任何一档都不依赖墙钟以外的输入。
+        for (const int hz : tickRates) {
+            int previousRate = 0;
+            for (int speed = 0; speed <= 6; ++speed) {
+                const int rate = runtimeGameSpeedTiming(speed, hz).roundedTickRate();
+                require(rate > previousRate,
+                    "game-speed ladder is not strictly monotonic", checks);
+                previousRate = rate;
             }
         }
         require(runtimeGameSpeedTiming(-1, 30).nativeWaitQuanta == 6
-            && runtimeGameSpeedTiming(7, 30).unlimited()
+            && !runtimeGameSpeedTiming(7, 30).unlimited()
+            && runtimeGameSpeedTiming(7, 30).roundedTickRate()
+                == runtimeGameSpeedTiming(6, 30).roundedTickRate()
             && std::isfinite(runtimeGameSpeedTiming(0, 0).secondsPerTick),
             "invalid configuration is not bounded", checks);
         std::cout << "Game speed timing smoke: passed=yes checks=" << checks
-            << " finiteSchedules=36 unlimitedSchedules=6 retailClockQuantumMs=16"
-            << " finiteSpeedMultiplier=1.5 batchBudgets=8,16"
+            << " finiteSchedules=42 unlimitedSchedules=0 retailClockQuantumMs=16"
+            << " finiteSpeedMultiplier=1.5 fastestOverPrevious=1.5 batchBudgets=8,16"
             << " displayFpsMeasured=no\n";
         return 0;
     } catch (const std::exception& error) {
