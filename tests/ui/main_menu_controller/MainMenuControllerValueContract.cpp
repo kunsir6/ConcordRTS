@@ -36,6 +36,7 @@ struct Host final : RuntimeMainMenuServices {
     bool pollVideo() override {events.push_back("poll");return changed;}
     std::size_t warningFrames() const override {return warnings;}
     void trackMouseLeave() override {events.push_back("track");}
+    void reloadEditionResources() override {events.push_back("reload-edition");}
     void capture() override {captured=true;events.push_back("capture");}
     void releaseCaptureIfOwned() override {captured=false;events.push_back("release-owned");}
     bool shiftDown() const override {events.push_back("shift");return shift;}
