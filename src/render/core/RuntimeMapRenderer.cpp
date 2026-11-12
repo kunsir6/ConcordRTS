@@ -15308,6 +15308,26 @@ bool drawRuntimeShpFrame(
 
 #include "render/core/RuntimeMapGpuObjectBridge.inl"
 
+// Read-only shadow diagnosis. Enabled with CONCORD_SHADOW_TRACE=1; the budget
+// keeps a multi-frame capture from flooding the log while still covering the
+// handful of structures a smoke frame can carry.
+static bool runtimeShadowTraceEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("CONCORD_SHADOW_TRACE");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool runtimeShadowTraceTake() {
+    static int remaining = 12;
+    if (!runtimeShadowTraceEnabled() || remaining <= 0) {
+        return false;
+    }
+    --remaining;
+    return true;
+}
+
 bool drawRuntimeVoxelShadowMask(
     HDC dc,
     const RECT& viewport,
@@ -24042,6 +24062,10 @@ struct RuntimeWorldObjectShadowResult {
     bool shpMask = false;
     bool voxelMask = false;
     bool generatedFallback = false;
+    // The sprite frame itself resolved to 0x0, so the "resolved empty mask"
+    // shortcut fired without any art. Kept apart from shpMask because the
+    // cause is a missing asset, not a shadow that failed to darken.
+    bool authoredEmptyBody = false;
     int pixelsDarkened = 0;
     int voxelShadowSectionRequested = 0;
     int voxelShadowSection = 0;
@@ -24222,6 +24246,7 @@ RuntimeWorldObjectShadowResult drawRuntimeWorldObjectShadow(
         object.kind == WorldObjectKind::Structure
     );
     const bool authoredEmpty = shp->image.width == 0 && shp->image.height == 0;
+    result.authoredEmptyBody = authoredEmpty;
     const bool validMask = authoredEmpty || (shp->hasShadowFrame
         && drawRuntimeShpShadowFrame(
             dc,
@@ -24235,6 +24260,40 @@ RuntimeWorldObjectShadowResult drawRuntimeWorldObjectShadow(
     if (validMask) {
         result.shpMask = true;
         result.pixelsDarkened = darkenedPixels;
+        if (object.kind == WorldObjectKind::Structure && darkenedPixels == 0
+            && runtimeShadowTraceTake()) {
+            // A structure reached the authored-shadow path, the mask "resolved",
+            // yet nothing was darkened. Print the four quantities that decide
+            // which of the silent early-outs fired: the authored frame size,
+            // its nonzero coverage, where it lands on screen, and whether that
+            // rectangle touches the viewport at all.
+            int nonzeroPixels = 0;
+            for (const unsigned char value : shp->shadowImage.pixels) {
+                if (value != 0) {
+                    ++nonzeroPixels;
+                }
+            }
+            const RECT frameRect = runtimeShpFrameScreenRect(
+                shpShadowCenter, camera, shp->shadowImage);
+            std::cout << "[shadow-trace] structure type=" << object.type
+                      << " instance=" << object.instanceId
+                      << " hasFrame=" << (shp->hasShadowFrame ? 1 : 0)
+                      << " authoredEmpty=" << (authoredEmpty ? 1 : 0)
+                      << " body=" << shp->image.width << "x" << shp->image.height
+                      << " frame=" << shp->shadowImage.width << "x"
+                      << shp->shadowImage.height
+                      << " globalH=" << shp->shadowImage.globalHeight
+                      << " nonzero=" << nonzeroPixels
+                      << " center=" << shpShadowCenter.x << ","
+                      << shpShadowCenter.y
+                      << " rect=" << frameRect.left << "," << frameRect.top
+                      << "," << frameRect.right << "," << frameRect.bottom
+                      << " viewport=" << viewport.left << "," << viewport.top
+                      << "," << viewport.right << "," << viewport.bottom
+                      << " intersects="
+                      << (rectIntersects(frameRect, viewport) ? 1 : 0)
+                      << "\n";
+        }
     } else {
         result.generatedFallback = true;
         POINT fallbackCenter = groundCenter;
@@ -24319,8 +24378,14 @@ void recordRuntimeWorldObjectShadowResult(
         // Mask resolved but not a single pixel was darkened: the structure is
         // on screen yet its authored shadow cast nothing. Count it separately
         // from "never a candidate" so the two causes stay distinguishable.
-        if (object.kind == WorldObjectKind::Structure && result.shpMask) {
-            ++stats.structureShadowEmptyMasks;
+        if (object.kind == WorldObjectKind::Structure) {
+            if (result.authoredEmptyBody) {
+                // No sprite frame at all (theater variant missing): nothing to
+                // cast and nothing to draw. An asset gap, not a shadow bug.
+                ++stats.structureShadowEmptyBodies;
+            } else if (result.shpMask) {
+                ++stats.structureShadowEmptyMasks;
+            }
         }
         return;
     }
@@ -27801,6 +27866,7 @@ void emitRuntimeRenderDiagnostics(const RuntimeMapRenderStats& stats) {
               << " structures=" << stats.structureShadowsDrawn
               << " structureCand=" << stats.structureShadowCandidates
               << " structureEmpty=" << stats.structureShadowEmptyMasks
+              << " structureNoArt=" << stats.structureShadowEmptyBodies
               << " units=" << stats.unitShadowsDrawn
               << " infantry=" << stats.infantryShadowsDrawn
               << " aircraft=" << stats.aircraftShadowsDrawn

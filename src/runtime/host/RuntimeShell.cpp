@@ -28701,6 +28701,7 @@ bool cancelRuntimeActiveSuperWeaponTargetSelection(
 int runtimePlayerDefeatNoticeStackHeight(const RuntimeWindowState& state, const RECT& viewport, std::uint64_t nowMs);
 #include "ui/input/RuntimePlayerHotkeysUi.inl"
 #include "ui/input/RuntimePlayerDefeatNoticeUi.inl"
+#include "ui/hud/RuntimeBuildReadyBanner.inl"
 #include "ui/input/RuntimePlayerCommandsUi.inl"
 
 #include "ui/input/RuntimeMapRightPointerUi.inl"
@@ -29184,6 +29185,8 @@ LRESULT CALLBACK runtimeWindowProc(
                     RuntimePerfTraceScope otherUiTrace("paint.otherUiOverlays", state->tick);
                     drawRuntimeGameplayTooltip(dc, clientRect, *state);
                     drawRuntimePlayerHotkeyOverlay(dc, clientRect, *state);
+                    // 就绪角标画在视口顶边，压在淡入提示之下、菜单之上。
+                    drawRuntimeBuildReadyBanner(dc, clientRect, *state);
                     drawRuntimeMenuOverlay(dc, clientRect, *state);
                     drawRuntimeSkirmishResultOverlay(dc, clientRect, *state);
                     drawRuntimePlayerDefeatNotices(dc,*state,clientRect);
@@ -34461,6 +34464,12 @@ int runRuntimeRenderSmokeTest(const RuntimeConfig& config) {
                   << ".\n";
         return 1;
     }
+    // A structure whose sprite frame resolved to 0x0 has no art to cast from:
+    // every candidate on this map is a Tank Bunker whose theater variant is
+    // missing from the exported asset set. Counting that as a shadow-pipeline
+    // defect would be wrong, but so is excusing it: the measurement shows the
+    // recorded candidates are NOT the empty-bodied ones (structureNoArt=0), so
+    // the gate keeps its single meaning until the record-side set is identified.
     if (!terrainCoverageMode
         && (stats.shadowCandidates <= 0
             || stats.shadowsDrawn <= 0
@@ -34486,8 +34495,17 @@ int runRuntimeRenderSmokeTest(const RuntimeConfig& config) {
                   << stats.structureShadowCandidates
                   << " structureEmpty="
                   << stats.structureShadowEmptyMasks
+                  << " structureNoArt="
+                  << stats.structureShadowEmptyBodies
                   << ".\n";
         return 1;
+    }
+    if (stats.structureShadowEmptyBodies > 0) {
+        std::cout << "Natural-map structure shadows: no-art="
+                  << stats.structureShadowEmptyBodies
+                  << " of " << stats.structureShadowCandidates
+                  << " candidates have a 0x0 sprite frame for this theater "
+                  << "(nothing to cast; asset gap, not a shadow defect)\n";
     }
     std::cout << "Runtime custom-ID shadow asset contract: drawn="
               << shadowAssetRenderStats.shadowsDrawn
@@ -59555,6 +59573,7 @@ bool runRuntimeNumberImpassableRowsSemanticsProbe(
 #include "simulation/combat/damage/diagnostics/RuntimeBattleFortressCrushSmoke.inl"
 #include "ui/input/diagnostics/RuntimePlayerBeaconSmoke.inl"
 #include "ui/input/diagnostics/RuntimePlayerDefeatNoticeSmoke.inl"
+#include "ui/hud/diagnostics/RuntimeBuildReadyBannerSmoke.inl"
 #include "ui/hud/diagnostics/RuntimeSuperWeaponTimerFontSmoke.inl"
 #include "simulation/buildings/diagnostics/RuntimeBioReactorOccupancyTransitionSmoke.inl"
 #include "simulation/abilities/spawning/diagnostics/RuntimeDiskCrashSmoke.inl"
@@ -61193,6 +61212,13 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
     if (std::getenv("CONCORD_COMMAND_SMOKE_CREDIT_AUDIO_ONLY")) {
         std::string error;
         if (!runRuntimeCreditAudioSmoke(config, error)) {
+            std::cerr << error << '\n'; return 1;
+        }
+        return 0;
+    }
+    if (std::getenv("CONCORD_COMMAND_SMOKE_BUILD_READY_BANNER_ONLY")) {
+        std::string error;
+        if (!runRuntimeBuildReadyBannerSmoke(config, error)) {
             std::cerr << error << '\n'; return 1;
         }
         return 0;
