@@ -493,6 +493,19 @@ void replayRuntimeBuildingDepthGeometry(const GameWorld& world, const RECT& view
 } // namespace
 
 namespace {
+// Read-only diagnosis for "the building paints but no pixel of it is visible".
+// A participant with an empty span list can mean two very different things:
+// it never entered the raster pass, or it was rasterised and every pixel was
+// taken by a nearer draw. Enabled with CONCORD_HIT_SPAN_TRACE=1; the buckets
+// below are the only way to tell those two apart from the span list alone.
+bool runtimeHitSpanTraceEnabled() {
+    static const bool enabled = []() {
+        const char* value = runtimeRendererEnvironmentValue("CONCORD_HIT_SPAN_TRACE");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
 bool extractRuntimeBuildingVisibleHitSpans(const RuntimeBuildingDepthFrameState& frame,
     RuntimeBuildingVisibleHitSpans& visibleSpans, int animationTick,
     std::size_t spanLimit = std::numeric_limits<std::size_t>::max()) {
@@ -542,6 +555,57 @@ bool extractRuntimeBuildingVisibleHitSpans(const RuntimeBuildingDepthFrameState&
                     static_cast<std::int32_t>(viewport.left + x)});
                 ++spanCount;
             }
+        }
+    }
+    if (runtimeHitSpanTraceEnabled()) {
+        std::size_t unownedPixels = 0, depthOnlyPixels = 0;
+        std::unordered_map<int, std::size_t> visiblePixels, depthPixels;
+        for (const auto& pixel : frame.pixels) {
+            if (pixel.visibleOwner < 0) ++unownedPixels;
+            else ++visiblePixels[pixel.visibleOwner];
+            if (pixel.depthOwner >= 0) ++depthPixels[pixel.depthOwner];
+        }
+        for (const auto& [id, count] : depthPixels) {
+            const auto visible = visiblePixels.find(id);
+            if (visible == visiblePixels.end()) depthOnlyPixels += count;
+        }
+        std::unordered_map<int, std::size_t> drawsInView, drawsOffView;
+        for (const auto& draw : frame.draws) {
+            RECT clipped{};
+            if (IntersectRect(&clipped, &draw.rect, &viewport)) ++drawsInView[draw.instanceId];
+            else ++drawsOffView[draw.instanceId];
+        }
+        std::size_t emptyParticipants = 0;
+        for (const auto& [id, spans] : visibleSpans)
+            if (spans.empty()) ++emptyParticipants;
+        std::cout << "Hit span trace: tick=" << animationTick
+            << " reference=" << (frame.referenceMode ? "yes" : "no")
+            << " resolved=" << (frame.resolved ? "yes" : "no")
+            << " viewport=" << viewport.left << "," << viewport.top << ","
+            << viewport.right << "," << viewport.bottom
+            << " pixels=" << frame.pixels.size()
+            << " participants=" << frame.participatingIds.size()
+            << " draws=" << frame.draws.size()
+            << " scanRestricted=" << (restrictScan ? "yes" : "no")
+            << " unownedPixels=" << unownedPixels
+            << " depthOnlyPixels=" << depthOnlyPixels
+            << " visibleOwners=" << visiblePixels.size()
+            << " emptyParticipants=" << emptyParticipants << '\n';
+        std::size_t printed = 0;
+        for (const auto& [id, spans] : visibleSpans) {
+            if (!spans.empty() || printed >= 8) continue;
+            ++printed;
+            const auto inView = drawsInView.find(id);
+            const auto offView = drawsOffView.find(id);
+            const auto visible = visiblePixels.find(id);
+            const auto depth = depthPixels.find(id);
+            std::cout << "  empty #" << id
+                << " participating=" << (frame.participatingIds.contains(id) ? "yes" : "no")
+                << " drawsInView=" << (inView == drawsInView.end() ? 0 : inView->second)
+                << " drawsOffView=" << (offView == drawsOffView.end() ? 0 : offView->second)
+                << " visiblePixels=" << (visible == visiblePixels.end() ? 0 : visible->second)
+                << " depthPixels=" << (depth == depthPixels.end() ? 0 : depth->second)
+                << '\n';
         }
     }
     if (frame.profileEnabled) {
