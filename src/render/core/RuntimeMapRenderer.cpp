@@ -15328,6 +15328,18 @@ static bool runtimeShadowTraceTake() {
     return true;
 }
 
+// Separate budget from the draw-side trace: a frame with several structures
+// would otherwise starve the record side, and the record side is the one that
+// has to agree with the printed totals.
+static bool runtimeShadowRecordTraceTake() {
+    static int remaining = 16;
+    if (!runtimeShadowTraceEnabled() || remaining <= 0) {
+        return false;
+    }
+    --remaining;
+    return true;
+}
+
 bool drawRuntimeVoxelShadowMask(
     HDC dc,
     const RECT& viewport,
@@ -15338,10 +15350,14 @@ bool drawRuntimeVoxelShadowMask(
     const std::vector<unsigned char>& shadowPixels,
     bool binaryMask = false,
     int* darkenedPixels = nullptr,
-    RuntimeShadowOpaqueSpanCache* spanCache = nullptr
+    RuntimeShadowOpaqueSpanCache* spanCache = nullptr,
+    RuntimeShadowMaskOutcome* outcome = nullptr
 ) {
     if (darkenedPixels != nullptr) {
         *darkenedPixels = 0;
+    }
+    if (outcome != nullptr) {
+        *outcome = RuntimeShadowMaskOutcome::None;
     }
     if (image.width <= 0
         || image.height <= 0
@@ -15355,7 +15371,12 @@ bool drawRuntimeVoxelShadowMask(
     if (useSpanCache) {
         try {
             if (!spanCache->prepare(shadowPixels, image.width, image.height)
-                || !spanCache->hasNonzero()) return false;
+                || !spanCache->hasNonzero()) {
+                if (outcome != nullptr) {
+                    *outcome = RuntimeShadowMaskOutcome::Empty;
+                }
+                return false;
+            }
         } catch (const std::bad_alloc&) {
             spanCache->invalidate();
             useSpanCache = false;
@@ -15366,6 +15387,9 @@ bool drawRuntimeVoxelShadowMask(
             shadowPixels.end(),
             [](unsigned char value) { return value != 0; }
         )) {
+        if (outcome != nullptr) {
+            *outcome = RuntimeShadowMaskOutcome::Empty;
+        }
         return false;
     }
 
@@ -15373,6 +15397,11 @@ bool drawRuntimeVoxelShadowMask(
     const int targetX = imageRect.left;
     const int targetY = imageRect.top;
     if (!rectIntersects(imageRect, viewport)) {
+        // Nothing to draw here, and no way for the caller to tell this apart
+        // from "mask published but empty" — hence the named outcome.
+        if (outcome != nullptr) {
+            *outcome = RuntimeShadowMaskOutcome::OffScreen;
+        }
         return true;
     }
 
@@ -15387,13 +15416,21 @@ bool drawRuntimeVoxelShadowMask(
         static_cast<int>(viewport.right) - targetX
     );
 
-    if(runtimeGpuWorldShadow(dc,viewport,targetX,targetY,image.width,image.height,shadowPixels,binaryMask,false,darkenedPixels))return true;
+    if(runtimeGpuWorldShadow(dc,viewport,targetX,targetY,image.width,image.height,shadowPixels,binaryMask,false,darkenedPixels)) {
+        if (outcome != nullptr) {
+            *outcome = RuntimeShadowMaskOutcome::Drawn;
+        }
+        return true;
+    }
 
     if (hasPixelSurface(context)) {
         const bool useHalfBlackFastPath = !runtimeFrameScalingReferenceForRender();
         const int clippedStartX = std::max(startX, -targetX);
         const int clippedEndX = std::min(endX, context.surfaceWidth - targetX);
         if (clippedStartX >= clippedEndX) {
+            if (outcome != nullptr) {
+                *outcome = RuntimeShadowMaskOutcome::ClippedOut;
+            }
             return true;
         }
 
@@ -15405,6 +15442,9 @@ bool drawRuntimeVoxelShadowMask(
                 targetX, targetY, clippedStartX, clippedEndX, clippedStartY, clippedEndY,
                 binaryMask, useHalfBlackFastPath);
             if (darkenedPixels) *darkenedPixels += static_cast<int>(darkened);
+            if (outcome != nullptr) {
+                *outcome = RuntimeShadowMaskOutcome::Drawn;
+            }
             return true;
         }
 
@@ -15446,6 +15486,9 @@ bool drawRuntimeVoxelShadowMask(
                     ++*darkenedPixels;
                 }
             }
+        }
+        if (outcome != nullptr) {
+            *outcome = RuntimeShadowMaskOutcome::Drawn;
         }
         return true;
     }
@@ -15498,6 +15541,9 @@ bool drawRuntimeVoxelShadowMask(
         }
     }
 
+    if (outcome != nullptr) {
+        *outcome = RuntimeShadowMaskOutcome::Drawn;
+    }
     return true;
 }
 
@@ -15508,7 +15554,8 @@ bool drawRuntimeShpShadowFrame(
     const RuntimeMapRenderContext& context,
     const RuntimeMapCamera& camera,
     const RuntimeShpFrameImage& image,
-    int* darkenedPixels
+    int* darkenedPixels,
+    RuntimeShadowMaskOutcome* outcome = nullptr
 ) {
     return drawRuntimeVoxelShadowMask(
         dc,
@@ -15520,7 +15567,8 @@ bool drawRuntimeShpShadowFrame(
         image.pixels,
         true,
         darkenedPixels,
-        &image.shadowMaskSpanCache
+        &image.shadowMaskSpanCache,
+        outcome
     );
 }
 
@@ -24066,6 +24114,7 @@ struct RuntimeWorldObjectShadowResult {
     // shortcut fired without any art. Kept apart from shpMask because the
     // cause is a missing asset, not a shadow that failed to darken.
     bool authoredEmptyBody = false;
+    RuntimeShadowMaskOutcome maskOutcome = RuntimeShadowMaskOutcome::None;
     int pixelsDarkened = 0;
     int voxelShadowSectionRequested = 0;
     int voxelShadowSection = 0;
@@ -24247,6 +24296,7 @@ RuntimeWorldObjectShadowResult drawRuntimeWorldObjectShadow(
     );
     const bool authoredEmpty = shp->image.width == 0 && shp->image.height == 0;
     result.authoredEmptyBody = authoredEmpty;
+    RuntimeShadowMaskOutcome maskOutcome = RuntimeShadowMaskOutcome::None;
     const bool validMask = authoredEmpty || (shp->hasShadowFrame
         && drawRuntimeShpShadowFrame(
             dc,
@@ -24255,8 +24305,13 @@ RuntimeWorldObjectShadowResult drawRuntimeWorldObjectShadow(
             context,
             camera,
             shp->shadowImage,
-            &darkenedPixels
+            &darkenedPixels,
+            &maskOutcome
         ));
+    if (authoredEmpty) {
+        maskOutcome = RuntimeShadowMaskOutcome::Empty;
+    }
+    result.maskOutcome = maskOutcome;
     if (validMask) {
         result.shpMask = true;
         result.pixelsDarkened = darkenedPixels;
@@ -24344,6 +24399,14 @@ void recordRuntimeWorldObjectShadowResult(
     bool aircraft,
     const RuntimeWorldObjectShadowResult& result
 ) {
+    // The draw-side trace prints frame geometry, but it is consumed from a
+    // separate budget and can run out long before the frame being summarised.
+    // This one prints where the summary is actually accumulated, so the per
+    // object line and the totals can never describe different sets.
+    const bool traceThis =
+        object.kind == WorldObjectKind::Structure
+        && !result.drawn
+        && runtimeShadowRecordTraceTake();
     if (result.candidate) {
         ++stats.shadowCandidates;
         if (object.kind == WorldObjectKind::Structure) {
@@ -24384,8 +24447,30 @@ void recordRuntimeWorldObjectShadowResult(
                 // cast and nothing to draw. An asset gap, not a shadow bug.
                 ++stats.structureShadowEmptyBodies;
             } else if (result.shpMask) {
-                ++stats.structureShadowEmptyMasks;
+                if (result.maskOutcome == RuntimeShadowMaskOutcome::OffScreen) {
+                    ++stats.structureShadowOffScreen;
+                } else if (result.maskOutcome == RuntimeShadowMaskOutcome::ClippedOut) {
+                    ++stats.structureShadowClippedOut;
+                } else {
+                    ++stats.structureShadowEmptyMasks;
+                }
             }
+        }
+        if (traceThis) {
+            std::cout << "[shadow-record] structure type=" << object.type
+                      << " instance=" << object.instanceId
+                      << " authoredEmpty=" << (result.authoredEmptyBody ? 1 : 0)
+                      << " shpMask=" << (result.shpMask ? 1 : 0)
+                      << " voxelMask=" << (result.voxelMask ? 1 : 0)
+                      << " outcome=" << static_cast<int>(result.maskOutcome)
+                      << " pixels=" << result.pixelsDarkened
+                      << " | totals cand=" << stats.structureShadowCandidates
+                      << " body=" << stats.structureShadowEmptyBodies
+                      << " off=" << stats.structureShadowOffScreen
+                      << " clip=" << stats.structureShadowClippedOut
+                      << " empty=" << stats.structureShadowEmptyMasks
+                      << " drawn=" << stats.structureShadowsDrawn
+                      << "\n";
         }
         return;
     }
@@ -27867,6 +27952,8 @@ void emitRuntimeRenderDiagnostics(const RuntimeMapRenderStats& stats) {
               << " structureCand=" << stats.structureShadowCandidates
               << " structureEmpty=" << stats.structureShadowEmptyMasks
               << " structureNoArt=" << stats.structureShadowEmptyBodies
+              << " structureOff=" << stats.structureShadowOffScreen
+              << " structureClip=" << stats.structureShadowClippedOut
               << " units=" << stats.unitShadowsDrawn
               << " infantry=" << stats.infantryShadowsDrawn
               << " aircraft=" << stats.aircraftShadowsDrawn

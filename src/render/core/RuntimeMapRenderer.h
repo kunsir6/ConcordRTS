@@ -842,6 +842,18 @@ std::string resolveRuntimeObjectVisualTypeId(
     const RuntimeMapRenderContext& context
 );
 
+// Why a shadow mask "resolved" without darkening a single pixel. The old
+// bool return carried two meanings at once — "the mask is valid" and "I drew
+// it" — so an off-screen frame and a genuinely empty mask were indistinguishable
+// to every caller and to the counters. Keep them apart by name.
+enum class RuntimeShadowMaskOutcome {
+    None = 0,   // rejected before any geometry: not a mask at all
+    Empty,      // mask has no nonzero pixel or the frame is 0x0
+    OffScreen,  // frame rectangle misses the viewport entirely
+    ClippedOut, // frame intersects the viewport but the surface clip leaves no column
+    Drawn       // the per-pixel loop ran (darkenedPixels still says how much it touched)
+};
+
 struct RuntimeMapRenderStats {
     int mapLightSources = 0;
     int mapLightReceivers = 0;
@@ -951,6 +963,12 @@ struct RuntimeMapRenderStats {
     int structureShadowCandidates = 0;
     int structureShadowEmptyMasks = 0;
     int structureShadowEmptyBodies = 0;
+    // Fourth bucket: the mask was fine but its frame never reached the screen
+    // (or survived the surface clip). Neither an asset gap nor "span generation
+    // is broken" — a culling fact, which is why it gets its own counter instead
+    // of being merged into emptyMasks.
+    int structureShadowOffScreen = 0;
+    int structureShadowClippedOut = 0;
     int unitShadowsDrawn = 0;
     int infantryShadowsDrawn = 0;
     int aircraftShadowsDrawn = 0;

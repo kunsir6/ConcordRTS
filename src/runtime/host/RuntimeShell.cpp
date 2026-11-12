@@ -34497,6 +34497,10 @@ int runRuntimeRenderSmokeTest(const RuntimeConfig& config) {
                   << stats.structureShadowEmptyMasks
                   << " structureNoArt="
                   << stats.structureShadowEmptyBodies
+                  << " structureOff="
+                  << stats.structureShadowOffScreen
+                  << " structureClip="
+                  << stats.structureShadowClippedOut
                   << ".\n";
         return 1;
     }
