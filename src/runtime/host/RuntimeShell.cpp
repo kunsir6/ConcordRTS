@@ -75134,6 +75134,15 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
                   << ".\n";
         return 1;
     }
+    // 结构就绪必须点亮屏幕顶部的"就绪"角标（纯表现，不进权威）。
+    if (!state.buildReadyBanner.active
+        || state.buildReadyBanner.itemKey != buildingIt->typeId) {
+        std::cerr << "Build smoke test failed: ready banner was not raised by "
+                  << buildingIt->typeId << " (active="
+                  << formatBool(state.buildReadyBanner.active)
+                  << " item=" << state.buildReadyBanner.itemKey << ").\n";
+        return 1;
+    }
 
     beginRuntimePlacementFromUi(state, *paidPlacement, true);
     const int readyCredits = state.economy.credits;
@@ -76795,6 +76804,8 @@ int runRuntimeBuildSmokeTest(const RuntimeConfig& config) {
               << " sidebarUnitProductionSpeed="
               << runtimeSidebarProductionSpeedMultiplier << "x"
               << " localInvalidation=yes"
+              << " readyBanner=" << (state.buildReadyBanner.active ? "yes" : "no")
+              << " structureBuildTicks=" << buildingIt->buildTicks
               << " buildCompleteFrameMs="
               << std::fixed
               << std::setprecision(2)

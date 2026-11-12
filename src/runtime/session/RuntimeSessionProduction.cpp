@@ -8504,6 +8504,12 @@ bool advanceRuntimeProductionEconomy(RuntimeProductionHostState& state) {
                 event.itemKey
                 + " ready: click sidebar icon to place; sidebar right-click cancels production";
             state.interactionStatus = state.economy.status;
+            // 建筑/防御到位时给一个屏幕顶部中央的"就绪"角标。纯表现：只读
+            // 展示时钟，不写回经济、队列或哈希；单位（无需放置）不触发。
+            state.buildReadyBanner.start(
+                runtimeUiClockNow(state),
+                event.itemKey
+            );
             emitRuntimeSound(state, runtimeSoundIntentBuildComplete);
             break;
         default:

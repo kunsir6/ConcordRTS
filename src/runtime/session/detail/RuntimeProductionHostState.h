@@ -1,5 +1,6 @@
 #pragma once
 #include "RuntimeProductionValueTypes.h"
+#include "ui/hud/RuntimeBuildReadyBanner.h"
 namespace concord::runtime::session_detail {
 struct RuntimeGameSessionState {
     RuntimeJumpjetFlights jumpjetFlights;
@@ -193,6 +194,8 @@ struct RuntimeHostLocalPresentationState {
     RuntimePlayerLocalCommands playerLocalCommands;
     RuntimePlayerCommunicationState playerCommunication;
     RuntimePlayerDefeatNoticeState playerDefeatNotices;
+    // 建造/防御就绪角标：纯表现，不进存档/哈希/回放。
+    RuntimeBuildReadyBannerState buildReadyBanner;
     std::optional<RuntimeMultiplayerGameplayCell> playerLastRadarCell;
     mutable std::optional<RuntimeLocalChronosphereMarker> localChronosphereMarker;
     RuntimeOwnerRemapColorTable ownerRemapColors;
