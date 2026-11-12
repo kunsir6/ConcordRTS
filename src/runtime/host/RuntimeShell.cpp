@@ -40369,6 +40369,27 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
     state.camera.worldOffsetY = centeredCameraY;
     invalidateRuntimeObjectProjectionCache(state);
 
+    // 上一段雷达/相机极值场景把镜头留在「地图几何中心」，被采样的建筑可能整栋
+    // 落在 map viewport 之外。命中测试是**可见性过滤**的：视口外的像素根本不存在
+    // （深度重放侧读到 drawsOffView=1、visiblePixels=0），拿它去断言「点得到」
+    // 是构造性不可满足的。所以断言前先把样本建筑对焦进视口——与阴影自证帧同一条
+    // 纪律：关于「可见像素」的断言必须先让该对象真的在画面里。
+    const WorldObjectInstance* framingTarget = nullptr;
+    for (const auto& candidate : state.world.getObjects()) {
+        if (candidate.kind != WorldObjectKind::Structure) continue;
+        const RuntimeStructureFootprint framingFootprint =
+            runtimeStructureFootprintForObject(state, candidate);
+        if (std::max(1, framingFootprint.width) > 1 || std::max(1, framingFootprint.height) > 1) {
+            framingTarget = &candidate;
+            break;
+        }
+    }
+    if (framingTarget != nullptr) {
+        centerRuntimeCameraOnCell(state, clientRect, runtimeCellPointForObject(*framingTarget));
+        ensureRuntimeCameraForViewport(state, viewport);
+        invalidateRuntimeObjectProjectionCache(state);
+    }
+
     projectedObjects = buildProjectedObjects(state, viewport);
     const RuntimeProjectedObject* footprintSample = nullptr;
     const RuntimeProjectedObject* fallbackFootprintSample = nullptr;
