@@ -25904,7 +25904,9 @@ int runtimeSimulationPacingTickRate(const RuntimeConfig& config) {
     // tick-domain results. In multiplayer the host owns this pacing and peers
     // still advance only the ticks committed by the lockstep barrier.
     // This rounded rate is for diagnostics; the loop uses the exact interval.
-    // Speed 6 returns zero to identify retail's unlimited (no wait) setting.
+    // BUILD-03 之后没有任何一档返回 0：6 档是 5 档的 1.5 倍（281 拍/秒），
+    // 七档全部有限且严格单调。旧注释「6 档返回 0 标识 retail 的不限速」已失效，
+    // 断言照抄它就会把正确实现判成红（第 10 轮 S-11 即此）。
     // Sidebar production multipliers remain independent of global pacing.
     return runtimeTickRateForGameSpeed(config.gameSpeed, config.fixedTickHz);
 }
