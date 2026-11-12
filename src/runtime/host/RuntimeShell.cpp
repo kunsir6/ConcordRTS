@@ -38516,13 +38516,23 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
     std::vector<int> expectedBoxIds;
     std::vector<int> centerBoxIds;
     std::vector<int> outsideCenterIds;
+    std::vector<int> artOutsideIds;
+    std::vector<int> boundsExpandedIds;
     for (const RuntimeProjectedObject& projectedObject : projectedObjects) {
         if (projectedObject.object == nullptr
             || !runtimeObjectCanBeBoxSelected(*projectedObject.object)) {
             continue;
         }
         const RECT bounds = runtimeRenderPlacementNativeRect(projectedObject.bounds);
-        if (!rectsIntersect(bounds, bandRect)) continue;
+        const RECT art = runtimeRenderPlacementNativeRect(projectedObject.spriteBounds);
+        const bool boundsHit = rectsIntersect(bounds, bandRect);
+        const bool artHit = rectsIntersect(art, bandRect);
+        // 只有「命中框进框、画面不进框」的才算可疑：这类单位的选中完全由
+        // runtimeUnitSelectionBoundsForSprite 的 +3px 容差造成，玩家看到的是
+        // 「框贴着它旁边就把它选走了」。
+        if (boundsHit && !artHit) boundsExpandedIds.push_back(projectedObject.object->instanceId);
+        if (!boundsHit && artHit) artOutsideIds.push_back(projectedObject.object->instanceId);
+        if (!boundsHit) continue;
         expectedBoxIds.push_back(projectedObject.object->instanceId);
         const POINT center{
             (bounds.left + bounds.right) / 2,
@@ -38608,7 +38618,44 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
               << " bbox=" << expectedBoxIds.size()
               << " center=" << centerBoxIds.size()
               << " bboxOnly=" << outsideCenterIds.size()
+              << " artOutside=" << boundsExpandedIds.size()
+              << " artOnly=" << artOutsideIds.size()
               << " picked=" << boxSelectionIds.size() << "\n";
+    // 反向判据：任何被选中的单位，它的**画面矩形**必须真的进框。
+    // bounds 是 spriteBounds 外扩 3px（runtimeUnitSelectionBoundsForSprite），
+    // 所以「靠容差进框」在数值上是允许的；但一旦某天 bounds 被换成固定尺寸的
+    // 幽灵框（历史上确实有过），这条会立刻变红——那才是「框在它旁边却把它选走」。
+    if (!boundsExpandedIds.empty()) {
+        std::cerr << "Interaction smoke test failed: box drag selected units whose artwork"
+                     " is outside the band (phantom hit box):";
+        for (int objectId : boundsExpandedIds) std::cerr << " #" << objectId;
+        std::cerr << ".\n";
+        return 1;
+    }
+    // 逐项详解：bounds 是 spriteBounds 外扩 3px（runtimeUnitSelectionBoundsForSprite），
+    // 所以「进框」可能只是那 3px 容差。artHit 判的是**画面矩形**有没有进框。
+    for (const RuntimeProjectedObject& projectedObject : projectedObjects) {
+        if (projectedObject.object == nullptr
+            || !runtimeObjectCanBeBoxSelected(*projectedObject.object)) {
+            continue;
+        }
+        const int id = projectedObject.object->instanceId;
+        const bool boundsHit = rectsIntersect(
+            runtimeRenderPlacementNativeRect(projectedObject.bounds), bandRect);
+        const bool artHit = rectsIntersect(
+            runtimeRenderPlacementNativeRect(projectedObject.spriteBounds), bandRect);
+        if (boundsHit == artHit) continue;
+        const RECT bounds = runtimeRenderPlacementNativeRect(projectedObject.bounds);
+        const RECT art = runtimeRenderPlacementNativeRect(projectedObject.spriteBounds);
+        std::cout << "Box drag edge unit #" << id
+                  << " bounds=" << bounds.left << ',' << bounds.top << ' '
+                  << bounds.right << ',' << bounds.bottom
+                  << " art=" << art.left << ',' << art.top << ' '
+                  << art.right << ',' << art.bottom
+                  << " boundsHit=" << (boundsHit ? "yes" : "no")
+                  << " artHit=" << (artHit ? "yes" : "no")
+                  << " bandRight=" << bandRect.right << "\n";
+    }
     if (!outsideCenterIds.empty()) {
         // 只读计量：这些单位包围盒进了框、中心却在框外 —— 即「看着没框住却被选中」的候选。
         std::cout << "Box drag bbox-only units:";
@@ -38623,9 +38670,15 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
                 continue;
             }
             const RECT bounds = runtimeRenderPlacementNativeRect(found->bounds);
+            const RECT art = runtimeRenderPlacementNativeRect(found->spriteBounds);
+            const int artInBand = std::max(0, std::min<int>(static_cast<int>(art.right), static_cast<int>(bandRect.right))
+                - std::max<int>(static_cast<int>(art.left), static_cast<int>(bandRect.left)));
             std::cout << " #" << objectId
                       << "(" << bounds.left << ',' << bounds.top << ' '
-                      << bounds.right << ',' << bounds.bottom;
+                      << bounds.right << ',' << bounds.bottom
+                      << " art=" << art.left << ',' << art.top << ' '
+                      << art.right << ',' << art.bottom
+                      << " artInBand=" << artInBand << "px";
             if (object != nullptr) {
                 std::cout << " x" << object->x << ',' << object->y;
             }
