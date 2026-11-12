@@ -33096,8 +33096,17 @@ int runRuntimeRenderSmokeTest(const RuntimeConfig& config) {
                         oreSeedState.rules.findTerrainType(object.type);
                     if (terrainType != nullptr
                         && terrainType->animationRate > 0) {
+                        // AnimationRate 的单位是"帧"，而渲染侧的帧延迟已被折成
+                        // "拍"（runtimeTerrainObjectFrameDelayTicks →
+                        // runtimeRuleFramesToTicks(rate, hz)）。直接按帧数推进会让
+                        // eventAge < delay，selectRuntimeTerrainObjectAnimationFrame
+                        // 的 eventAge/delay 恒为 0，于是永远选到第 0 帧、判成未动画。
                         animationProbeTick =
-                            oreGrowthProbeEventTick + terrainType->animationRate;
+                            oreGrowthProbeEventTick
+                            + runtimeRuleFramesToTicks(
+                                terrainType->animationRate,
+                                oreSeedState.config.fixedTickHz
+                            );
                     }
                     break;
                 }
