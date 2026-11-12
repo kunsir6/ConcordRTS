@@ -618,6 +618,7 @@ void rebuildTypeIndex(
     }
     index.clear();
     index.reserve(objects.size());
+    std::vector<std::string> duplicateIds;
 
     for (std::size_t objectIndex = 0; objectIndex < objects.size(); ++objectIndex) {
         if (rulesDatabaseTraceEnabled()) {
@@ -645,12 +646,33 @@ void rebuildTypeIndex(
 
         const auto [it, inserted] = index.emplace(key, objectIndex);
         if (!inserted) {
-            warnings.push_back(
-                "Duplicate " + label
-                + " id ignored by capability index: ["
-                + objects[objectIndex].id + "]"
+            // Retail rulesmd.ini really does list some ids twice inside
+            // [BuildingTypes] (NAPSYA at 185 and 241, both pointing at the same
+            // section). First-wins is the stock semantics, so this is a data
+            // note, not a defect: printing one line per duplicate used to bury
+            // the "Corrupt ..." case that actually needs attention.
+            duplicateIds.push_back(
+                objects[objectIndex].id + " (item " + std::to_string(objectIndex)
+                + " repeats item " + std::to_string(it->second) + ")"
             );
         }
+    }
+    if (!duplicateIds.empty()) {
+        std::string joined;
+        const std::size_t shown = std::min<std::size_t>(duplicateIds.size(), 8U);
+        for (std::size_t i = 0; i < shown; ++i) {
+            if (i > 0) {
+                joined += ", ";
+            }
+            joined += duplicateIds[i];
+        }
+        if (duplicateIds.size() > shown) {
+            joined += ", +" + std::to_string(duplicateIds.size() - shown) + " more";
+        }
+        warnings.push_back(
+            "data-note: duplicate " + label + " id in retail data (first "
+            "occurrence wins): " + joined
+        );
     }
     if (rulesDatabaseTraceEnabled()) {
         std::cerr << "rebuildTypeIndex: done " << label
