@@ -6764,6 +6764,7 @@ bool applyRuntimeMovePathResult(
             || runtimeOmniCrushOwnsOccupiedEndpoint(state, object, behavior.moveTarget)
             || state.pendingOccupyTargets.contains(object.instanceId)
             || runtimeUnitTransportApproachAllowsBodyDetour(state, object, behavior)
+            || runtimeBuildingAbsorberEntryKeepsGoal(state, object, behavior)
             || std::any_of(state.grinding.relations().begin(), state.grinding.relations().end(),
                 [&](const RuntimeGrindingRelation& entry) { return entry.sourceId == object.instanceId; }))) {
         // The path queue supplies a blocked-goal fallback even when no
@@ -11427,6 +11428,29 @@ bool runtimeTransportUnitBoardingPending(const RuntimeGameSessionState& state, i
     const auto* host = pending == state.pendingTransportTargets.end()
         ? nullptr : findObjectById(state, pending->second);
     return host && host->kind == WorldObjectKind::Unit;
+}
+
+bool runtimeBuildingAbsorberEntryKeepsGoal(const RuntimeGameSessionState& state,
+    const WorldObjectInstance& passenger, const RuntimeObjectBehavior& move) {
+    // Same intent as the unit-hull boarding case below, but the destination is a
+    // foundation cell of a building absorber (bioreactor / tank bunker). Without
+    // this, the blocked-goal fallback replaces the foundation cell with an outside
+    // neighbour; two passengers can then receive each other's cell and deadlock.
+    const auto pending = state.pendingTransportTargets.find(passenger.instanceId);
+    if (pending == state.pendingTransportTargets.end()
+        || !runtimeInfantryUsesGroundSubcells(passenger)
+        || !passenger.alive || passenger.health <= 0
+        || move.kind != RuntimeBehaviorKind::Move || move.autoAcquired
+        || move.targetObjectId >= 0 || move.pendingHasSharedGoal
+        || move.transportTransferKind != RuntimeTransportTransferKind::None
+        || move.pendingAllowedOccupiedObjectId < 0
+        || pending->second != move.pendingAllowedOccupiedObjectId) return false;
+    const auto* host = findObjectById(state, pending->second);
+    if (!host || !host->alive || host->health <= 0 || host->renderMoveActive) return false;
+    if (host->kind != WorldObjectKind::Structure) return false;
+    if (runtimeInfantryAbsorberType(state, *host) == nullptr
+        && runtimeTankBunkerType(state, *host) == nullptr) return false;
+    return runtimeCellDistanceToObjectFootprint(state, move.moveTarget, *host) <= 0.0;
 }
 
 bool runtimeUnitTransportApproachAllowsBodyDetour(const RuntimeGameSessionState& state,

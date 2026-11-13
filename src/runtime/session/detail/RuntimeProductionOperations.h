@@ -7817,6 +7817,12 @@ bool runtimeTransportUnitBoardingPending(const RuntimeGameSessionState& state, i
 bool runtimeUnitTransportApproachAllowsBodyDetour(const RuntimeGameSessionState& state,
     const WorldObjectInstance& passenger, const RuntimeObjectBehavior& move);
 
+// Building absorbers have no hull to stand beside: the entry goal is a foundation
+// cell, and the path queue's blocked-goal fallback would otherwise trade it for an
+// outside neighbour. Two soldiers in flight then swap neighbours and block each other.
+bool runtimeBuildingAbsorberEntryKeepsGoal(const RuntimeGameSessionState& state,
+    const WorldObjectInstance& passenger, const RuntimeObjectBehavior& move);
+
 bool runtimeTransportUnloadingPending(const RuntimeGameSessionState& state,
     const WorldObjectInstance& host);
 

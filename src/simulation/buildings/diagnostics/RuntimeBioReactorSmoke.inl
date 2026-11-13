@@ -3,6 +3,10 @@ bool runRuntimeBioReactorSmokeProbe(RuntimeWindowState& live, std::string& error
         error = "bioreactor: " + message;
         return false;
     };
+    // Read-only stage trace; CONCORD_BIOREACTOR_TRACE=1 keeps the smoke silent by default.
+    const auto traceBioReactor = [](const char* stage, const std::string& detail) {
+        std::cout << "[bioreactor] " << stage << ' ' << detail << '\n';
+    };
     const auto* stock = live.rules.findBuildingType("YAPOWR");
     if (stock == nullptr || !stock->infantryAbsorb || stock->passengers != 5
         || stock->power != 150 || stock->extraPower != 100 || stock->sizeLimit != 15) {
@@ -258,6 +262,53 @@ bool runRuntimeBioReactorSmokeProbe(RuntimeWindowState& live, std::string& error
         return fail("loaded reactor did not offer unloading");
     }
 
+    const auto dumpAiEntry = [&](const char* stage) {
+        const auto* reactorNow = findObjectById(probe, 1);
+        if (reactorNow == nullptr) { traceBioReactor(stage, "reactor=gone"); return; }
+        const RuntimeStructureFootprint rect = runtimeStructureFootprintForObject(probe, *reactorNow);
+        std::string cells;
+        for (const RuntimeCellPoint& cell : runtimeStructureFootprintCellsForObject(probe, *reactorNow)) {
+            cells += "(" + std::to_string(cell.x) + "," + std::to_string(cell.y) + ")";
+        }
+        traceBioReactor(stage,
+            "tick=" + std::to_string(probe.tick)
+            + " pending=" + std::to_string(probe.pendingTransportTargets.size())
+            + " power=" + std::to_string(probe.economy.powerProduced)
+            + " aboard=" + std::to_string(static_cast<int>(reactorNow->transportPassengerIds.size()))
+            + " footprint=" + std::to_string(rect.width) + "x" + std::to_string(rect.height) + cells);
+        for (int id = 2; id <= 6; ++id) {
+            const auto* member = findObjectById(probe, id);
+            if (member == nullptr) { traceBioReactor(stage, "#" + std::to_string(id) + "=gone"); continue; }
+            const RuntimeCellPoint cell = runtimeCellPointForObject(*member);
+            const auto behavior = probe.behaviors.find(id);
+            const bool hasBehavior = behavior != probe.behaviors.end();
+            std::string entryCellText = "none";
+            if (const auto entry = runtimeTransportEntryCell(probe, *member, *reactorNow); entry.has_value()) {
+                entryCellText = std::to_string(entry->x) + "," + std::to_string(entry->y);
+            }
+            traceBioReactor(stage,
+                "#" + std::to_string(id)
+                + " cell=" + std::to_string(cell.x) + "," + std::to_string(cell.y)
+                + " target=" + (hasBehavior
+                    ? std::to_string(behavior->second.moveTarget.x) + ","
+                        + std::to_string(behavior->second.moveTarget.y) : "-")
+                + " entryCell=" + entryCellText
+                + " mission=" + member->mission
+                + " footprintDistance=" + std::to_string(
+                    runtimeCellDistanceToObjectFootprint(probe, cell, *reactorNow))
+                + " queued=" + (probe.pendingTransportTargets.contains(id) ? "1" : "0")
+                + " bstate=" + (hasBehavior ? std::to_string(static_cast<int>(behavior->second.state)) : "none")
+                + " blocked=" + (hasBehavior ? std::to_string(behavior->second.blockedTicks) : "-")
+                + " cooldown=" + (hasBehavior ? std::to_string(behavior->second.moveCooldownTicks) : "-")
+                + " pathReq=" + (hasBehavior ? (behavior->second.pathRequestPending ? "1" : "0") : "-")
+                + " path=" + (hasBehavior ? std::to_string(behavior->second.path.size()) : "-")
+                + " renderMove=" + (member->renderMoveActive ? "1" : "0")
+                + " transfer=" + (hasBehavior
+                    ? std::to_string(static_cast<int>(behavior->second.transportTransferKind)) : "-"));
+        }
+    };
+    const bool aiEntryTrace = std::getenv("CONCORD_BIOREACTOR_TRACE") != nullptr;
+    if (aiEntryTrace) dumpAiEntry("before-unload");
     const auto savePath = std::filesystem::temp_directory_path() / ("concord_bioreactor_smoke_" + std::to_string(GetCurrentProcessId()) + ".ini");
     if (!saveRuntimeState(probe, pathString(savePath), error)
         || !loadRuntimeState(probe, pathString(savePath), error) || !powerMatches(5)) {
@@ -273,6 +324,7 @@ bool runRuntimeBioReactorSmokeProbe(RuntimeWindowState& live, std::string& error
         const auto* released = findObjectById(probe, id);
         if (released == nullptr || released->health <= 0) return fail("unload lost an occupant");
     }
+    if (aiEntryTrace) dumpAiEntry("after-unload");
 
     // AI action 62 shares the same arrival path and never teleports a team inside.
     RuntimeTeamMissionState mission;
@@ -282,10 +334,17 @@ bool runRuntimeBioReactorSmokeProbe(RuntimeWindowState& live, std::string& error
         || !powerMatches(0)) {
         return fail("AI could not queue ordinary reactor entry");
     }
+    if (aiEntryTrace) dumpAiEntry("after-issue");
+    const int aiEntryStartTick = probe.tick;
     for (int tick = 0; tick < 800 && !probe.pendingTransportTargets.empty(); ++tick) {
         ++probe.tick;
         advanceRuntimeSimulation(probe);
+        if (aiEntryTrace && (tick + 1 == 1 || tick + 1 == 2 || tick + 1 == 5
+                || tick + 1 == 20 || tick + 1 == 100 || tick + 1 == 400)) {
+            dumpAiEntry(("entry-tick-" + std::to_string(tick + 1)).c_str());
+        }
     }
+    if (aiEntryTrace) dumpAiEntry("entry-end");
     if (!powerMatches(5)
         || runtimeTeamScriptStepCompletion(probe, mission, step) != RuntimeTeamStepCompletion::Complete) {
         return fail("AI did not complete five real arrivals");
