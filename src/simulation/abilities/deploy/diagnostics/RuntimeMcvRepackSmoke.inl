@@ -145,43 +145,32 @@ bool runRuntimeMcvRepackSmokeProbe(
         if (!dispatchRuntimeSecondaryActionFromUi(probe, yardId))
             return fail("click command was not handled");
         if (!finishRepacking(probe, {yardId})) return false;
-        if (std::getenv("CONCORD_MCV_REPACK_TRACE") != nullptr) {
-            // Read-only: the six predicates behind "click did not create a selected movable vehicle".
-            std::string line =
-                "yardId=" + std::to_string(yardId)
-                + " yardStillThere=" + (findObjectById(probe, yardId) != nullptr ? "1" : "0")
-                + " selection=" + std::to_string(probe.selectedObjectIds.size()) + " ids=";
-            for (int id : probe.selectedObjectIds) line += std::to_string(id) + ",";
-            line += " live:";
-            for (const auto& object : probe.world.getObjects()) {
-                if (!object.alive) continue;
-                const RuntimeCellPoint cell = runtimeCellPointForObject(object);
-                line += " [#" + std::to_string(object.instanceId) + " " + object.type
-                    + "/" + object.owner
-                    + " kind=" + std::to_string(static_cast<int>(object.kind))
-                    + " cell=" + std::to_string(cell.x) + "," + std::to_string(cell.y)
-                    + " mission=" + object.mission
-                    + " deployed=" + (object.deployed ? "1" : "0")
-                    + " canMove=" + (runtimeObjectCanMove(probe, object) ? "1" : "0")
-                    + " health=" + std::to_string(object.health) + "]";
-            }
-            std::cout << "[mcv-repack] " << faction.owner << " " << line << '\n';
-        }
         auto* vehicle = selected(probe);
-        if (findObjectById(probe, yardId) != nullptr || vehicle == nullptr
-            || vehicle->type != faction.vehicle || vehicle->owner != faction.owner
-            || !runtimeObjectCanMove(probe, *vehicle)
-            || std::find(yardFoundation.begin(), yardFoundation.end(),
-                   runtimeCellPointForObject(*vehicle)) == yardFoundation.end()) {
-            std::string detail = " (nothing selected)";
-            if (vehicle != nullptr) {
-                const RuntimeCellPoint landed = runtimeCellPointForObject(*vehicle);
-                detail = " (vehicle cell " + std::to_string(landed.x) + ","
-                    + std::to_string(landed.y) + " anchor "
-                    + std::to_string(yardSpawnAnchor.x) + ","
-                    + std::to_string(yardSpawnAnchor.y) + ")";
+        // Six predicates behind one sentence became one of those silent probes.
+        // Keep the values in the failure text instead: they are free when green.
+        const bool yardStillThere = findObjectById(probe, yardId) != nullptr;
+        const RuntimeCellPoint landed = vehicle != nullptr
+            ? runtimeCellPointForObject(*vehicle) : RuntimeCellPoint{-1, -1};
+        const bool onFoundation = vehicle != nullptr
+            && std::find(yardFoundation.begin(), yardFoundation.end(), landed)
+                != yardFoundation.end();
+        if (yardStillThere || vehicle == nullptr || vehicle->type != faction.vehicle
+            || vehicle->owner != faction.owner || !runtimeObjectCanMove(probe, *vehicle)
+            || !onFoundation) {
+            std::string detail = "yardStillThere=" + std::to_string(yardStillThere ? 1 : 0)
+                + " selection=" + std::to_string(probe.selectedObjectIds.size());
+            if (vehicle == nullptr) {
+                detail += " vehicle=none";
+            } else {
+                detail += " type=" + vehicle->type + " expected=" + faction.vehicle
+                    + " owner=" + vehicle->owner
+                    + " canMove=" + std::to_string(runtimeObjectCanMove(probe, *vehicle) ? 1 : 0)
+                    + " cell=" + std::to_string(landed.x) + "," + std::to_string(landed.y)
+                    + " onFoundation=" + std::to_string(onFoundation ? 1 : 0)
+                    + " anchor=" + std::to_string(yardSpawnAnchor.x) + ","
+                    + std::to_string(yardSpawnAnchor.y);
             }
-            return fail("click did not create a selected movable vehicle on the old foundation"
+            return fail("click did not create a selected movable vehicle on the old foundation: "
                 + detail);
         }
         const int vehicleId = vehicle->instanceId;

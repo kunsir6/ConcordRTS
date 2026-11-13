@@ -15308,38 +15308,6 @@ bool drawRuntimeShpFrame(
 
 #include "render/core/RuntimeMapGpuObjectBridge.inl"
 
-// Read-only shadow diagnosis. Enabled with CONCORD_SHADOW_TRACE=1; the budget
-// keeps a multi-frame capture from flooding the log while still covering the
-// handful of structures a smoke frame can carry.
-static bool runtimeShadowTraceEnabled() {
-    static const bool enabled = []() {
-        const char* value = std::getenv("CONCORD_SHADOW_TRACE");
-        return value != nullptr && value[0] != '\0' && value[0] != '0';
-    }();
-    return enabled;
-}
-
-static bool runtimeShadowTraceTake() {
-    static int remaining = 12;
-    if (!runtimeShadowTraceEnabled() || remaining <= 0) {
-        return false;
-    }
-    --remaining;
-    return true;
-}
-
-// Separate budget from the draw-side trace: a frame with several structures
-// would otherwise starve the record side, and the record side is the one that
-// has to agree with the printed totals.
-static bool runtimeShadowRecordTraceTake() {
-    static int remaining = 16;
-    if (!runtimeShadowTraceEnabled() || remaining <= 0) {
-        return false;
-    }
-    --remaining;
-    return true;
-}
-
 bool drawRuntimeVoxelShadowMask(
     HDC dc,
     const RECT& viewport,
@@ -24315,40 +24283,6 @@ RuntimeWorldObjectShadowResult drawRuntimeWorldObjectShadow(
     if (validMask) {
         result.shpMask = true;
         result.pixelsDarkened = darkenedPixels;
-        if (object.kind == WorldObjectKind::Structure && darkenedPixels == 0
-            && runtimeShadowTraceTake()) {
-            // A structure reached the authored-shadow path, the mask "resolved",
-            // yet nothing was darkened. Print the four quantities that decide
-            // which of the silent early-outs fired: the authored frame size,
-            // its nonzero coverage, where it lands on screen, and whether that
-            // rectangle touches the viewport at all.
-            int nonzeroPixels = 0;
-            for (const unsigned char value : shp->shadowImage.pixels) {
-                if (value != 0) {
-                    ++nonzeroPixels;
-                }
-            }
-            const RECT frameRect = runtimeShpFrameScreenRect(
-                shpShadowCenter, camera, shp->shadowImage);
-            std::cout << "[shadow-trace] structure type=" << object.type
-                      << " instance=" << object.instanceId
-                      << " hasFrame=" << (shp->hasShadowFrame ? 1 : 0)
-                      << " authoredEmpty=" << (authoredEmpty ? 1 : 0)
-                      << " body=" << shp->image.width << "x" << shp->image.height
-                      << " frame=" << shp->shadowImage.width << "x"
-                      << shp->shadowImage.height
-                      << " globalH=" << shp->shadowImage.globalHeight
-                      << " nonzero=" << nonzeroPixels
-                      << " center=" << shpShadowCenter.x << ","
-                      << shpShadowCenter.y
-                      << " rect=" << frameRect.left << "," << frameRect.top
-                      << "," << frameRect.right << "," << frameRect.bottom
-                      << " viewport=" << viewport.left << "," << viewport.top
-                      << "," << viewport.right << "," << viewport.bottom
-                      << " intersects="
-                      << (rectIntersects(frameRect, viewport) ? 1 : 0)
-                      << "\n";
-        }
     } else {
         result.generatedFallback = true;
         POINT fallbackCenter = groundCenter;
@@ -24399,14 +24333,6 @@ void recordRuntimeWorldObjectShadowResult(
     bool aircraft,
     const RuntimeWorldObjectShadowResult& result
 ) {
-    // The draw-side trace prints frame geometry, but it is consumed from a
-    // separate budget and can run out long before the frame being summarised.
-    // This one prints where the summary is actually accumulated, so the per
-    // object line and the totals can never describe different sets.
-    const bool traceThis =
-        object.kind == WorldObjectKind::Structure
-        && !result.drawn
-        && runtimeShadowRecordTraceTake();
     if (result.candidate) {
         ++stats.shadowCandidates;
         if (object.kind == WorldObjectKind::Structure) {
@@ -24455,22 +24381,6 @@ void recordRuntimeWorldObjectShadowResult(
                     ++stats.structureShadowEmptyMasks;
                 }
             }
-        }
-        if (traceThis) {
-            std::cout << "[shadow-record] structure type=" << object.type
-                      << " instance=" << object.instanceId
-                      << " authoredEmpty=" << (result.authoredEmptyBody ? 1 : 0)
-                      << " shpMask=" << (result.shpMask ? 1 : 0)
-                      << " voxelMask=" << (result.voxelMask ? 1 : 0)
-                      << " outcome=" << static_cast<int>(result.maskOutcome)
-                      << " pixels=" << result.pixelsDarkened
-                      << " | totals cand=" << stats.structureShadowCandidates
-                      << " body=" << stats.structureShadowEmptyBodies
-                      << " off=" << stats.structureShadowOffScreen
-                      << " clip=" << stats.structureShadowClippedOut
-                      << " empty=" << stats.structureShadowEmptyMasks
-                      << " drawn=" << stats.structureShadowsDrawn
-                      << "\n";
         }
         return;
     }
