@@ -1994,8 +1994,27 @@ static void ensurePointerAssociationRestored() {
 
 void pumpEvents() {
     if (gInputSink == nullptr || gWindow == nil) return;
-    syncGlobalCursorForPointer();
     @autoreleasepool {
+        // 这一行**必须**在 pool 里面。它不是"顺手挪一下"。
+        //
+        // syncGlobalCursorForPointer() 每轮都问 AppKit 两件事：
+        //   [NSCursor currentSystemCursor]        → 返回 autoreleased 的 NSCursor，
+        //                                            内部会 SLSCopyRegisteredCursorImages
+        //                                           + CGBlt_copyBytes 拷一份光标图像；
+        //   [NSWindow windowNumberAtPoint:...]    → SkyLight 侧解析窗口 plist，
+        //                                          产出成串的 autoreleased 字典/数组。
+        //
+        // 本项目**从不跑 [NSApp run]**（主循环是 compat 自己的 GetMessageW），
+        // 也就不存在"每轮 run loop 自动 drain 一次 pool"这回事：根 pool 永不 drain。
+        // 于是这些临时对象全部挂在线程根 pool 上只增不减——实测（2026-11-13
+        // 真窗口挂机）60 秒 533.8M → 1.1G，约 13.6 MB/s；用户在遭遇战菜单挂到
+        // 37 GB、系统把 37 GB 全换出到磁盘，整机假死（看起来像"游戏卡死"，
+        // 采样却显示主线程好好地等在 MsgWaitForMultipleObjectsEx）。
+        //
+        // 放在 pool 里不会改变语义：pool 只决定"临时对象什么时候释放"，
+        // [blank set] 是立即生效的全局设置，系统自己 retain 当前光标；
+        // concordInvisibleCursor() 是 static 自持有，不参与 autorelease。
+        syncGlobalCursorForPointer();
         // **不要**用 [NSDate distantPast] 当"立刻返回"。
         // 文档说它不阻塞，实测会进 AppKit 的事件循环（采样栈：nextEventMatchingMask →
         // _DPSNextEvent → _DPSBlockUntilNextEventMatchingListInMode → mach_msg），
