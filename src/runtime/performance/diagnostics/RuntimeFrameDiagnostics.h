@@ -84,6 +84,10 @@ struct RuntimeFrameSample {
     int width = 0;
     int height = 0;
     bool hiddenWindow = false;
+    // True when this paint reused the previous back buffer instead of drawing
+    // the world again. It is the only direct evidence that a paint did not
+    // change the picture; a short interval alone does not prove reuse.
+    bool reusedScene = false;
     RuntimeFrameCacheCounters cacheCounters;
     // Compatibility name: this stores a resource kind (for example SHP/VXL),
     // not an identified unit type or proof that the resource caused the stall.
@@ -327,6 +331,12 @@ struct RuntimeFrameDiagnosticsSnapshot {
     std::uint64_t rejectedFrames = 0;
     std::uint64_t slow50Frames = 0;
     std::uint64_t slow100Frames = 0;
+    // Frames whose paint reused the previous back buffer, and the longest run
+    // of consecutive reuses. These answer "how many paints changed nothing"
+    // without inferring it from elapsed time.
+    std::uint64_t reusedSceneFrames = 0;
+    std::uint64_t redrawnSceneFrames = 0;
+    std::uint64_t longestReusedSceneStreak = 0;
     double sessionMilliseconds = 0.0;
     double sessionFps = 0.0;
     double worstGapMs = 0.0;
@@ -386,6 +396,15 @@ public:
         nextGap_ = (nextGap_ + 1) % rollingCapacity;
         gapCount_ = std::min(gapCount_ + 1, rollingCapacity);
         ++sessionFrames_;
+        if (sample.reusedScene) {
+            ++reusedSceneFrames_;
+            ++reusedStreak_;
+            longestReusedSceneStreak_ =
+                std::max(longestReusedSceneStreak_, reusedStreak_);
+        } else {
+            ++redrawnSceneFrames_;
+            reusedStreak_ = 0;
+        }
         sessionMilliseconds_ += sample.frameGapMs;
         worstGapMs_ = std::max(worstGapMs_, sample.frameGapMs);
         if (sample.frameGapMs >= 50.0) {
@@ -421,6 +440,9 @@ public:
         result.rejectedFrames = rejectedFrames_;
         result.slow50Frames = slow50Frames_;
         result.slow100Frames = slow100Frames_;
+        result.reusedSceneFrames = reusedSceneFrames_;
+        result.redrawnSceneFrames = redrawnSceneFrames_;
+        result.longestReusedSceneStreak = longestReusedSceneStreak_;
         result.sessionMilliseconds = sessionMilliseconds_;
         result.sessionFps = sessionMilliseconds_ > 0.0
             ? static_cast<double>(sessionFrames_) * 1000.0 / sessionMilliseconds_ : 0.0;
@@ -460,6 +482,9 @@ public:
             << "采样帧数 / 无效间隔：" << state.sessionFrames << " / " << state.rejectedFrames << '\n'
             << "采样时长（秒）：" << state.sessionMilliseconds / 1000.0 << '\n'
             << "全会话绘制更新率：" << state.sessionFps << " 次/秒\n"
+            << "复用缓存帧 / 重绘帧：" << state.reusedSceneFrames << " / "
+            << state.redrawnSceneFrames << '\n'
+            << "最长连续复用帧：" << state.longestReusedSceneStreak << '\n'
             << "最长帧间隔：" << state.worstGapMs << " ms\n"
             << ">=50 ms / >=100 ms 帧数：" << state.slow50Frames << " / " << state.slow100Frames << '\n'
             << "末尾滚动窗口（最多 " << rollingCapacity << " 帧）：" << state.rolling.sampleCount << " 帧\n"
@@ -741,6 +766,10 @@ private:
     std::uint64_t rejectedFrames_ = 0;
     std::uint64_t slow50Frames_ = 0;
     std::uint64_t slow100Frames_ = 0;
+    std::uint64_t reusedSceneFrames_ = 0;
+    std::uint64_t redrawnSceneFrames_ = 0;
+    std::uint64_t reusedStreak_ = 0;
+    std::uint64_t longestReusedSceneStreak_ = 0;
     double sessionMilliseconds_ = 0.0;
     double worstGapMs_ = 0.0;
     RuntimeFrameCacheCounters previousCounters_;

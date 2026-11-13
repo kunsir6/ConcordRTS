@@ -158,6 +158,7 @@ void recordRuntimeCompletedFrameDiagnostics(
     sample.width = width;
     sample.height = height;
     sample.hiddenWindow = state.liveBenchmark != nullptr;
+    sample.reusedScene = reused;
     // No whole-world scan in ordinary frames. Only retained slow samples need
     // the live count, and even those retain no IDs, owner data or world state.
     if (sample.frameGapMs >= 50.0) {
