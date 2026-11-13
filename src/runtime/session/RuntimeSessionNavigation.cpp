@@ -11546,7 +11546,7 @@ bool advanceRuntimeTransportBoardingSegment(RuntimeProductionHostState& state,
 
 bool runtimeTransportTransferBodiesClear(RuntimeGameSessionState& state,
     const WorldObjectInstance& passenger, const RuntimeTransportMotionBody& source,
-    const RuntimeTransportMotionBody& destination, int hostId) {
+    const RuntimeTransportMotionBody& destination, int hostId, std::string* blocker) {
     (void)runtimeTickOccupancyLookup(state);
     const RuntimeTransportMotionPoint a{source.x, source.y}, b{destination.x, destination.y};
     const auto pointDistance = [](const auto& p, const auto& x, const auto& y) {
@@ -11582,14 +11582,54 @@ bool runtimeTransportTransferBodiesClear(RuntimeGameSessionState& state,
         const bool layer = other.hasRenderPosition ? other.renderOnBridge : other.onBridge;
         const bool foot = passenger.kind == WorldObjectKind::Infantry;
         const bool otherFoot = other.kind == WorldObjectKind::Infantry;
+        // C-02：同船排队同伴不是路障。四人同格时，彼此的扫掠段起点就落在对方身体里
+        // （实测 distance 0.002~0.10，阈值 0.5），而且四个人**同时**在往船上挤
+        // （trace `moving=1 otherPending=<host>`），于是每个人都在等别人先动 —— 同拍死锁。
+        // 「每拍只放一人」这类串行化也解不开：单独一个动仍被同伴的身体挡住。
+        // 因此豁免「同样是这艘船的步兵乘客」：步兵一格四子格，短暂重叠是零售语义；
+        // 载具段、非本船乘客、敌方单位一律仍走严格身体互斥
+        // （坦克段 aboard=4 / exits 互不重合依赖它）。
+        const auto selfIntent = state.pendingTransportTargets.find(passenger.instanceId);
+        const auto otherIntent = state.pendingTransportTargets.find(other.instanceId);
+        const auto otherMove = state.behaviors.find(other.instanceId);
+        const bool otherTransferring = otherMove != state.behaviors.end()
+            && otherMove->second.transportTransferKind != RuntimeTransportTransferKind::None;
+        const bool sameHostQueueMate = foot && otherFoot && !otherTransferring
+            && selfIntent != state.pendingTransportTargets.end() && selfIntent->second == hostId
+            && otherIntent != state.pendingTransportTargets.end() && otherIntent->second == hostId;
+        if (sameHostQueueMate) return;
         const double minimum = foot && otherFoot ? 0.5 : (!foot && !otherFoot ? 1.0 : 0.75);
         const double squared = minimum * minimum;
+        // 只读：记下第一个挡住扫掠段的身体，好把「身体不空」拆成同伴互锁 / 外部单位挡路。
+        const auto noteBlocker = [&](const WorldObjectInstance& other, double distance) {
+            clear = false;
+            if (blocker == nullptr || !blocker->empty()) return;
+            const auto cell = runtimeCellPointForObject(other);
+            *blocker = std::string("queue:") + (sameHostQueueMate ? "mate" : "stranger")
+                + " other=" + std::to_string(other.instanceId)
+                + " kind=" + (otherFoot ? "infantry" : "vehicle")
+                + " cell=" + std::to_string(cell.x) + ',' + std::to_string(cell.y)
+                + " distance=" + std::to_string(distance)
+                + " minimum=" + std::to_string(minimum)
+                + " selfPending=" + (selfIntent == state.pendingTransportTargets.end()
+                    ? std::string("-") : std::to_string(selfIntent->second))
+                + " otherPending=" + (otherIntent == state.pendingTransportTargets.end()
+                    ? std::string("-") : std::to_string(otherIntent->second))
+                + " host=" + std::to_string(hostId)
+                + " moving=" + (other.renderMoveActive ? "1" : "0")
+                + " alive=" + (other.alive ? "1" : "0");
+        };
         const auto check = [&](const auto& x, const auto& y, bool otherLayer) {
             const RuntimeTransportMotionPoint middle{(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5};
-            if (source.onBridge == otherLayer && segmentDistance(a,
-                    source.onBridge == destination.onBridge ? b : middle, x, y) + 1.0e-9 < squared) clear = false;
-            if (source.onBridge != destination.onBridge && destination.onBridge == otherLayer
-                && segmentDistance(middle, b, x, y) + 1.0e-9 < squared) clear = false;
+            if (source.onBridge == otherLayer) {
+                const double distance = segmentDistance(a,
+                    source.onBridge == destination.onBridge ? b : middle, x, y);
+                if (distance + 1.0e-9 < squared) noteBlocker(other, distance);
+            }
+            if (source.onBridge != destination.onBridge && destination.onBridge == otherLayer) {
+                const double distance = segmentDistance(middle, b, x, y);
+                if (distance + 1.0e-9 < squared) noteBlocker(other, distance);
+            }
         };
         check(current, current, layer);
         if (!clear || !other.renderMoveActive) return;
@@ -11688,9 +11728,10 @@ bool beginRuntimeTransportGroundTransfer(RuntimeProductionHostState& state,
             from, to, "foundation blocks the swept path");
         return false;
     }
-    if (!runtimeTransportTransferBodiesClear(state, passenger, source, destination, host.instanceId)) {
+    std::string blocker;
+    if (!runtimeTransportTransferBodiesClear(state, passenger, source, destination, host.instanceId, &blocker)) {
         traceRuntimeTransportBoarding("transfer:bodies", passenger.instanceId,
-            from, to, "another ground body is inside the sweep corridor");
+            from, to, blocker.empty() ? "another ground body is inside the sweep corridor" : blocker.c_str());
         return false;
     }
     const auto ticks = runtimeTransportMotionTransferTicks(state, passenger, boarding ? from : to,

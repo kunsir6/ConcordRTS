@@ -174,7 +174,20 @@ bool runRuntimeAmphibiousTransportSmokeProbe(RuntimeWindowState& live, std::stri
         setRuntimeObjectCell(s, *findMutableObjectById(s, blockers[i]), {2 + static_cast<int>(i) * 2, 29});
     refreshRuntimeObjectOccupancyAfterLocalChange(s);
     if (!executeRuntimeSecondaryAction(s, hostId)) return fail("unload did not resume after clearing the exit");
-    if (!findObjectById(s, hostId)->transportPassengerIds.empty()) return fail("full infantry hold did not unload");
+    // 同 121~137 的坦克段：单位船卸载是逐人推进的，一次动作只放一个，
+    // 剩下的等下一步机身让位后由 advanceRuntimeTransportUnloading 每拍再调。
+    // 「按一下就整仓放空」在结构上不可能成立，这里按拍推进到放空为止，
+    // 仍用「放不空就失败」保住原本要防的缺陷。
+    int infantryUnloadTicks = 0;
+    auto* unloadHost = findMutableObjectById(s, hostId);
+    for (; infantryUnloadTicks < 30 * 20 && unloadHost != nullptr
+        && !unloadHost->transportPassengerIds.empty(); ++infantryUnloadTicks) {
+        step(s);
+        unloadHost = findMutableObjectById(s, hostId);
+    }
+    if (unloadHost == nullptr || !unloadHost->transportPassengerIds.empty())
+        return fail("full infantry hold did not unload after "
+            + std::to_string(infantryUnloadTicks) + " ticks: " + s.simulationStatus);
     std::set<std::pair<int, int>> infantrySlots;
     for (int id : infantry) {
         const auto* unit = findObjectById(s, id);

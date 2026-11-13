@@ -7835,9 +7835,12 @@ void cancelRuntimeTransportBoardingForMovingHost(RuntimeProductionHostState& sta
 bool advanceRuntimeTransportBoardingSegment(RuntimeProductionHostState& state,
     WorldObjectInstance& passenger, RuntimeObjectBehavior& move);
 
+// blocker（可选出参）只用于只读计量：写出第一个挡住扫掠段的地面身体
+// 「id/kind/格子/与线段距离」，便于把「身体不空」拆成「同伴互锁」与「外部单位挡路」。
 bool runtimeTransportTransferBodiesClear(RuntimeGameSessionState& state,
     const WorldObjectInstance& passenger, const RuntimeTransportMotionBody& source,
-    const RuntimeTransportMotionBody& destination, int hostId);
+    const RuntimeTransportMotionBody& destination, int hostId,
+    std::string* blocker = nullptr);
 
 bool runtimeTransportTransferTransitionClear(RuntimeGameSessionState& state,
     const WorldObjectInstance& passenger, const RuntimeCellPoint& from,
