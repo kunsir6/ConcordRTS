@@ -11397,7 +11397,8 @@ void updateRuntimeComputerAiBaseCenter(
 
 bool deployRuntimeComputerAiMcvs(
     RuntimeProductionHostState& state,
-    const RuntimeComputerAiState& ai) {
+    const RuntimeComputerAiState& ai,
+    std::string* reason) {
     std::vector<int> mcvIds;
     for (const WorldObjectInstance& object : state.world.getObjects()) {
         if (!object.alive
@@ -11412,6 +11413,10 @@ bool deployRuntimeComputerAiMcvs(
     }
     std::sort(mcvIds.begin(), mcvIds.end());
     bool changed = false;
+    // One line per MCV: the three candidate causes (no MCV / no legal cell /
+    // request refused) are otherwise indistinguishable from the bool alone.
+    std::string detail = "mcvs=" + std::to_string(mcvIds.size())
+        + " owner=" + ai.owner;
     for (int objectId : mcvIds) {
         const auto* mcv = findObjectById(state,objectId);
         const auto* unit = mcv ? findRuntimeUnitType(state.rules,*mcv) : nullptr;
@@ -11419,7 +11424,18 @@ bool deployRuntimeComputerAiMcvs(
             : std::optional<RuntimeBuildCatalogItem>{};
         const auto planned = item ? findRuntimeMcvDeployCell(state,*mcv,*item)
             : std::optional<RuntimeCellPoint>{};
+        detail += " #" + std::to_string(objectId)
+            + (unit ? " " + unit->id + "->" + unit->deploysInto
+                    : std::string(" unit=none"))
+            + (item ? " item=" + item->typeId : std::string(" item=none"))
+            + (planned ? " planned=" + std::to_string(planned->x) + ","
+                    + std::to_string(planned->y)
+                    : std::string(" planned=none"));
         if(planned) changed = requestRuntimeMcvDeployment(state,objectId,false,planned) || changed;
+    }
+    if (reason != nullptr) {
+        *reason = detail + " status=" + state.economy.status
+            + " yard=" + (runtimeOwnerHasConstructionYard(state, ai.owner) ? "yes" : "no");
     }
     return changed;
 }

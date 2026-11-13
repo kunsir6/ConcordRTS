@@ -123,9 +123,21 @@ bool runRuntimeSkirmishModesSmoke(const RuntimeConfig& config, std::string& erro
                 return fail("mobile opening was defeated or could not deploy");
             ensureRuntimeComputerAiStates(state);
             auto& enemy = state.computerAiByOwner.at("skirmishplayer2");
-            if (!deployRuntimeComputerAiMcvs(state, enemy)
-                || !runtimeOwnerHasConstructionYard(state, enemy.owner))
-                return fail("computer could not deploy its opening MCV");
+            std::string deployReason;
+            if (!deployRuntimeComputerAiMcvs(state, enemy, &deployReason))
+                return fail("computer refused to deploy its opening MCV: " + deployReason);
+            // A request only turns the mobile base; the yard appears once the
+            // authored facing is reached. Wait the same opening window as
+            // RuntimeUnholyStartSmoke instead of asserting an instant deployment.
+            const int deployWaitTicks = std::max(30,
+                runtimeRuleFramesToTicks(32, state.config.fixedTickHz));
+            for (int waited = 0; waited < deployWaitTicks
+                && !runtimeOwnerHasConstructionYard(state, enemy.owner); ++waited) {
+                ++state.tick;
+                advanceRuntimeMcvDeployTurns(state);
+            }
+            if (!runtimeOwnerHasConstructionYard(state, enemy.owner))
+                return fail("computer could not deploy its opening MCV: " + deployReason);
         }
         if (naval) {
             for (const auto& object : state.world.getObjects())

@@ -9357,7 +9357,8 @@ void updateRuntimeComputerAiBaseCenter(
 
 bool deployRuntimeComputerAiMcvs(
     RuntimeProductionHostState& state,
-    const RuntimeComputerAiState& ai);
+    const RuntimeComputerAiState& ai,
+    std::string* reason = nullptr);
 
 void ensureRuntimeComputerAiStates(RuntimeGameSessionState& state);
 
