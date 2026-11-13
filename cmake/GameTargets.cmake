@@ -17,6 +17,7 @@ endif()
 
 add_executable(concord_rules_dump
     src/assets/codecs/PalDecoder.cpp
+    src/assets/codecs/RuntimeTmpCodec.cpp
     src/analysis/cli/main.cpp
     src/data/art/ArtDatabase.cpp
     src/assets/inspection/AssetInspector.cpp
