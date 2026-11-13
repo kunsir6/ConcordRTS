@@ -120,6 +120,14 @@ bool runRuntimeMcvRepackSmokeProbe(
         if (yard == nullptr) return fail(std::string(faction.yard) + " is missing");
         finishConstruction(*yard);
         const int yardId = yard->instanceId;
+        // The repacked vehicle is spawned at the placement anchor of the old
+        // foundation (its centre), not at the building's top-left cell; keep the
+        // foundation itself so the arrival check stays a semantic "on the old
+        // foundation" test instead of a second copy of the spawn algorithm.
+        const std::vector<RuntimeCellPoint> yardFoundation =
+            runtimeStructureFootprintCellsForObject(probe, *yard);
+        const RuntimeCellPoint yardSpawnAnchor = runtimePlacementAnchorCellForFootprint(
+            runtimeCellPointForObject(*yard), runtimeStructureFootprintForObject(probe, *yard));
         const int yardHealth = runtimeMaxHealthForObject(probe, *yard) / 2;
         yard->health = yardHealth;
         yard->veterancy = 1;
@@ -137,12 +145,45 @@ bool runRuntimeMcvRepackSmokeProbe(
         if (!dispatchRuntimeSecondaryActionFromUi(probe, yardId))
             return fail("click command was not handled");
         if (!finishRepacking(probe, {yardId})) return false;
+        if (std::getenv("CONCORD_MCV_REPACK_TRACE") != nullptr) {
+            // Read-only: the six predicates behind "click did not create a selected movable vehicle".
+            std::string line =
+                "yardId=" + std::to_string(yardId)
+                + " yardStillThere=" + (findObjectById(probe, yardId) != nullptr ? "1" : "0")
+                + " selection=" + std::to_string(probe.selectedObjectIds.size()) + " ids=";
+            for (int id : probe.selectedObjectIds) line += std::to_string(id) + ",";
+            line += " live:";
+            for (const auto& object : probe.world.getObjects()) {
+                if (!object.alive) continue;
+                const RuntimeCellPoint cell = runtimeCellPointForObject(object);
+                line += " [#" + std::to_string(object.instanceId) + " " + object.type
+                    + "/" + object.owner
+                    + " kind=" + std::to_string(static_cast<int>(object.kind))
+                    + " cell=" + std::to_string(cell.x) + "," + std::to_string(cell.y)
+                    + " mission=" + object.mission
+                    + " deployed=" + (object.deployed ? "1" : "0")
+                    + " canMove=" + (runtimeObjectCanMove(probe, object) ? "1" : "0")
+                    + " health=" + std::to_string(object.health) + "]";
+            }
+            std::cout << "[mcv-repack] " << faction.owner << " " << line << '\n';
+        }
         auto* vehicle = selected(probe);
         if (findObjectById(probe, yardId) != nullptr || vehicle == nullptr
             || vehicle->type != faction.vehicle || vehicle->owner != faction.owner
             || !runtimeObjectCanMove(probe, *vehicle)
-            || runtimeCellPointForObject(*vehicle) != RuntimeCellPoint{6, 6})
-            return fail("click did not create a selected movable vehicle on the old foundation");
+            || std::find(yardFoundation.begin(), yardFoundation.end(),
+                   runtimeCellPointForObject(*vehicle)) == yardFoundation.end()) {
+            std::string detail = " (nothing selected)";
+            if (vehicle != nullptr) {
+                const RuntimeCellPoint landed = runtimeCellPointForObject(*vehicle);
+                detail = " (vehicle cell " + std::to_string(landed.x) + ","
+                    + std::to_string(landed.y) + " anchor "
+                    + std::to_string(yardSpawnAnchor.x) + ","
+                    + std::to_string(yardSpawnAnchor.y) + ")";
+            }
+            return fail("click did not create a selected movable vehicle on the old foundation"
+                + detail);
+        }
         const int vehicleId = vehicle->instanceId;
         if (runtimeSkirmishOwnerDefeated(probe, faction.owner))
             return fail("repacking the last construction yard incorrectly defeated its owner");
