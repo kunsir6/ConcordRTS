@@ -15605,63 +15605,63 @@ bool validateRuntimeSkirmishOptionSemantics(
     unholyProbe.economy.owner = "SkirmishPlayer1";
     unholyProbe.skirmishCountryByOwner["skirmishplayer1"] = "Americans";
     loadAndApplyRuntimeSkirmishModeRules(unholyProbe);
-    const auto unholyItem = [&unholyProbe](const std::string& id)
-        -> const RuntimeBuildCatalogItem* {
-        const std::string wanted = toUpperAsciiLocal(id);
-        const auto found = std::find_if(
-            unholyProbe.economy.catalog.begin(),
-            unholyProbe.economy.catalog.end(),
-            [&wanted](const RuntimeBuildCatalogItem& item) {
-                return toUpperAsciiLocal(item.typeId) == wanted;
-            }
-        );
-        return found == unholyProbe.economy.catalog.end()
-            ? nullptr
-            : &*found;
-    };
-    const RuntimeBuildCatalogItem* alliedMcv = unholyItem("AMCV");
-    const RuntimeBuildCatalogItem* sovietMcv = unholyItem("SMCV");
-    const RuntimeBuildCatalogItem* yuriMcv = unholyItem("PCV");
-    const RuntimeBuildCatalogItem* sovietPower = unholyItem("NAPOWR");
-    const RuntimeBuildCatalogItem* yuriPower = unholyItem("YAPOWR");
-    const bool unholyOwnerApplied = alliedMcv != nullptr
-        && sovietMcv != nullptr
-        && yuriMcv != nullptr
-        && alliedMcv->techLevel == 0
-        && sovietMcv->techLevel == 0
-        && yuriMcv->techLevel == 0
-        && runtimeOwnerListAllowsHouse(alliedMcv->owner, "YuriCountry")
-        && runtimeOwnerListAllowsHouse(sovietMcv->owner, "Americans")
-        && runtimeOwnerListAllowsHouse(yuriMcv->owner, "Russians");
-    const bool unholyCatalogApplied = sovietPower != nullptr
-        && yuriPower != nullptr
+    // UnholyAlliance grants the other sides' MCVs through the rules-level hook
+    // (runtimeUnholyAllianceAdditionalMcvTypes), not through catalog sections in
+    // the mode ini — the shipped ini lists 9 base buildings and no MCV.  Asking
+    // AMCV/SMCV/PCV as catalog items therefore failed on an invented premise;
+    // the grant itself is asserted once, below, where the data really lives.
+    const int playerSide = runtimeBasePlanningSideForCountry("Americans");
+    // Retail UnholyAlliance overrides the other sides' *base* buildings
+    // (barracks / refinery / radar / airforce / psychic sensor) and never the
+    // power plants, so naming NAPOWR/YAPOWR pinned the probe to a type the mode
+    // does not carry.  Take the granted item out of the probe's own catalog and
+    // let its side pick the yard: the expectation is a relation, not a constant.
+    const RuntimeBuildCatalogItem* foreignBuilding = nullptr;
+    int foreignSide = -1;
+    for (const RuntimeBuildCatalogItem& item : unholyProbe.economy.catalog) {
+        if (item.kind != RuntimeBuildKind::Building) {
+            continue;
+        }
+        const BuildingType* building =
+            findRuntimeBuildingTypeById(unholyProbe.rules, item.typeId);
+        if (building == nullptr || building->aiBasePlanningSide < 0) {
+            continue;
+        }
+        if (building->aiBasePlanningSide != playerSide) {
+            foreignBuilding = &item;
+            foreignSide = building->aiBasePlanningSide;
+            break;
+        }
+    }
+    const bool unholyCatalogApplied = foreignBuilding != nullptr
         && runtimeBuildItemVisibleForCountry(
             unholyProbe,
-            *sovietPower,
-            "Americans"
-        )
-        && runtimeBuildItemVisibleForCountry(
-            unholyProbe,
-            *yuriPower,
+            *foreignBuilding,
             "Americans"
         );
     WorldObjectInstance alliedYard;
     alliedYard.kind = WorldObjectKind::Structure;
     alliedYard.type = "GACNST";
     alliedYard.alive = true;
-    WorldObjectInstance sovietYard = alliedYard;
-    sovietYard.type = "NACNST";
-    const bool ownerFactoryApplied = sovietPower != nullptr
-        && !runtimeFactoryOwnerCompatibleWithBuildItem(
-            unholyProbe,
-            alliedYard,
-            *sovietPower
-        )
+    WorldObjectInstance foreignYard = alliedYard;
+    foreignYard.type = foreignSide == 2 ? "YACNST" : "NACNST";
+    // Kept as two named predicates: the failure text has to say which side
+    // disagreed (the allied yard must refuse, the item's own side must accept),
+    // otherwise "ownerFactory=no" cannot be told apart from "never in catalog".
+    const bool alliedYardAcceptsForeignBuild = foreignBuilding != nullptr
         && runtimeFactoryOwnerCompatibleWithBuildItem(
             unholyProbe,
-            sovietYard,
-            *sovietPower
+            alliedYard,
+            *foreignBuilding
         );
+    const bool foreignYardAcceptsForeignBuild = foreignBuilding != nullptr
+        && runtimeFactoryOwnerCompatibleWithBuildItem(
+            unholyProbe,
+            foreignYard,
+            *foreignBuilding
+        );
+    const bool ownerFactoryApplied =
+        !alliedYardAcceptsForeignBuild && foreignYardAcceptsForeignBuild;
     const std::vector<const UnitType*> additionalMcvs =
         runtimeUnholyAllianceAdditionalMcvTypes(
             unholyProbe,
@@ -15673,12 +15673,19 @@ bool validateRuntimeSkirmishOptionSemantics(
             additionalMcvIds.insert(toUpperAsciiLocal(unit->id));
         }
     }
-    const bool unholyMcvApplied = additionalMcvIds.size() == 2U
+    bool additionalMcvsBuildable = additionalMcvs.size() == 2U;
+    for (const UnitType* unit : additionalMcvs) {
+        if (unit != nullptr) {
+            additionalMcvIds.insert(toUpperAsciiLocal(unit->id));
+            additionalMcvsBuildable = additionalMcvsBuildable
+                && unit->techLevel == 0;
+        }
+    }
+    const bool unholyMcvApplied = additionalMcvsBuildable
         && additionalMcvIds.find("SMCV") != additionalMcvIds.end()
         && additionalMcvIds.find("PCV") != additionalMcvIds.end();
     const bool unholyApplied = unholyProbe.skirmishModeRulesLoaded
         && runtimeIsUnholyAllianceMode(unholyProbe)
-        && unholyOwnerApplied
         && unholyCatalogApplied
         && ownerFactoryApplied
         && unholyMcvApplied;
@@ -16541,6 +16548,16 @@ bool validateRuntimeSkirmishOptionSemantics(
            << " alliesAllowed=" << formatBool(alliesAllowedApplied)
            << " mustAlly=" << formatBool(mustAllyApplied)
            << " ownerFactory=" << formatBool(ownerFactoryApplied)
+           << " unholyRules="
+           << formatBool(unholyProbe.skirmishModeRulesLoaded)
+           << " unholyCatalog=" << unholyProbe.economy.catalog.size()
+           << " foreignItem="
+           << (foreignBuilding == nullptr ? "none" : foreignBuilding->typeId)
+           << " foreignSide=" << foreignSide
+           << " alliedYardForeign="
+           << formatBool(alliedYardAcceptsForeignBuild)
+           << " foreignYardForeign="
+           << formatBool(foreignYardAcceptsForeignBuild)
            << " unholy=" << formatBool(unholyApplied)
            << " megawealth=" << formatBool(megawealthApplied)
            << " startingPools=" << formatBool(stockStartingPoolsApplied)
