@@ -2,6 +2,37 @@
 
 namespace concord::runtime::session_detail {
 
+namespace {
+
+bool runtimeTransportTraceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("CONCORD_TRANSPORT_TRACE");
+        return value != nullptr && *value != '\0' && std::string(value) != "0";
+    }();
+    return enabled;
+}
+
+// 只读计量：同一个人同一个原因只打一次，否则每拍都会刷屏。
+// 输出只带 id/格子/原因，不带对象内容，关掉环境变量即零开销。
+void traceRuntimeTransportBoarding(
+    const char* stage,
+    int passengerId,
+    const RuntimeCellPoint& passengerCell,
+    const RuntimeCellPoint& hostCell,
+    const char* detail) {
+    if (!runtimeTransportTraceEnabled()) return;
+    static std::set<std::string> seen;
+    std::string key = std::string(stage) + '|' + std::to_string(passengerId);
+    if (!seen.insert(key).second) return;
+    std::cout << "[transport-trace] " << stage
+              << " id=" << passengerId
+              << " at=" << passengerCell.x << ',' << passengerCell.y
+              << " hull=" << hostCell.x << ',' << hostCell.y
+              << " why=" << (detail != nullptr ? detail : "") << '\n';
+}
+
+}  // namespace
+
 bool pathExists(const std::filesystem::path& path) {
     std::error_code errorCode;
     return std::filesystem::exists(path, errorCode);
@@ -11284,9 +11315,18 @@ std::optional<RuntimeCellPoint> runtimeAmphibiousTransportAccessCell(
         if (a.y != b.y) return a.y < b.y;
         return a.x < b.x;
     });
+    const auto passengerCell = runtimeCellPointForObject(passenger);
     for (const auto& cell : candidates) {
-        if (!findRuntimePassableCellNear(state, passenger, cell, 0, -1, reservedCells)) continue;
-        if (std::abs(terrainLevelAtRuntimeCell(state, cell.x, cell.y) - transport.level) > 1) continue;
+        if (!findRuntimePassableCellNear(state, passenger, cell, 0, -1, reservedCells)) {
+            traceRuntimeTransportBoarding("access:impassable", passenger.instanceId,
+                passengerCell, hull, "candidate cell rejected by passability");
+            continue;
+        }
+        if (std::abs(terrainLevelAtRuntimeCell(state, cell.x, cell.y) - transport.level) > 1) {
+            traceRuntimeTransportBoarding("access:level", passenger.instanceId,
+                passengerCell, hull, "terrain level differs from hull");
+            continue;
+        }
         if (runtimeInfantryUsesGroundSubcells(passenger)) {
             ensureRuntimeSubcellsInitialized(state);
             if (state.subcells.availableSubCells(
@@ -11294,12 +11334,24 @@ std::optional<RuntimeCellPoint> runtimeAmphibiousTransportAccessCell(
                     {cell.x, cell.y, runtimeCellKey(cell.x, cell.y),
                         runtimeCellIsBridge(state, cell.x, cell.y)},
                     {passenger.instanceId},
-                    runtimeGateSubcellContext(state, &passenger, RuntimeGatePassageMode::Commit)).empty()) continue;
+                    runtimeGateSubcellContext(state, &passenger, RuntimeGatePassageMode::Commit)).empty()) {
+                traceRuntimeTransportBoarding("access:subcells", passenger.instanceId,
+                    passengerCell, hull, "no free ground subcell on candidate cell");
+                continue;
+            }
         }
         if (boarding && origin != cell
-            && findRuntimePath(state, passenger, origin, cell, transport.instanceId).empty()) continue;
+            && findRuntimePath(state, passenger, origin, cell, transport.instanceId).empty()) {
+            traceRuntimeTransportBoarding("access:path", passenger.instanceId,
+                passengerCell, hull, "no path to candidate cell");
+            continue;
+        }
         if (boarding && transport.kind == WorldObjectKind::Unit
-            && !runtimeTransportBoardingAccessBodyClear(state, passenger, transport, cell)) continue;
+            && !runtimeTransportBoardingAccessBodyClear(state, passenger, transport, cell)) {
+            traceRuntimeTransportBoarding("access:body", passenger.instanceId,
+                passengerCell, hull, "approach body not clear");
+            continue;
+        }
         return cell;
     }
     return std::nullopt;
@@ -11625,12 +11677,29 @@ bool beginRuntimeTransportGroundTransfer(RuntimeProductionHostState& state,
     const RuntimeCellPoint& from, const RuntimeCellPoint& to,
     const RuntimeTransportMotionBody& source, const RuntimeTransportMotionBody& destination,
     int destinationSlot, bool boarding, const std::vector<RuntimeCellPoint>& remainingPath) {
-    if (!runtimeTransportTransferTransitionClear(state, passenger, from, to, host.instanceId, boarding)
-        || !runtimeTransportTransferFoundationClear(state, passenger, source, destination, host.instanceId)
-        || !runtimeTransportTransferBodiesClear(state, passenger, source, destination, host.instanceId)) return false;
+    // 三道门分开判，否则「转移没开始」只有一句 false，分不清是几何还是身体让位。
+    if (!runtimeTransportTransferTransitionClear(state, passenger, from, to, host.instanceId, boarding)) {
+        traceRuntimeTransportBoarding("transfer:transition", passenger.instanceId,
+            from, to, "adjacency/legality of the single-cell transition");
+        return false;
+    }
+    if (!runtimeTransportTransferFoundationClear(state, passenger, source, destination, host.instanceId)) {
+        traceRuntimeTransportBoarding("transfer:foundation", passenger.instanceId,
+            from, to, "foundation blocks the swept path");
+        return false;
+    }
+    if (!runtimeTransportTransferBodiesClear(state, passenger, source, destination, host.instanceId)) {
+        traceRuntimeTransportBoarding("transfer:bodies", passenger.instanceId,
+            from, to, "another ground body is inside the sweep corridor");
+        return false;
+    }
     const auto ticks = runtimeTransportMotionTransferTicks(state, passenger, boarding ? from : to,
         std::hypot(destination.x - source.x, destination.y - source.y));
-    if (!ticks) return false;
+    if (!ticks) {
+        traceRuntimeTransportBoarding("transfer:ticks", passenger.instanceId,
+            from, to, "no transfer tick duration for this transfer");
+        return false;
+    }
     const auto found = state.behaviors.find(passenger.instanceId);
     RuntimeObjectBehavior move = found == state.behaviors.end() ? RuntimeObjectBehavior{} : found->second;
     move.kind = RuntimeBehaviorKind::Move;
@@ -11669,7 +11738,14 @@ bool beginRuntimeTransportGroundTransfer(RuntimeProductionHostState& state,
 
 bool advanceRuntimeUnitTransportBoarding(RuntimeProductionHostState& state,
     WorldObjectInstance& passenger, const WorldObjectInstance& host) {
-    if (passenger.renderMoveActive || host.airborne || host.renderMoveActive) return false;
+    if (passenger.renderMoveActive || host.airborne || host.renderMoveActive) {
+        if (host.airborne || host.renderMoveActive) {
+            traceRuntimeTransportBoarding("boarding:host-busy", passenger.instanceId,
+                runtimeCellPointForObject(passenger), runtimeCellPointForObject(host),
+                "hull is airborne or still moving");
+        }
+        return false;
+    }
     if (runtimePersonalChronoTransportPassenger(state, passenger))
         return runtimeChronoTransportArrivalReady(state, passenger, host);
     const auto source = runtimeTransportMotionBody(passenger), destination = runtimeTransportMotionBody(host);
@@ -11677,8 +11753,16 @@ bool advanceRuntimeUnitTransportBoarding(RuntimeProductionHostState& state,
     if (std::hypot(source.x - destination.x, source.y - destination.y) <= 1.0e-9
         && std::abs(source.level - destination.level) <= 1.0e-9
         && source.onBridge == destination.onBridge) return true;
-    if (from == to) return false; // Caller takes a real adjacent access route; never fabricate a source.
-    (void)beginRuntimeTransportGroundTransfer(state, passenger, host, from, to, source, destination, -1, true);
+    if (from == to) {
+        traceRuntimeTransportBoarding("boarding:same-cell", passenger.instanceId, from, to,
+            "already on the hull cell but the body has not converged");
+        return false;
+    }
+    if (!beginRuntimeTransportGroundTransfer(
+            state, passenger, host, from, to, source, destination, -1, true)) {
+        traceRuntimeTransportBoarding("boarding:transfer-refused", passenger.instanceId,
+            from, to, "final one-cell transfer was not started this tick");
+    }
     return false;
 }
 
