@@ -13060,6 +13060,8 @@ void setRuntimeObjectCell(
     const RuntimeCellPoint& point,
     bool resetRenderPosition) {
     RuntimePerfTraceScope movePhaseTrace("moveSetCell", state.tick);
+    // C-02h 只读计量：正常走格子每拍只动 ±1，一次跨多格只可能来自「整体赋值」
+    // （重定位、上膛、装卸、场景脚本）。这里只盯奴隶矿工，默认静默。
     object.x = point.x;
     object.y = point.y;
     object.cell = runtimeCellKey(point.x, point.y);

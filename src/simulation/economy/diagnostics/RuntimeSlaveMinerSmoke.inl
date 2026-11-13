@@ -197,6 +197,25 @@ bool runRuntimeSlaveMinerEmergenceSmokeProbe(RuntimeWindowState& live, std::stri
                 return fail("load relocated an interior worker");
         }
         std::unordered_set<int> emerged;
+        // Failure text carries the offending worker inline. This used to be a
+        // CONCORD_*_TRACE dump (silent by default), which made the evidence
+        // exist only for whoever knew the variable — a probe that outlived its
+        // round. Text costs nothing when the assertion passes.
+        const auto describeWorker = [&](int id, const WorldObjectInstance& worker,
+                                        const RuntimeCellPoint& cell) {
+            std::string text = "tick=" + std::to_string(probe.tick)
+                + " id=" + std::to_string(id)
+                + " cell=" + std::to_string(cell.x) + "," + std::to_string(cell.y)
+                + " render=" + std::to_string(worker.renderX) + ","
+                + std::to_string(worker.renderY)
+                + (worker.renderMoveActive ? " moving" : " still")
+                + (worker.hasRenderPosition ? " hasRenderPos" : " noRenderPos");
+            const auto task = probe.slaveMinerTasks.find(id);
+            if (task != probe.slaveMinerTasks.end())
+                text += " phase=" + std::to_string(static_cast<int>(task->second.phase))
+                    + " status=" + task->second.status;
+            return text;
+        };
         const auto inspect = [&](bool mustStayInside) {
             const auto* host = findObjectById(probe, refineryId);
             if (host == nullptr || !host->alive) return fail("refinery disappeared");
@@ -208,25 +227,49 @@ bool runRuntimeSlaveMinerEmergenceSmokeProbe(RuntimeWindowState& live, std::stri
                 const bool inside = runtimeSlaveMinerWorkerAtRefinery(probe, *worker, *host);
                 const auto previous = lastCells.find(id);
                 if (previous == lastCells.end()) {
+                    // Infantry stand on sub-cell offsets, so a worker that has just
+                    // started its first diagonal step can render a quarter cell
+                    // outside its own committed cell (8,8) -> (9,9) renders 7.75,8.25.
+                    // Judge the rounded body cell against the refinery foundation
+                    // instead of a hard-coded box around the fixture's coordinates.
+                    const RuntimeCellPoint bodyCell{
+                        static_cast<int>(std::lround(worker->renderX)),
+                        static_cast<int>(std::lround(worker->renderY))};
                     const bool emerging = worker->renderMoveActive && worker->hasRenderPosition
-                        && worker->renderX >= 8.0 && worker->renderX <= 9.0
-                        && worker->renderY >= 8.0 && worker->renderY <= 9.0;
-                    if (!inside && !emerging) return fail("new worker appeared on surrounding ground");
+                        && runtimeCellDistanceToObjectFootprint(probe, bodyCell, *host) == 0.0;
+                    if (!inside && !emerging) {
+                        return fail("new worker appeared on surrounding ground: "
+                            + describeWorker(id, *worker, cell));
+                    }
                 } else {
                     if (std::abs(cell.x - previous->second.x) > 1
-                        || std::abs(cell.y - previous->second.y) > 1)
-                        return fail("worker teleported instead of walking");
+                        || std::abs(cell.y - previous->second.y) > 1) {
+                        return fail("worker teleported instead of walking: prev="
+                            + std::to_string(previous->second.x) + ","
+                            + std::to_string(previous->second.y) + " "
+                            + describeWorker(id, *worker, cell));
+                    }
                     if (!inside && runtimeCellDistanceToObjectFootprint(probe, previous->second, *host) == 0.0
-                        && (!worker->renderMoveActive || !worker->hasRenderPosition))
-                        return fail("worker left without interpolated walk animation");
+                        && (!worker->renderMoveActive || !worker->hasRenderPosition)) {
+                        return fail("worker left without interpolated walk animation: from="
+                            + std::to_string(previous->second.x) + ","
+                            + std::to_string(previous->second.y) + " "
+                            + describeWorker(id, *worker, cell));
+                    }
                 }
-                if (mustStayInside && !inside) return fail("worker escaped through a closed wall ring");
+                if (mustStayInside && !inside) {
+                    return fail("worker escaped through a closed wall ring: "
+                        + describeWorker(id, *worker, cell));
+                }
                 if (!inside) emerged.insert(id);
                 lastCells[id] = cell;
             }
             return true;
         };
-        const auto step = [&]() { ++probe.tick; advanceRuntimeSimulation(probe); };
+        const auto step = [&]() {
+            ++probe.tick;
+            advanceRuntimeSimulation(probe);
+        };
         if (mode == "blocked") {
             for (int tick = 0; tick < 120; ++tick) {
                 step();

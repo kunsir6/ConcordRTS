@@ -6458,6 +6458,9 @@ RuntimeSubcellReconcileReport reconcileRuntimeSubcells(
                 && destination->y == object->y)) {
             continue;
         }
+        // C-02h 只读计量：这条分支是**无插值的瞬移**——直接改格、清渲染位、重挂子格，
+        // 一次跨多少格取决于 findRuntimePassableCellNear 的半径（此处 6）。奴隶矿工段
+        // 一旦命中就表现为「工人一步跨 3 格、renderMove=0」。默认静默。
         object->x = destination->x;
         object->y = destination->y;
         object->cell = runtimeCellKey(destination->x, destination->y);
@@ -6757,6 +6760,9 @@ bool applyRuntimeMovePathResult(
     const RuntimeCellPoint current = runtimeCellPointForObject(object);
     const std::uint64_t failureKey =
         runtimePathFailureKeyForPending(state, object, behavior);
+    // C-02h 只读计量：出发 Move 的目标被寻路器兜底换掉时，把「要去的格子」和
+    // 「实际给的格子」并排打出来。换到自己脚下就等于「立刻完成」，随后会被
+    // 取消入场恢复瞬移走。默认静默。
     if (queuedPath.goalAdjusted
         && queuedPath.resolvedGoal != behavior.moveTarget
         && (runtimeFactoryDeliveryOwnsEgress(state, object.instanceId)
@@ -10166,9 +10172,15 @@ bool runtimeCancelledStructureEntryNeedsRecovery(
     if (harvester != state.harvesterTasks.end() && harvester->second.targetRefineryId == hostId
         && harvester->second.phase != RuntimeHarvesterPhase::Idle) return false;
     const auto slave = state.slaveMinerTasks.find(object.instanceId);
-    if (slave != state.slaveMinerTasks.end() && slave->second.refineryId == hostId
-        && (slave->second.phase == RuntimeSlaveMinerPhase::Returning
-            || slave->second.phase == RuntimeSlaveMinerPhase::Stored)) return false;
+    if (slave != state.slaveMinerTasks.end() && slave->second.refineryId == hostId) {
+        // C-02h：奴隶矿工的身体由任务步自己负责。运送（Returning/Stored）与出发离场
+        // （SeekingOre/MovingToOre）都合法地站在自己炼油厂的地基里；而离场那条 Move 的
+        // 目标格可能因墙圈未开暂时不可达（path=0 即刻「完成」），目标还会被兜底改回自己脚下，
+        // 因此「目标在地基外」不足以识别离场。按入场取消去恢复会把人用半径 6 的搜索直接搬到
+        // 空地（setRuntimeObjectCell + renderMoveActive=false），表现为 3 格无插值瞬移。
+        // 保留身体原地，任务步下一拍会重新签发出发。
+        return false;
+    }
     if (std::any_of(state.grinding.relations().begin(), state.grinding.relations().end(),
             [&](const auto& relation) { return relation.sourceId == object.instanceId && relation.hostId == hostId; })) return false;
 
@@ -10189,6 +10201,9 @@ bool recoverRuntimeCancelledStructureEntry(
     RuntimeProductionHostState& state, WorldObjectInstance& object,
     const RuntimeObjectBehavior& previous) {
     if (!runtimeCancelledStructureEntryNeedsRecovery(state, object, previous)) return false;
+    // C-02h 只读计量：这条恢复会用半径 6 的搜索把「身体还在地基里」的步兵
+    // 直接搬到空地（setRuntimeObjectCell(..., false) + renderMoveActive=false），
+    // 即无插值瞬移。奴隶矿工离开炼油厂时也走同一条 Move，先确认是不是它。默认静默。
     const auto oldSlot = worldObjectSubCellOffset(object);
     const double bodyX = runtimeObjectRenderX(object) + oldSlot.x;
     const double bodyY = runtimeObjectRenderY(object) + oldSlot.y;

@@ -7430,8 +7430,13 @@ bool advanceRuntimeSlaveMinerWorkerTask(
             task.status = "no ore";
             if (runtimeSlaveMinerWorkerAtRefinery(state, worker, *refinery)) {
                 const auto exit = findRuntimeSlaveMinerWorkerExitCell(state, *refinery, worker.type, &context.owner);
-                if (exit.has_value()) return issueRuntimeHarvesterMoveToCell(
-                    state, worker, *exit, "Move", nullptr, refinery->instanceId, true, &context.owner);
+                if (exit.has_value()) {
+                    const bool issued = issueRuntimeHarvesterMoveToCell(
+                        state, worker, *exit, "Move", nullptr, refinery->instanceId, true, &context.owner);
+                    // C-02h 只读计量：无矿时的「出发去门口」是唯一带 allowedOccupied
+                    // 的离场 Move，签发结果决定后面会不会被当成取消入场。默认静默。
+                    return issued;
+                }
             }
             return false;
         }
