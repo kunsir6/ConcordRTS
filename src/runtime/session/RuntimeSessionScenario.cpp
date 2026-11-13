@@ -1323,14 +1323,18 @@ void loadAndApplyRuntimeSkirmishModeRules(RuntimeGameSessionState& state) {
     state.skirmishModeAlliesAllowed = true;
     state.skirmishModeAllyChangeAllowed = true;
     state.skirmishModeMustAlly = false;
-    state.skirmishModeRulesPath =
-        resolveRuntimeModeRulesOverridePath(state.config);
-    if (state.skirmishModeRulesPath.empty()
-        || !state.skirmishModeRules.loadFromFile(
-            state.skirmishModeRulesPath
+    state.skirmishModeRulesPath.clear();
+    IniFile loadedModeRules;
+    std::string loadedModeRulesLabel;
+    if (!loadRuntimeModeRulesIni(
+            state.config,
+            loadedModeRules,
+            loadedModeRulesLabel
         )) {
         return;
     }
+    state.skirmishModeRules = std::move(loadedModeRules);
+    state.skirmishModeRulesPath = std::move(loadedModeRulesLabel);
 
     state.skirmishModeRulesLoaded = true;
     // Startup loads rules -> mode -> map. Keep late catalog/start/crate

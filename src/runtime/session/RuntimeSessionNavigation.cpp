@@ -1,5 +1,7 @@
 #include "runtime/session/detail/RuntimeProductionOperations.h"
 
+#include "assets/archive/MixArchive.h"
+
 namespace concord::runtime::session_detail {
 
 bool pathExists(const std::filesystem::path& path) {
@@ -158,15 +160,42 @@ std::string runtimeStructurePalettePath(
     return memo->path;
 }
 
-std::string resolveRuntimeModeRulesOverridePath(const RuntimeConfig& config) {
-    std::filesystem::path configured = trimAsciiLocal(
+namespace {
+
+std::string runtimeModeRulesFileName(const RuntimeConfig& config) {
+    std::string configured = trimAsciiLocal(
         config.gameModeRulesOverride
     );
     if (configured.empty()) {
         configured = runtimeDefaultModeRulesOverride(config.gameMode);
     }
-    if (configured.is_absolute()) {
-        return pathExists(configured) ? configured.generic_string() : "";
+    return configured;
+}
+
+// Retail ships the game-mode rule files (MPBattleMD.ini, MPDuelMD.ini, ...)
+// only inside expandmd01.mix; the loose layer carries no copy. Without this
+// list every "the mode rules are unreadable" symptom looks like a missing
+// asset, and the chosen skirmish mode silently degrades to plain Battle.
+const std::array<const char*, 5> kRuntimeModeRulesArchiveLayers = {{
+    "resources/mix_exports/expandmd01/expandmd01.mix",
+    "resources/mix_exports/expandmd02/expandmd02.mix",
+    "resources/mix_exports/ra2md/localmd.mix",
+    "resources/mix_exports/ra2/local.mix",
+    "localmd.mix"
+}};
+
+} // namespace
+
+std::string resolveRuntimeModeRulesOverridePath(const RuntimeConfig& config) {
+    const std::string configured = runtimeModeRulesFileName(config);
+    if (configured.empty()) {
+        return "";
+    }
+    const std::filesystem::path configuredPath(configured);
+    if (configuredPath.is_absolute()) {
+        return pathExists(configuredPath)
+            ? configuredPath.generic_string()
+            : "";
     }
 
     const std::filesystem::path localDataRoot(config.localDataRootPath);
@@ -184,6 +213,77 @@ std::string resolveRuntimeModeRulesOverridePath(const RuntimeConfig& config) {
         }
     }
     return "";
+}
+
+
+bool loadRuntimeModeRulesIni(
+    const RuntimeConfig& config,
+    IniFile& ini,
+    std::string& resolvedLabel
+) {
+    ini = IniFile{};
+    resolvedLabel.clear();
+
+    const std::string configured = runtimeModeRulesFileName(config);
+    if (configured.empty()) {
+        return false;
+    }
+
+    const std::string loosePath = resolveRuntimeModeRulesOverridePath(config);
+    if (!loosePath.empty() && ini.loadFromFile(loosePath)) {
+        resolvedLabel = loosePath;
+        return true;
+    }
+
+    if (config.localDataRootPath.empty()) {
+        return false;
+    }
+    const std::string entryName =
+        std::filesystem::path(configured).filename().generic_string();
+    if (entryName.empty()) {
+        return false;
+    }
+
+    const std::filesystem::path localDataRoot(config.localDataRootPath);
+    for (const char* layer : kRuntimeModeRulesArchiveLayers) {
+        const std::filesystem::path archivePath = localDataRoot / layer;
+        std::error_code errorCode;
+        if (!std::filesystem::is_regular_file(archivePath, errorCode)) {
+            continue;
+        }
+        MixArchive archive;
+        if (!archive.loadFromPath(archivePath) || !archive.isIndexReadable()) {
+            continue;
+        }
+        const MixEntry* entry = archive.findEntryByName(entryName);
+        if (entry == nullptr || entry->size == 0) {
+            continue;
+        }
+        std::vector<std::uint8_t> bytes;
+        std::string error;
+        if (!archive.readEntryData(*entry, bytes, error) || bytes.empty()) {
+            continue;
+        }
+        while (!bytes.empty() && bytes.back() == 0) {
+            bytes.pop_back();
+        }
+        if (bytes.empty()) {
+            continue;
+        }
+        IniFile parsed;
+        if (!parsed.loadFromString(std::string(
+                reinterpret_cast<const char*>(bytes.data()), bytes.size()))) {
+            continue;
+        }
+        ini = std::move(parsed);
+        // Consumers take filename() of this label and compare it to the
+        // canonical mode INI name (unholy detection, economy status, save
+        // round-trip identity), so an archive hit reports the entry name
+        // rather than the containing archive.
+        resolvedLabel = entryName;
+        return true;
+    }
+    return false;
 }
 
 std::unordered_map<int, const TerrainCell*> buildRuntimeTerrainLookup(

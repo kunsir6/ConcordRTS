@@ -1217,6 +1217,13 @@ std::string runtimeDefaultModeRulesOverride(const std::string& gameMode);
 
 std::string resolveRuntimeModeRulesOverridePath(const RuntimeConfig& config);
 
+// Loose mode INI first, then the retail archives: the game-mode rule files
+// ship only inside MIX, so a loose-only search leaves every mode on defaults.
+bool loadRuntimeModeRulesIni(
+    const RuntimeConfig& config,
+    IniFile& ini,
+    std::string& resolvedLabel);
+
 const IniFile::Section* runtimeIniSectionNoCase(
     const IniFile& ini,
     const std::string& wanted);

@@ -30599,8 +30599,8 @@ RuntimeStartupReport buildRuntimeSessionStartupReport(
             effectiveRulesIni = rulesIni;
             if (toUpperAsciiLocal(trimAsciiLocal(config.gameMode)) != "CAMPAIGNMISSION") {
                 IniFile modeRules;
-                const std::string modePath = resolveRuntimeModeRulesOverridePath(config);
-                if (!modePath.empty() && modeRules.loadFromFile(modePath))
+                std::string modeRulesLabel;
+                if (loadRuntimeModeRulesIni(config, modeRules, modeRulesLabel))
                     effectiveRulesIni.appendFrom(modeRules);
             }
             effectiveRulesIni.appendFrom(mapIni);
