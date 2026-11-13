@@ -217,12 +217,44 @@ bool runRuntimeAmphibiousTransportSmokeProbe(RuntimeWindowState& live, std::stri
         return fail("mixed infantry/MCV/loaded IFV boarding failed");
     boat = findMutableObjectById(n, boatId);
     if (runtimeTransportUsedSpace(n, *boat) != 12 || !roundTrip(n)) return fail("mixed hold save failed: " + error);
-    if (!move(n, boatId, {23, 23}) || !executeRuntimeSecondaryAction(n, boatId)) return fail("nested cargo transit failed");
+    if (!move(n, boatId, {23, 23})) return fail("nested cargo transit failed");
+    // C-02d 只读：动作前的船货件数与船体是否仍在移动，用来分开「3 件是初始值」与「4 件卸了 1 件」。
+    std::size_t cargoBeforeAction = 0;
+    bool boatMovingBefore = false;
+    if (const auto* boatBefore = findObjectById(n, boatId)) {
+        cargoBeforeAction = boatBefore->transportPassengerIds.size();
+        boatMovingBefore = boatBefore->renderMoveActive;
+    }
+    if (!executeRuntimeSecondaryAction(n, boatId)) return fail("nested cargo transit failed");
+    // 卸载同样是逐件推进（一趟只放一件），而且船货顺序**不保证** IFV 第一——
+    // boarding 是各车走到船边完成的，进舱顺序取决于到达顺序。旧写法「按一下就断言 IFV 已出舱」
+    // 实际在赌排队次序。这里按拍推进到 IFV 出舱为止，仍用「出不来就失败」保住原本要防的缺陷。
+    int nestedUnloadTicks = 0;
+    for (; nestedUnloadTicks < 30 * 20; ++nestedUnloadTicks) {
+        if (findObjectById(n, ifvId) != nullptr) break;
+        const auto* waiting = findObjectById(n, boatId);
+        if (waiting == nullptr || waiting->transportPassengerIds.empty()) break;
+        step(n);
+    }
     const auto* ifv = findObjectById(n, ifvId);
     const auto* rider = findRuntimeObjectByIdIncludingInactive(n, riderId);
     if (ifv == nullptr || rider == nullptr || ifv->transportPassengerIds != std::vector<int>{riderId}
-        || rider->alive || rider->cell != ifv->cell || ifv->activeGunnerMode < 0)
-        return fail("loaded IFV lost its soldier/gunner when disembarking");
+        || rider->alive || rider->cell != ifv->cell || ifv->activeGunnerMode < 0) {
+        // 拆开报，别让六个条件又压成一句话。
+        const auto* boatNow = findObjectById(n, boatId);
+        return fail(std::string("loaded IFV lost its soldier/gunner when disembarking:")
+            + " ifv=" + (ifv ? std::to_string(ifv->instanceId) : "null")
+            + " ifvCargo=" + (ifv ? std::to_string(ifv->transportPassengerIds.size()) : "-")
+            + " gunner=" + (ifv ? std::to_string(ifv->activeGunnerMode) : "-")
+            + " ifvCell=" + (ifv ? std::to_string(ifv->cell) : "-")
+            + " rider=" + (rider ? std::to_string(rider->instanceId) : "null")
+            + " riderAlive=" + (rider ? std::to_string(int(rider->alive)) : "-")
+            + " riderCell=" + (rider ? std::to_string(rider->cell) : "-")
+            + " boatCargo=" + (boatNow ? std::to_string(boatNow->transportPassengerIds.size()) : "-")
+            + " nestedUnloadTicks=" + std::to_string(nestedUnloadTicks)
+            + " cargoBeforeAction=" + std::to_string(cargoBeforeAction)
+            + " boatMovingBefore=" + (boatMovingBefore ? "1" : "0"));
+    }
     if (!roundTrip(n) || !board(n, boatId, {ifvId})) return fail("nested cargo could not reboard");
     RuntimeObjectExitRequest death;
     death.objectId = boatId; death.kind = RuntimeObjectExitKind::Destroyed; death.tick = n.tick;

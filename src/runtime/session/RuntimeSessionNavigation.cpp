@@ -31,6 +31,26 @@ void traceRuntimeTransportBoarding(
               << " why=" << (detail != nullptr ? detail : "") << '\n';
 }
 
+// C-02c 只读计量：卸载侧逐格给原因。按「人 + 格子 + 原因 + 120 拍时间桶」去重——
+// 只按前三项去重会把**首次命中时刻**当成终态（egress 刚起步时 ticks 仍是满值，
+// 看起来像"冻住"，其实只是还没跑）。加了时间桶才能看出它是原地不动还是在推进。
+long long runtimeTransportTraceTick = 0;
+
+void traceRuntimeTransportUnload(const char* stage, int passengerId,
+    int cellX, int cellY, const char* detail) {
+    if (!runtimeTransportTraceEnabled()) return;
+    static std::set<std::string> seen;
+    const long long bucket = runtimeTransportTraceTick / 120;
+    std::string key = std::string(stage) + '|' + std::to_string(passengerId) + '|'
+        + std::to_string(cellX) + ',' + std::to_string(cellY) + '|' + std::to_string(bucket);
+    if (!seen.insert(key).second) return;
+    std::cout << "[transport-trace] " << stage
+              << " tick=" << runtimeTransportTraceTick
+              << " id=" << passengerId
+              << " cell=" << cellX << ',' << cellY
+              << " why=" << (detail != nullptr ? detail : "") << '\n';
+}
+
 }  // namespace
 
 bool pathExists(const std::filesystem::path& path) {
@@ -11618,6 +11638,25 @@ bool runtimeTransportTransferBodiesClear(RuntimeGameSessionState& state,
                 + " host=" + std::to_string(hostId)
                 + " moving=" + (other.renderMoveActive ? "1" : "0")
                 + " alive=" + (other.alive ? "1" : "0");
+            // C-02c 第二步：挡住者自己卡在哪。卸载侧「第一个出舱的没走开」到底是
+            // egress 渲染步没走完（ticks>0），还是走不到半径 2 外侧终点（ticks==0 && path 空）。
+            const auto bmove = state.behaviors.find(other.instanceId);
+            if (bmove == state.behaviors.end()) {
+                *blocker += " bstate=none";
+            } else {
+                const auto& m = bmove->second;
+                *blocker += " bstate=" + std::to_string(static_cast<int>(m.state))
+                    + " bkind=" + std::to_string(static_cast<int>(m.kind))
+                    + " transfer=" + std::to_string(static_cast<int>(m.transportTransferKind))
+                    + " ticks=" + std::to_string(m.renderMoveTicksRemaining)
+                    + '/' + std::to_string(m.renderMoveTicksTotal)
+                    + " path=" + std::to_string(m.path.size())
+                    + " target=" + std::to_string(m.moveTarget.x) + ',' + std::to_string(m.moveTarget.y)
+                    + " cooldown=" + std::to_string(m.moveCooldownTicks)
+                    + " blocked=" + std::to_string(m.blockedTicks);
+            }
+            *blocker += " render=" + std::to_string(runtimeObjectRenderX(other))
+                + ',' + std::to_string(runtimeObjectRenderY(other));
         };
         const auto check = [&](const auto& x, const auto& y, bool otherLayer) {
             const RuntimeTransportMotionPoint middle{(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5};
@@ -11837,15 +11876,27 @@ void prepareRuntimeTransportUnloadMotion(RuntimeProductionHostState& state, Worl
 }
 
 int unloadRuntimeUnitTransportMotion(RuntimeProductionHostState& state, WorldObjectInstance& host) {
-    if (!host.alive || host.health <= 0 || host.airborne || host.renderMoveActive) return 0;
+    if (!host.alive || host.health <= 0 || host.airborne || host.renderMoveActive) {
+        // C-02d 只读：整次卸载被顶部守卫吞掉时，六种条件原来只表现为「什么都没发生」。
+        const std::string why = std::string("alive=") + (host.alive ? "1" : "0")
+            + " health=" + std::to_string(host.health)
+            + " airborne=" + (host.airborne ? "1" : "0")
+            + " renderMoveActive=" + (host.renderMoveActive ? "1" : "0")
+            + " mission=" + host.mission
+            + " cargo=" + std::to_string(host.transportPassengerIds.size());
+        traceRuntimeTransportUnload("unload:host-busy", host.instanceId, host.x, host.y, why.c_str());
+        return 0;
+    }
     const auto hostCell = runtimeCellPointForObject(host);
     const auto body = runtimeTransportMotionBody(host);
     int unloaded = 0;
     const auto manifest = host.transportPassengerIds;
     // The first physical exit is reserved immediately; its later outer goal is not.
     // Count accepted foot goals once, without reserving or changing any slot.
+    // C-02c：这段对两栖船也要算——两栖卸载的步兵从下一拍起也会拿到半径 2 的外侧终点，
+    // 不统计就会把同一个外格重复派给多人。载具段不读它，多算一份无副作用。
     std::map<std::pair<int, bool>, int> futureFootGoals;
-    if (!runtimeAmphibiousTransport(state, host)) {
+    {
         const auto poseContext = runtimeGroundPoseContext(state);
         for (const auto& [otherId, move] : state.behaviors) {
             if (move.kind != RuntimeBehaviorKind::Move
@@ -11871,6 +11922,7 @@ int unloadRuntimeUnitTransportMotion(RuntimeProductionHostState& state, WorldObj
             ++futureFootGoals[{runtimeCellKey(move.moveTarget.x, move.moveTarget.y), goalBridge}];
         }
     }
+    runtimeTransportTraceTick = static_cast<long long>(state.tick);
     for (int id : manifest) {
         auto* stored = findMutableRuntimeObjectByIdIncludingInactive(state, id);
         if (!stored || stored->alive || stored->health <= 0) continue;
@@ -11886,21 +11938,63 @@ int unloadRuntimeUnitTransportMotion(RuntimeProductionHostState& state, WorldObj
         });
         bool accepted = false;
         for (const auto& first : candidates) {
-            if (!findRuntimePassableCellNear(state, probe, first, 0, -1)
-                || std::abs(terrainLevelAtRuntimeCell(state, first.x, first.y) - host.level) > 1) continue;
+            // C-02c 只读：卸载侧把「没下船」拆成逐格原因，否则「600 拍不放空」只有一句结论。
+            if (!findRuntimePassableCellNear(state, probe, first, 0, -1)) {
+                std::string why = "passability rejected the exit cell";
+                if (runtimeTransportTraceEnabled()) {
+                    const auto occupancy = buildRuntimeOccupancyLookup(state, probe.instanceId, nullptr, nullptr);
+                    const auto held = occupancy.find(runtimeCellKey(first.x, first.y));
+                    why += " occupied=" + (held == occupancy.end() ? std::string("-")
+                        : std::to_string(held->second));
+                    why += " level=" + std::to_string(terrainLevelAtRuntimeCell(state, first.x, first.y));
+                    why += " hullLevel=" + std::to_string(host.level);
+                    why += " probe=" + probe.type + (probe.alive ? "/alive" : "/dead");
+                }
+                traceRuntimeTransportUnload("unload:passable", id, first.x, first.y, why.c_str());
+                continue;
+            }
+            if (std::abs(terrainLevelAtRuntimeCell(state, first.x, first.y) - host.level) > 1) {
+                traceRuntimeTransportUnload("unload:level", id, first.x, first.y,
+                    "terrain level differs from the hull");
+                continue;
+            }
             std::vector<int> slots{-1};
             if (probe.kind == WorldObjectKind::Infantry) slots = runtimeAvailableInfantrySubcells(state, probe, first);
+            if (slots.empty()) {
+                traceRuntimeTransportUnload("unload:subcell", id, first.x, first.y,
+                    "no free ground subcell on the exit cell");
+                continue;
+            }
             for (int slot : slots) {
                 const auto offset = worldInfantrySubCellOffset(slot);
                 const RuntimeTransportMotionBody destination{first.x + offset.x, first.y + offset.y,
                     double(terrainLevelAtRuntimeCell(state, first.x, first.y)), runtimeCellIsBridge(state, first.x, first.y)};
                 const double hullClearance = probe.kind == WorldObjectKind::Infantry ? 0.75 : 1.0;
                 if (destination.onBridge == body.onBridge
-                    && std::hypot(destination.x-body.x, destination.y-body.y) + 1.0e-9 < hullClearance) continue;
-                if (!runtimeTransportTransferTransitionClear(state, probe, hostCell, first, host.instanceId, false)
-                    || !runtimeTransportTransferBodiesClear(state, probe, body, destination, host.instanceId)) continue;
+                    && std::hypot(destination.x-body.x, destination.y-body.y) + 1.0e-9 < hullClearance) {
+                    traceRuntimeTransportUnload("unload:clearance", id, first.x, first.y,
+                        "exit subcell still inside the hull clearance");
+                    continue;
+                }
+                if (!runtimeTransportTransferTransitionClear(state, probe, hostCell, first, host.instanceId, false)) {
+                    traceRuntimeTransportUnload("unload:transition", id, first.x, first.y,
+                        "single-cell transition not legal");
+                    continue;
+                }
+                std::string unloadBlocker;
+                if (!runtimeTransportTransferBodiesClear(state, probe, body, destination, host.instanceId,
+                        &unloadBlocker)) {
+                    traceRuntimeTransportUnload("unload:bodies", id, first.x, first.y,
+                        unloadBlocker.empty() ? "another ground body is inside the sweep corridor"
+                            : unloadBlocker.c_str());
+                    continue;
+                }
                 std::vector<RuntimeCellPoint> remainingPath;
-                if (!runtimeAmphibiousTransport(state, host)) {
+                // C-02c 取 A：两栖船的**步兵**也要半径 2 外侧终点。否则出舱者就地停在环上，
+                // 8 个邻格被先出来的人占满，最后一名永远找不到干净走廊（FIX-19 读数）。
+                // 载具仍然不给——坦克段断言要求 cell 距船体 ≤1.5、exits 互不重合，走出去会破。
+                // 全水时 findRuntimePath 返回空，自动退回「就地停靠」，与本轮之前的行为一致。
+                if (!runtimeAmphibiousTransport(state, host) || runtimeInfantryUsesGroundSubcells(probe)) {
                     auto walking = probe;
                     walking.x = first.x; walking.y = first.y; walking.cell = runtimeCellKey(first.x, first.y);
                     walking.level = terrainLevelAtRuntimeCell(state, first.x, first.y);
@@ -11921,6 +12015,9 @@ int unloadRuntimeUnitTransportMotion(RuntimeProductionHostState& state, WorldObj
                             }
                             remainingPath = findRuntimePath(state, walking, first, outer, -1);
                         }
+                    if (remainingPath.empty())
+                        traceRuntimeTransportUnload("unload:no-goal", id, first.x, first.y,
+                            "no radius-2 outer goal reachable; the exit parks on the ring");
                 }
                 // Commit the adjacent exit, then walk the real route to a legal radius2 endpoint.
                 if (!beginRuntimeTransportGroundTransfer(state, *stored, host, hostCell, first,
@@ -11933,6 +12030,8 @@ int unloadRuntimeUnitTransportMotion(RuntimeProductionHostState& state, WorldObj
             if (accepted) break;
         }
         if (accepted) break; // Later cargo waits on real body clearance, not a fixed delay.
+        traceRuntimeTransportUnload("unload:no-exit", id, hostCell.x, hostCell.y,
+            "every exit cell was rejected this tick");
     }
     refreshRuntimeTransportGunnerState(state, host);
     if (host.transportPassengerIds.empty()) setRuntimeMissionIntent(state, host,
