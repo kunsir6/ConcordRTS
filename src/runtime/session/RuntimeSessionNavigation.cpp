@@ -9790,6 +9790,20 @@ bool runtimeJumpjetShouldLand(const RuntimeGameSessionState& state, const WorldO
         && (route->second.active || route->second.cursor < route->second.points.size()
             || route->second.loopCommitted)) return false;
     const auto current = runtimeCellPointForObject(object);
+    // A ground mover already on its way to this cell outranks the landing.
+    // Landing first would turn the cell occupied, so the incoming unit gets
+    // shoved to a nearby empty cell and a mixed group ends up scattered.
+    // The aircraft simply keeps flying and settles once the claim is gone.
+    for (const auto& [otherId, other] : state.behaviors) {
+        if (otherId == object.instanceId) continue;
+        if (other.kind != RuntimeBehaviorKind::Move) continue;
+        if (other.state == RuntimeBehaviorState::Complete
+            || other.state == RuntimeBehaviorState::Idle) continue;
+        if (other.moveTarget.x != current.x || other.moveTarget.y != current.y) continue;
+        const auto* mover = findObjectById(state, otherId);
+        if (mover == nullptr || !mover->alive || mover->airborne) continue;
+        return false;
+    }
     const auto terrain = state.terrainByCell.find(runtimeCellKey(current.x, current.y));
     if (terrain == state.terrainByCell.end() || !terrain->second) return false;
     const auto info = runtimeCachedTerrainInfoForCell(state, *terrain->second);
