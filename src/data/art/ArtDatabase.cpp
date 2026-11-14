@@ -161,13 +161,15 @@ bool readArtBoolLocal(
     return defaultValue;
 }
 
-void addActiveAnimationLayer(
+// 这四个入口解析的字段完全相同（12 项），只有「key 怎么拼」与「塞进哪个 vector」不同。
+// 原先四份逐字副本：任何一处加字段都会漏改其余三份，属必须单点化的解析。
+void addAnimationLayer(
     const IniFile& ini,
     ArtType& art,
     const std::string& id,
-    const std::string& suffix
+    const std::string& key,
+    std::vector<ArtType::ActiveAnimation>& target
 ) {
-    const std::string key = "ActiveAnim" + suffix;
     const std::string image = ini.getValue(id, key, "");
     if (image.empty()) {
         return;
@@ -194,7 +196,16 @@ void addActiveAnimationLayer(
         readArtBoolLocal(ini, id, key + "PoweredSpecial", false);
     animation.poweredEffect =
         readArtBoolLocal(ini, id, key + "PoweredEffect", false);
-    art.activeAnimations.push_back(animation);
+    target.push_back(animation);
+}
+
+void addActiveAnimationLayer(
+    const IniFile& ini,
+    ArtType& art,
+    const std::string& id,
+    const std::string& suffix
+) {
+    addAnimationLayer(ini, art, id, "ActiveAnim" + suffix, art.activeAnimations);
 }
 
 void addNamedAnimationLayer(
@@ -203,33 +214,7 @@ void addNamedAnimationLayer(
     const std::string& id,
     const std::string& key
 ) {
-    const std::string image = ini.getValue(id, key, "");
-    if (image.empty()) {
-        return;
-    }
-
-    ArtType::ActiveAnimation animation;
-    animation.key = key;
-    animation.image = image;
-    animation.damagedImage =
-        ini.getValue(id, key + "Damaged", "");
-    animation.offsetX =
-        readArtIntLocal(ini, id, key + "X", 0);
-    animation.offsetY =
-        readArtIntLocal(ini, id, key + "Y", 0);
-    animation.ySort =
-        readArtIntLocal(ini, id, key + "YSort", 0);
-    animation.zAdjust =
-        readArtIntLocal(ini, id, key + "ZAdjust", 0);
-    animation.powered =
-        readArtBoolLocal(ini, id, key + "Powered", true);
-    animation.poweredLight =
-        readArtBoolLocal(ini, id, key + "PoweredLight", false);
-    animation.poweredSpecial =
-        readArtBoolLocal(ini, id, key + "PoweredSpecial", false);
-    animation.poweredEffect =
-        readArtBoolLocal(ini, id, key + "PoweredEffect", false);
-    art.activeAnimations.push_back(animation);
+    addAnimationLayer(ini, art, id, key, art.activeAnimations);
 }
 
 void addSpecialAnimationLayer(
@@ -238,33 +223,7 @@ void addSpecialAnimationLayer(
     const std::string& id,
     const std::string& key
 ) {
-    const std::string image = ini.getValue(id, key, "");
-    if (image.empty()) {
-        return;
-    }
-
-    ArtType::ActiveAnimation animation;
-    animation.key = key;
-    animation.image = image;
-    animation.damagedImage =
-        ini.getValue(id, key + "Damaged", "");
-    animation.offsetX =
-        readArtIntLocal(ini, id, key + "X", 0);
-    animation.offsetY =
-        readArtIntLocal(ini, id, key + "Y", 0);
-    animation.ySort =
-        readArtIntLocal(ini, id, key + "YSort", 0);
-    animation.zAdjust =
-        readArtIntLocal(ini, id, key + "ZAdjust", 0);
-    animation.powered =
-        readArtBoolLocal(ini, id, key + "Powered", true);
-    animation.poweredLight =
-        readArtBoolLocal(ini, id, key + "PoweredLight", false);
-    animation.poweredSpecial =
-        readArtBoolLocal(ini, id, key + "PoweredSpecial", false);
-    animation.poweredEffect =
-        readArtBoolLocal(ini, id, key + "PoweredEffect", false);
-    art.specialAnimations.push_back(animation);
+    addAnimationLayer(ini, art, id, key, art.specialAnimations);
 }
 
 void addAuxiliaryAnimationLayer(
@@ -273,33 +232,7 @@ void addAuxiliaryAnimationLayer(
     const std::string& id,
     const std::string& key
 ) {
-    const std::string image = ini.getValue(id, key, "");
-    if (image.empty()) {
-        return;
-    }
-
-    ArtType::ActiveAnimation animation;
-    animation.key = key;
-    animation.image = image;
-    animation.damagedImage =
-        ini.getValue(id, key + "Damaged", "");
-    animation.offsetX =
-        readArtIntLocal(ini, id, key + "X", 0);
-    animation.offsetY =
-        readArtIntLocal(ini, id, key + "Y", 0);
-    animation.ySort =
-        readArtIntLocal(ini, id, key + "YSort", 0);
-    animation.zAdjust =
-        readArtIntLocal(ini, id, key + "ZAdjust", 0);
-    animation.powered =
-        readArtBoolLocal(ini, id, key + "Powered", true);
-    animation.poweredLight =
-        readArtBoolLocal(ini, id, key + "PoweredLight", false);
-    animation.poweredSpecial =
-        readArtBoolLocal(ini, id, key + "PoweredSpecial", false);
-    animation.poweredEffect =
-        readArtBoolLocal(ini, id, key + "PoweredEffect", false);
-    art.auxiliaryAnimations.push_back(animation);
+    addAnimationLayer(ini, art, id, key, art.auxiliaryAnimations);
 }
 
 bool hasIniValue(

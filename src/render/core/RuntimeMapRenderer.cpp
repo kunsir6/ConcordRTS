@@ -19915,6 +19915,66 @@ void dumpRuntimeVoxelFacingAtlas(
     }
 }
 
+// 炮塔与炮管共用同一套「挂载点」几何：体旋转下的偏移换算 + 环境变量像素微调。
+// 这两段原先在 tryDrawRuntimeUnitVoxelTurret / tryDrawRuntimeUnitVoxelBarrel 里逐字各存一份，
+// 任何一处改动都会让炮管相对炮塔脱开，属必须单点化的共享几何。
+POINT runtimeVxlSharedPartCenter(
+    const WorldObjectInstance& object,
+    const POINT& center,
+    const RuntimeMapRenderContext& context,
+    double bodyFitScale,
+    const RuntimeVoxelBodyRotation* bodyRotation,
+    const char* pixelOffsetXEnv,
+    const char* pixelOffsetYEnv
+) {
+    POINT offset = runtimeVoxelTurretOffset(object, context, bodyFitScale);
+    if (bodyRotation != nullptr && bodyRotation->active()) {
+        const double scale = bodyFitScale > 0.0 ? bodyFitScale : 0.50;
+        const auto projection = runtimeVxlProjectionAxes();
+        const double sum = offset.y / (projection[1] * scale);
+        const double difference = offset.x / (projection[0] * scale);
+        const auto mount = bodyRotation->rotate((sum + difference) * 0.5,
+            (sum - difference) * 0.5, 0.0);
+        offset = {static_cast<LONG>(std::lround((mount[0] - mount[1]) * projection[0] * scale)),
+            static_cast<LONG>(std::lround(((mount[0] + mount[1]) * projection[1] - mount[2] * projection[2]) * scale))};
+    }
+    return {center.x + offset.x + runtimeVxlPixelOffset(pixelOffsetXEnv),
+        center.y + offset.y + runtimeVxlPixelOffset(pixelOffsetYEnv)};
+}
+
+// 候选帧遍历与绘制：两份原本也是逐字副本，只有 cache key 后缀不同。
+bool drawRuntimeVxlPart(
+    HDC dc,
+    const RECT& viewport,
+    const POINT& partCenter,
+    const WorldObjectInstance& object,
+    const RuntimeMapRenderContext& context,
+    const RuntimeMapCamera& camera,
+    RuntimeMapRenderCache& cache,
+    const std::vector<std::string>& candidates,
+    const char* cacheKeySuffix,
+    int facing,
+    RuntimeVoxelSpriteDrawInfo* drawInfo,
+    double forcedScale,
+    int opacity,
+    const RuntimeVoxelBodyRotation* bodyRotation
+) {
+    for (const std::string& imageId : candidates) {
+        if (drawRuntimeVoxelImageSprite(
+                dc, viewport, partCenter, context, camera, cache, imageId,
+                object.type + cacheKeySuffix, facing, 0, 0, 0,
+                runtimeOwnerHasRendererRemapColor(context, object.owner)
+                    && runtimeImageShouldOwnerRemap(
+                        context, imageId, findArtTypeForObject(object, context)),
+                runtimeOwnerRemapColor(context, object.owner),
+                drawInfo, forcedScale, opacity, 0.0, bodyRotation)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool tryDrawRuntimeUnitVoxelTurret(
     HDC dc,
     const RECT& viewport,
@@ -19934,65 +19994,17 @@ bool tryDrawRuntimeUnitVoxelTurret(
 
     const int facing =
         object.turretFacing >= 0 ? object.turretFacing : object.facing;
-    POINT turretOffset = runtimeVoxelTurretOffset(object, context, bodyFitScale);
-    if (bodyRotation != nullptr && bodyRotation->active()) {
-        const double scale = bodyFitScale > 0.0 ? bodyFitScale : 0.50;
-        const auto projection = runtimeVxlProjectionAxes();
-        const double sum = turretOffset.y / (projection[1] * scale);
-        const double difference = turretOffset.x / (projection[0] * scale);
-        const auto mount = bodyRotation->rotate((sum + difference) * 0.5,
-            (sum - difference) * 0.5, 0.0);
-        turretOffset = {static_cast<LONG>(std::lround((mount[0] - mount[1]) * projection[0] * scale)),
-            static_cast<LONG>(std::lround(((mount[0] + mount[1]) * projection[1] - mount[2] * projection[2]) * scale))};
-    }
-    const int pixelOffsetX =
-        runtimeVxlPixelOffset("CONCORD_VXL_TURRET_PIXEL_OFFSET_X");
-    const int pixelOffsetY =
-        runtimeVxlPixelOffset("CONCORD_VXL_TURRET_PIXEL_OFFSET_Y");
-    const POINT turretCenter{
-        center.x + turretOffset.x + pixelOffsetX,
-        center.y + turretOffset.y + pixelOffsetY
-    };
+    const POINT partCenter = runtimeVxlSharedPartCenter(object, center, context,
+        bodyFitScale, bodyRotation,
+        "CONCORD_VXL_TURRET_PIXEL_OFFSET_X", "CONCORD_VXL_TURRET_PIXEL_OFFSET_Y");
     const double forcedScale = runtimeVxlSharedPartScaleEnabled()
-        ? runtimeVoxelPartFitScale(
-            bodyFitScale,
-            runtimeVxlTurretRelativeScale()
-        )
-        : 0.0;
+        ? runtimeVoxelPartFitScale(bodyFitScale, runtimeVxlTurretRelativeScale()) : 0.0;
     const auto* metadata = runtimeGeometryMetadataForObject(object, context);
-    const auto uncachedCandidates = metadata == nullptr
+    const auto uncached = metadata == nullptr
         ? runtimeUnitTurretImageCandidates(object, context) : std::vector<std::string>{};
-    const auto& candidates = metadata ? metadata->turretCandidates : uncachedCandidates;
-    for (const std::string& imageId : candidates) {
-        if (drawRuntimeVoxelImageSprite(
-                dc,
-                viewport,
-                turretCenter,
-                context,
-                camera,
-                cache,
-                imageId,
-                object.type + "|turret",
-                facing,
-                0,
-                0,
-                0,
-                runtimeOwnerHasRendererRemapColor(context, object.owner)
-                    && runtimeImageShouldOwnerRemap(
-                        context,
-                        imageId,
-                        findArtTypeForObject(object, context)
-                ),
-                runtimeOwnerRemapColor(context, object.owner),
-                drawInfo,
-                forcedScale,
-                opacity, 0.0, bodyRotation
-            )) {
-            return true;
-        }
-    }
-
-    return false;
+    const auto& candidates = metadata ? metadata->turretCandidates : uncached;
+    return drawRuntimeVxlPart(dc, viewport, partCenter, object, context, camera, cache,
+        candidates, "|turret", facing, drawInfo, forcedScale, opacity, bodyRotation);
 }
 
 bool tryDrawRuntimeUnitVoxelBarrel(
@@ -20014,65 +20026,17 @@ bool tryDrawRuntimeUnitVoxelBarrel(
 
     const int facing =
         object.turretFacing >= 0 ? object.turretFacing : object.facing;
-    POINT turretOffset = runtimeVoxelTurretOffset(object, context, bodyFitScale);
-    if (bodyRotation != nullptr && bodyRotation->active()) {
-        const double scale = bodyFitScale > 0.0 ? bodyFitScale : 0.50;
-        const auto projection = runtimeVxlProjectionAxes();
-        const double sum = turretOffset.y / (projection[1] * scale);
-        const double difference = turretOffset.x / (projection[0] * scale);
-        const auto mount = bodyRotation->rotate((sum + difference) * 0.5,
-            (sum - difference) * 0.5, 0.0);
-        turretOffset = {static_cast<LONG>(std::lround((mount[0] - mount[1]) * projection[0] * scale)),
-            static_cast<LONG>(std::lround(((mount[0] + mount[1]) * projection[1] - mount[2] * projection[2]) * scale))};
-    }
-    const int pixelOffsetX =
-        runtimeVxlPixelOffset("CONCORD_VXL_BARREL_PIXEL_OFFSET_X");
-    const int pixelOffsetY =
-        runtimeVxlPixelOffset("CONCORD_VXL_BARREL_PIXEL_OFFSET_Y");
-    const POINT barrelCenter{
-        center.x + turretOffset.x + pixelOffsetX,
-        center.y + turretOffset.y + pixelOffsetY
-    };
+    const POINT partCenter = runtimeVxlSharedPartCenter(object, center, context,
+        bodyFitScale, bodyRotation,
+        "CONCORD_VXL_BARREL_PIXEL_OFFSET_X", "CONCORD_VXL_BARREL_PIXEL_OFFSET_Y");
     const double forcedScale = runtimeVxlSharedPartScaleEnabled()
-        ? runtimeVoxelPartFitScale(
-            bodyFitScale,
-            runtimeVxlBarrelRelativeScale()
-        )
-        : 0.0;
+        ? runtimeVoxelPartFitScale(bodyFitScale, runtimeVxlBarrelRelativeScale()) : 0.0;
     const auto* metadata = runtimeGeometryMetadataForObject(object, context);
-    const auto uncachedCandidates = metadata == nullptr
+    const auto uncached = metadata == nullptr
         ? runtimeUnitBarrelImageCandidates(object, context) : std::vector<std::string>{};
-    const auto& candidates = metadata ? metadata->barrelCandidates : uncachedCandidates;
-    for (const std::string& imageId : candidates) {
-        if (drawRuntimeVoxelImageSprite(
-            dc,
-            viewport,
-            barrelCenter,
-            context,
-            camera,
-            cache,
-            imageId,
-            object.type + "|barrel",
-            facing,
-            0,
-            0,
-            0,
-            runtimeOwnerHasRendererRemapColor(context, object.owner)
-                && runtimeImageShouldOwnerRemap(
-                    context,
-                    imageId,
-                    findArtTypeForObject(object, context)
-            ),
-            runtimeOwnerRemapColor(context, object.owner),
-            drawInfo,
-            forcedScale,
-            opacity, 0.0, bodyRotation
-        )) {
-            return true;
-        }
-    }
-
-    return false;
+    const auto& candidates = metadata ? metadata->barrelCandidates : uncached;
+    return drawRuntimeVxlPart(dc, viewport, partCenter, object, context, camera, cache,
+        candidates, "|barrel", facing, drawInfo, forcedScale, opacity, bodyRotation);
 }
 
 bool runtimeAuxiliaryLooksAnimPaletteEffect(const std::string& imageId) {
