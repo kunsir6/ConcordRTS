@@ -29018,7 +29018,6 @@ LRESULT CALLBACK runtimeWindowProc(
         RuntimeWindowState* state = reinterpret_cast<RuntimeWindowState*>(
             GetWindowLongPtrW(window, GWLP_USERDATA)
         );
-        #include "runtime/window/win32/diagnostics/RuntimeScenePaintTrace.inl"
         if (state != nullptr) {
             const std::uint64_t presentationMs=runtimeUiClockNow(*state);
             advanceRuntimeResultPresentation(*state,presentationMs);
@@ -29296,7 +29295,6 @@ LRESULT CALLBACK runtimeWindowProc(
             }
         }
 #endif
-        traceScenePaint("after-scene");
         // Complete the clean scene first. Cached paints keep its version/tick,
         // while each presentation receives a fresh submission identity.
         if (backBufferReady && (!reuseCachedFrame || state->softwareSceneVersion==0)) {
@@ -29320,7 +29318,6 @@ LRESULT CALLBACK runtimeWindowProc(
             const bool eligible=runtimeFpsDisplayShouldCountFrame(
                 visible,minimized,hasClientArea,hasPaintArea,true);
             const bool loaded=state->world.getSummary().loaded;
-            traceScenePaint("eligibility",eligible);
             if(!loaded||!visible||minimized||!hasClientArea)state->fpsDisplayMeter.reset();
             auto prospectiveMeter=state->fpsDisplayMeter;
             if(loaded&&eligible)prospectiveMeter.recordPresentedFrame(
@@ -29441,7 +29438,6 @@ LRESULT CALLBACK runtimeWindowProc(
             }
             if(submissionSucceeded&&loaded&&eligible)state->fpsDisplayMeter=prospectiveMeter;
             baselineVisibleSubmission=eligible&&submissionSucceeded;
-            traceScenePaint("after-submit",eligible,submissionSucceeded);
             if(state->mapFrameProbeWin32&&mapMode)state->mapFrameProbeWin32->observeMap(paintDc,clientWidth,clientHeight,reuseCachedFrame,submissionSucceeded,
                 {state->mapComposition.frame(),state->softwareFrameSequence,clientWidth,clientHeight,static_cast<std::uint64_t>(std::max(0,state->softwareSceneTick))});
             else if(state->frameProbeWin32)state->frameProbeWin32->observe(paintDc,

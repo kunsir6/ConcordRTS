@@ -3,10 +3,6 @@ void drawRuntimeBehindMarkers(HDC dc, const RECT& viewport,
     RuntimeMapRenderCache& cache, RuntimeMapRenderStats& stats,
     const RuntimeBehindMarkerFrameState& frame) {
     if (!context.seeHiddenObjects || context.effectOnlyProbe) return;
-    static const bool trace = std::getenv("CONCORD_BEHIND_MARKER_TRACE") != nullptr;
-    if (trace) for (const auto& unit : frame.candidates)
-        std::cout << "Behind silhouette: object=" << unit.objectId << " samples=" << unit.sampleCount
-            << " coveredMask=" << unit.covered << '\n';
     if (std::none_of(frame.candidates.begin(), frame.candidates.end(),
             runtimeBehindMarkerCandidateCovered)) return;
     std::string imageId = context.rules ? context.rules->getAudioVisualValue("Behind") : "BEHIND";
