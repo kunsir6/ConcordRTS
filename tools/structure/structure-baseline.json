@@ -15030,17 +15030,6 @@
     },
     {
       "rule": "platform-edge",
-      "path": "src/ui/selection/RuntimeSelectionFrameRaster.h",
-      "detail": "src/ui/selection/RuntimeSelectedPathRaster.h",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P05",
-      "follow_up": "W014",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-edge",
       "path": "src/ui/selection/diagnostics/RuntimeBuildingSelectionAlignmentSmoke.inl",
       "detail": "src/ui/selection/diagnostics/RuntimeBuildingSelectionStabilitySmoke.inl",
       "maxOccurrences": 1,
@@ -36502,83 +36491,6 @@
     },
     {
       "rule": "platform-type",
-      "path": "src/ui/selection/RuntimeSelectionFrameRaster.h",
-      "detail": "BITMAPINFO",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P05",
-      "follow_up": "W014",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/RuntimeSelectionFrameRaster.h",
-      "detail": "HBITMAP",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P06",
-      "follow_up": "W019",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/RuntimeSelectionFrameRaster.h",
-      "detail": "HDC",
-      "maxOccurrences": 3,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P06",
-      "follow_up": "W019",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/RuntimeSelectionFrameRaster.h",
-      "detail": "HGDIOBJ",
-      "maxOccurrences": 2,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P06",
-      "follow_up": "W019",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/RuntimeSelectionFrameRaster.h",
-      "detail": "HPEN",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P06",
-      "follow_up": "W019",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/RuntimeSelectionFrameRaster.h",
-      "detail": "POINT",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P02",
-      "follow_up": "W002",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/RuntimeSelectionFrameRaster.h",
-      "detail": "RECT",
-      "maxOccurrences": 2,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P02",
-      "follow_up": "W002",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
       "path": "src/ui/selection/diagnostics/RuntimeAirbornePickingOrderSmoke.inl",
       "detail": "BITMAPINFO",
       "maxOccurrences": 1,
@@ -37242,83 +37154,6 @@
       "path": "src/ui/selection/diagnostics/RuntimeSelectionDeltaSmoke.inl",
       "detail": "RECT",
       "maxOccurrences": 2,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P02",
-      "follow_up": "W002",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/diagnostics/RuntimeSelectionFrameRasterContract.inl",
-      "detail": "BITMAPINFO",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P05",
-      "follow_up": "W014",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/diagnostics/RuntimeSelectionFrameRasterContract.inl",
-      "detail": "HBITMAP",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P06",
-      "follow_up": "W019",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/diagnostics/RuntimeSelectionFrameRasterContract.inl",
-      "detail": "HDC",
-      "maxOccurrences": 6,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P06",
-      "follow_up": "W019",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/diagnostics/RuntimeSelectionFrameRasterContract.inl",
-      "detail": "HGDIOBJ",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P06",
-      "follow_up": "W019",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/diagnostics/RuntimeSelectionFrameRasterContract.inl",
-      "detail": "HPEN",
-      "maxOccurrences": 1,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P06",
-      "follow_up": "W019",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/diagnostics/RuntimeSelectionFrameRasterContract.inl",
-      "detail": "POINT",
-      "maxOccurrences": 5,
-      "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
-      "owner_step": "P02",
-      "follow_up": "W002",
-      "status": "pending",
-      "evidence": "S29-01 frozen current Clang Release candidate-scan-r3.json"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/ui/selection/diagnostics/RuntimeSelectionFrameRasterContract.inl",
-      "detail": "RECT",
-      "maxOccurrences": 3,
       "reason": "Existing exact platform/ISA/opaque-pointer or target-link boundary; static signal only, to narrow with the owning W batch.",
       "owner_step": "P02",
       "follow_up": "W002",
@@ -47219,17 +47054,6 @@
       "rule": "platform-edge",
       "path": "src/runtime/host/RuntimeShell.cpp",
       "detail": "src/runtime/window/win32/diagnostics/RuntimeScenePaintTrace.inl",
-      "maxOccurrences": 1,
-      "reason": "Exact private Windows-only opt-in scene-allocation probe trace. Logs existing paint DC clip and eligibility without changing paint state, public probe API, FPS/pixel assertions or production rendering. No old Windows fact budget growth and no directory exemption.",
-      "owner_step": "S41/G009 required minimum G004-G009-01 diagnostic",
-      "follow_up": "Require actual failing-WARP trace, diagnosis and strict13cases/FPS2/fullpixels verification. Not acceptance from fact review.",
-      "status": "backend-private",
-      "evidence": "S41/maps-20261027-r1/structure-direct-scene-paint-trace-r1 actual1 exact2facts; scene-paint trace plan r1"
-    },
-    {
-      "rule": "platform-type",
-      "path": "src/runtime/window/win32/diagnostics/RuntimeScenePaintTrace.inl",
-      "detail": "RECT",
       "maxOccurrences": 1,
       "reason": "Exact private Windows-only opt-in scene-allocation probe trace. Logs existing paint DC clip and eligibility without changing paint state, public probe API, FPS/pixel assertions or production rendering. No old Windows fact budget growth and no directory exemption.",
       "owner_step": "S41/G009 required minimum G004-G009-01 diagnostic",
@@ -59386,6 +59210,13 @@
       "batch": "W030-linux-native-core",
       "reason": "Ten retired test-local WinSock facts and seven exact shared test facts. No production header reachability or existing budget increase.",
       "evidence": "Local validation report; not included in the source distribution."
+    },
+    {
+      "date": "2026-11-15",
+      "owner_step": "R44/S-13",
+      "batch": "S-13-stale-baseline-refs",
+      "reason": "删掉 16 条指向已删文件的例外：U-15 删掉 RuntimeSelectionFrameRaster.h 与其 Contract.inl（15 条 platform-type/platform-edge），第 39 轮（77e75e7）删掉一次性探针 RuntimeScenePaintTrace.inl（1 条 platform-type）。三条路径在源码树里都已不存在，例外不可能再匹配任何扫描对象。只删死条目，不放宽任何现存预算。",
+      "evidence": "tools/structure/run.sh 的基线引用完整性一段：改前 stale file paths 16 / distinct 3，改后 0。"
     }
   ]
 }
