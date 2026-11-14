@@ -80876,26 +80876,46 @@ int runRuntimeSkirmishBuildSmokeTest(const RuntimeConfig& config) {
                 *loadedGattlingProbe,
                 nullptr
             );
-    if (!projectileRecordsRestored
-        || state.nextProjectileActorId != savedNextProjectileActorId
-        || state.actionSummary.projectilesInFlight
-            != static_cast<int>(savedProjectileRecords.size())
-        || !state.recentExpiredProjectiles.empty()
-        || !state.impactEffects.empty()
-        || !state.recentReplayEvents.empty()
-        || state.nextReplayEventSequence != 1
-        || loadedGattlingTimer == state.gattlingWeaponTimers.end()
-        || loadedGattlingTimer->second != savedGattlingTimer
-        || loadedGattlingWeapon.weaponId != savedGattlingWeaponId
-        || loadedGattlingWeapon.indexedWeaponIndex
-            != savedGattlingWeaponIndex
-        || !state.deathWeapons.hasTriggered(deathWeaponTombstoneProbeId)
-        || !crateVectorsMatch(state.skirmishCrates, savedCrates)
-        || runtimePersistentTransientStateHash(state)
-            != savedTransientStateHash) {
+    // One named boolean per predicate: this block used to report six numbers,
+    // all of which can agree while an unprinted clause is the one failing.
+    const bool transientProjectilesMatch = projectileRecordsRestored;
+    const bool transientActorIdMatches =
+        state.nextProjectileActorId == savedNextProjectileActorId;
+    const bool transientInFlightMatches =
+        state.actionSummary.projectilesInFlight
+            == static_cast<int>(savedProjectileRecords.size());
+    const bool transientExpiredEmpty = state.recentExpiredProjectiles.empty();
+    const bool transientImpactsEmpty = state.impactEffects.empty();
+    const bool transientReplayEventsEmpty = state.recentReplayEvents.empty();
+    const bool transientReplaySequenceReset =
+        state.nextReplayEventSequence == 1;
+    const bool transientGattlingTimerMatches =
+        loadedGattlingTimer != state.gattlingWeaponTimers.end()
+        && loadedGattlingTimer->second == savedGattlingTimer;
+    const bool transientGattlingWeaponMatches =
+        loadedGattlingWeapon.weaponId == savedGattlingWeaponId
+        && loadedGattlingWeapon.indexedWeaponIndex == savedGattlingWeaponIndex;
+    const bool transientTombstoneRestored =
+        state.deathWeapons.hasTriggered(deathWeaponTombstoneProbeId);
+    const bool transientCratesMatch =
+        crateVectorsMatch(state.skirmishCrates, savedCrates);
+    const bool transientHashMatches =
+        runtimePersistentTransientStateHash(state) == savedTransientStateHash;
+    if (!transientProjectilesMatch
+        || !transientActorIdMatches
+        || !transientInFlightMatches
+        || !transientExpiredEmpty
+        || !transientImpactsEmpty
+        || !transientReplayEventsEmpty
+        || !transientReplaySequenceReset
+        || !transientGattlingTimerMatches
+        || !transientGattlingWeaponMatches
+        || !transientTombstoneRestored
+        || !transientCratesMatch
+        || !transientHashMatches) {
         std::cerr << "Skirmish build smoke failed: transient save/load "
                   << "roundtrip diverged. projectile="
-                  << formatBool(projectileRecordsRestored)
+                  << formatBool(transientProjectilesMatch)
                   << " next=" << state.nextProjectileActorId
                   << "/" << savedNextProjectileActorId
                   << " flight=" << state.actionSummary.projectilesInFlight
@@ -80909,6 +80929,18 @@ int runRuntimeSkirmishBuildSmokeTest(const RuntimeConfig& config) {
                   << " hash="
                   << runtimePersistentTransientStateHash(state)
                   << "/" << savedTransientStateHash
+                  << " expired="
+                  << formatBool(transientExpiredEmpty)
+                  << " impacts=" << formatBool(transientImpactsEmpty)
+                  << " replayEvents="
+                  << formatBool(transientReplayEventsEmpty)
+                  << " replaySeq=" << state.nextReplayEventSequence
+                  << " gattlingTimer="
+                  << formatBool(transientGattlingTimerMatches)
+                  << " gattlingWeapon="
+                  << formatBool(transientGattlingWeaponMatches)
+                  << " tombstone=" << formatBool(transientTombstoneRestored)
+                  << " cratesMatch=" << formatBool(transientCratesMatch)
                   << "\n";
         return 1;
     }
@@ -81084,6 +81116,71 @@ int runRuntimeSkirmishBuildSmokeTest(const RuntimeConfig& config) {
                 ? std::string::npos
                 : nextSection - eraseStart
         );
+        return true;
+    };
+    // A save downgraded to an older Version must also look old *structurally*:
+    // v9..v13 behavior records carry exactly 12 fields, while v14 appends
+    // forceFire/attackGround (14) and the move segment + clearance host
+    // (16/17). Keeping the v14 fields under a v10 header makes the loader
+    // reject records that were never valid v10 records.
+    const auto truncateSaveSectionFields = [](
+        std::string& text,
+        const std::string& sectionName,
+        std::size_t keepFields
+    ) {
+        const std::string marker = "[" + sectionName + "]\n";
+        const std::size_t markerPosition = text.find(marker);
+        if (markerPosition == std::string::npos) {
+            return false;
+        }
+        std::size_t cursor = markerPosition + marker.size();
+        while (cursor < text.size() && text[cursor] != '[') {
+            const std::size_t lineEnd = text.find('\n', cursor);
+            const std::size_t end = lineEnd == std::string::npos
+                ? text.size()
+                : lineEnd;
+            const std::string line = text.substr(cursor, end - cursor);
+            const std::size_t equals = line.find('=');
+            bool numericKey = equals != std::string::npos && equals > 0;
+            for (std::size_t i = 0; numericKey && i < equals; ++i) {
+                numericKey = line[i] >= '0' && line[i] <= '9';
+            }
+            if (numericKey) {
+                std::vector<std::string> fields;
+                std::size_t start = equals + 1;
+                while (true) {
+                    const std::size_t bar = line.find('|', start);
+                    fields.push_back(line.substr(
+                        start,
+                        bar == std::string::npos ? std::string::npos : bar - start
+                    ));
+                    if (bar == std::string::npos) {
+                        break;
+                    }
+                    start = bar + 1;
+                }
+                if (fields.size() > keepFields) {
+                    std::string rebuilt = line.substr(0, equals + 1);
+                    for (std::size_t i = 0; i < keepFields; ++i) {
+                        if (i > 0) {
+                            rebuilt += '|';
+                        }
+                        rebuilt += fields[i];
+                    }
+                    text.replace(cursor, end - cursor, rebuilt);
+                    cursor += rebuilt.size();
+                    if (lineEnd == std::string::npos) {
+                        break;
+                    }
+                    ++cursor;
+                    continue;
+                }
+            }
+            if (lineEnd == std::string::npos) {
+                break;
+            }
+            cursor = lineEnd + 1;
+        }
         return true;
     };
     if (!modernTransientSave.good() && legacyTransientText.empty()) {
@@ -81669,6 +81766,11 @@ int runRuntimeSkirmishBuildSmokeTest(const RuntimeConfig& config) {
         std::string("Version=14").size(),
         "Version=10"
     );
+    if (!truncateSaveSectionFields(legacyTransientText, "Behaviors", 12U)) {
+        std::cerr << "Skirmish build smoke failed: legacy downgrade probe "
+                  << "did not find a [Behaviors] section.\n";
+        return 1;
+    }
     if (!removeSaveSection(legacyTransientText, "Projectiles")
         || !removeSaveSection(
             legacyTransientText,

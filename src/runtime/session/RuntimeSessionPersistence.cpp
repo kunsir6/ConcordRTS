@@ -7945,6 +7945,14 @@ void commitRuntimeLoadedState(
     RUNTIME_LOAD_SWAP(interactionStatus);
 
 #undef RUNTIME_LOAD_SWAP
+
+    // Transient presentation effects belong to the session that produced them,
+    // not to the save: an impact effect carries a world position and (for
+    // death/debris) the id of the object that spawned it, both meaningless once
+    // the loaded world replaces the live one.  Nothing in the swap list above
+    // covers them, so a load used to leave the previous session's sparks
+    // floating over the restored map until they aged out.
+    live.impactEffects.clear();
 }
 
 bool loadRuntimeStateWithVisionPolicy(
