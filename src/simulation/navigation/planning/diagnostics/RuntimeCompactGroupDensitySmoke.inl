@@ -127,6 +127,34 @@ bool runRuntimeCompactGroupDensitySmoke(const RuntimeConfig& config, std::string
             problem(layer ? "air_target_center_unused" : "ground_target_center_unused");
         // Full simulation, including interpolation, reservations, collision and
         // queued movement. A command's target is never substituted for its arrival.
+        // 落位归属取证：地面单位一旦停到自己的目标格又被挪走，记下是哪一拍、
+        // 被谁（含对方 airborne）挤掉的。没有这段，失败只剩「收得散」这句话，
+        // 分不清是分配器给的格就散、还是落位后被别的层抢了格。
+        struct PushTrace { int reached=-1; int left=-1; int fromX=0, fromY=0, toX=0, toY=0;
+            int blocker=-1; bool blockerAirborne=false; std::string blockerType; };
+        std::map<int,PushTrace> pushTraces;
+        const auto noteTargetOwnership=[&]() {
+            for (const int id : ids) {
+                if (expectedAir.count(id)) continue;
+                const auto assigned=destinations.find(id); if (assigned==destinations.end()) continue;
+                const auto* object=findObjectById(state,id); if (!object || !object->alive) continue;
+                auto& trace=pushTraces[id];
+                const auto cell=runtimeCellPointForObject(*object);
+                if (cell==assigned->second) { if (trace.reached<0) trace.reached=static_cast<int>(state.tick); continue; }
+                if (trace.reached<0 || trace.left>=0) continue;
+                trace.left=static_cast<int>(state.tick);
+                trace.fromX=assigned->second.x; trace.fromY=assigned->second.y;
+                trace.toX=cell.x; trace.toY=cell.y;
+                for (const int other : ids) {
+                    if (other==id) continue;
+                    const auto* occupier=findObjectById(state,other);
+                    if (!occupier || !occupier->alive) continue;
+                    if (runtimeCellPointForObject(*occupier)!=assigned->second) continue;
+                    trace.blocker=other; trace.blockerAirborne=occupier->airborne;
+                    trace.blockerType=types.at(other); break;
+                }
+            }
+        };
         int settledTick=-1, stableTicks=0;
         bool everMoved=false, settled=false;
         std::map<int,std::tuple<int,int,int,double,double>> settledPositions;
@@ -149,7 +177,7 @@ bool runRuntimeCompactGroupDensitySmoke(const RuntimeConfig& config, std::string
         };
         inspectOccupancy();
         for (int tick=0; tick<scenario.hz*240; ++tick) {
-            ++state.tick; advanceRuntimeSimulation(state); inspectOccupancy();
+            ++state.tick; advanceRuntimeSimulation(state); inspectOccupancy(); noteTargetOwnership();
             bool allStopped=static_cast<int>(ids.size())==expectedCount;
             for (const int id : ids) {
                 const auto* object=findObjectById(state,id);
@@ -198,6 +226,46 @@ bool runRuntimeCompactGroupDensitySmoke(const RuntimeConfig& config, std::string
         // holds three people would miss a scattered group after crowded arrival.
         if (scenario.infantry && !scenario.tanks && !scenario.ships
             && finals[0].cells.size()!=static_cast<std::size_t>(minimumCells[0])) problem("infantry_final_cells_not_packed");
+        // 只在「地面层确实散到半径外」时才点名。逐格对齐本身不是判据：11MTNK 有 7 台
+        // 没停进分配格，但整体仍收在半径内、合法。把「没到分配格」当选判据会把绿场景判红。
+        const bool groundScattered = minimumCells[0]!=0 && finals[0].count!=0
+            && finals[0].radius>minimumRing(minimumCells[0]);
+        if (groundScattered) {
+        // 停到目标格又被挤走的，逐个点名（谁挤的、挤到哪、对方当时是否在空中）。
+        for (const auto& [id, trace] : pushTraces) {
+            if (trace.left<0) continue;
+            problem("ground_target_reclaimed: "+types.at(id)+"#"+std::to_string(id)
+                +" ("+std::to_string(trace.fromX)+","+std::to_string(trace.fromY)+")@"+std::to_string(trace.reached)
+                +"->("+std::to_string(trace.toX)+","+std::to_string(trace.toY)+")@"+std::to_string(trace.left)
+                +" by "+(trace.blockerType.empty()?std::string("none"):trace.blockerType)+"#"+std::to_string(trace.blocker)
+                +" airborne="+(trace.blockerAirborne?"1":"0"));
+        }
+        // 压根没到过目标格的，也要点名：它拿到的格现在被谁占着（空着 = 不是抢格，是改派）。
+        for (const int id : ids) {
+            if (expectedAir.count(id)) continue;
+            const auto assigned=destinations.find(id);
+            if (assigned==destinations.end()) continue;
+            const auto* object=findObjectById(state,id);
+            if (!object || !object->alive) continue;
+            const auto rest=runtimeCellPointForObject(*object);
+            if (rest==assigned->second) continue;
+            const auto trace=pushTraces.find(id);
+            if (trace!=pushTraces.end() && trace->second.left>=0) continue;
+            int holder=-1; bool holderAirborne=false; std::string holderType="none";
+            for (const int other : ids) {
+                if (other==id) continue;
+                const auto* occupier=findObjectById(state,other);
+                if (!occupier || !occupier->alive) continue;
+                if (runtimeCellPointForObject(*occupier)!=assigned->second) continue;
+                holder=other; holderAirborne=occupier->airborne; holderType=types.at(other); break;
+            }
+            problem("ground_target_unreached: "+types.at(id)+"#"+std::to_string(id)
+                +" want("+std::to_string(assigned->second.x)+","+std::to_string(assigned->second.y)+")"
+                +" got("+std::to_string(rest.x)+","+std::to_string(rest.y)+")"
+                +" holder="+holderType+"#"+std::to_string(holder)
+                +" airborne="+(holderAirborne?"1":"0"));
+        }
+        }
         std::string result="PASS";
         if (!reasons.empty()) {
             result.clear(); for (const auto& reason : reasons) { if (!result.empty()) result+=';'; result+=reason; }
