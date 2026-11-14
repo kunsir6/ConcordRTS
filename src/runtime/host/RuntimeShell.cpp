@@ -15667,23 +15667,54 @@ bool validateRuntimeSkirmishOptionSemantics(
             unholyProbe,
             "Americans"
         );
-    std::unordered_set<std::string> additionalMcvIds;
+    std::ostringstream additionalMcvDetail;
     for (const UnitType* unit : additionalMcvs) {
         if (unit != nullptr) {
-            additionalMcvIds.insert(toUpperAsciiLocal(unit->id));
+            // The grant comes from the rules hook, not from the sidebar, so the
+            // per-unit techLevel/owner is only ever read here — print it in the
+            // failure line instead of asserting it again downstream (M-30).
+            additionalMcvDetail << (additionalMcvDetail.tellp() > 0 ? " " : "")
+                                << unit->id << ":tl=" << unit->techLevel
+                                << ":into=" << unit->deploysInto
+                                << ":owner=" << unit->owner;
         }
     }
-    bool additionalMcvsBuildable = additionalMcvs.size() == 2U;
+    // The grant is a spawn (`spawnRuntimeUnholyAllianceMcvs`), which never reads
+    // techLevel: retail keeps SMCV/PCV at TechLevel=10 and still hands them out
+    // at start.  Asserting "techLevel==0" therefore pinned the probe to a
+    // property the feature does not have (M-30).  What the feature does promise:
+    // one grant per non-native construction yard, all of them foreign houses,
+    // and *nothing* outside the mode — a normal game must not start with 3 MCVs.
+    std::unordered_set<std::string> nonNativeYardIds;
+    const std::string nativeYardId = toUpperAsciiLocal(
+        runtimeConstructionYardForCountry("Americans")
+    );
+    for (const UnitType& unit : unholyProbe.rules.getVehicleTypes()) {
+        const BuildingType* yard = findRuntimeBuildingTypeById(
+            unholyProbe.rules,
+            unit.deploysInto
+        );
+        if (yard == nullptr || !yard->constructionYard) {
+            continue;
+        }
+        const std::string yardId = toUpperAsciiLocal(yard->id);
+        if (yardId != nativeYardId) {
+            nonNativeYardIds.insert(yardId);
+        }
+    }
+    bool additionalMcvsAreForeign = !additionalMcvs.empty();
     for (const UnitType* unit : additionalMcvs) {
-        if (unit != nullptr) {
-            additionalMcvIds.insert(toUpperAsciiLocal(unit->id));
-            additionalMcvsBuildable = additionalMcvsBuildable
-                && unit->techLevel == 0;
+        if (unit == nullptr
+            || toUpperAsciiLocal(unit->owner).find("AMERICANS")
+                != std::string::npos) {
+            additionalMcvsAreForeign = false;
         }
     }
-    const bool unholyMcvApplied = additionalMcvsBuildable
-        && additionalMcvIds.find("SMCV") != additionalMcvIds.end()
-        && additionalMcvIds.find("PCV") != additionalMcvIds.end();
+    const std::vector<const UnitType*> nonUnholyMcvs =
+        runtimeUnholyAllianceAdditionalMcvTypes(modeProbe, "Americans");
+    const bool unholyMcvApplied = additionalMcvsAreForeign
+        && additionalMcvs.size() == nonNativeYardIds.size()
+        && nonUnholyMcvs.empty();
     const bool unholyApplied = unholyProbe.skirmishModeRulesLoaded
         && runtimeIsUnholyAllianceMode(unholyProbe)
         && unholyCatalogApplied
@@ -16559,6 +16590,12 @@ bool validateRuntimeSkirmishOptionSemantics(
            << " foreignYardForeign="
            << formatBool(foreignYardAcceptsForeignBuild)
            << " unholy=" << formatBool(unholyApplied)
+           << " unholyMcvs=" << additionalMcvs.size()
+           << " unholyNonNativeYards=" << nonNativeYardIds.size()
+           << " unholyOffModeMcvs=" << nonUnholyMcvs.size()
+           << " unholyMcvDetail=["
+           << additionalMcvDetail.str()
+           << "]"
            << " megawealth=" << formatBool(megawealthApplied)
            << " startingPools=" << formatBool(stockStartingPoolsApplied)
            << " duelStart=" << formatBool(duelStartingPoolsApplied)
