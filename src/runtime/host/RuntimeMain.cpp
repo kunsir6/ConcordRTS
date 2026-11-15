@@ -12,8 +12,20 @@
 #include <iostream>
 #include <charconv>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <fstream>
 #include <string>
+#include <sys/stat.h>
+
+#ifdef _WIN32
+#include <climits>
+#include <direct.h>
+#else
+#include <climits>
+#include <limits.h>
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #include <cstdio>
@@ -679,6 +691,46 @@ constexpr const char* kRuntimeVersion = "0.1.0";
 // 所以它是「这份二进制里至少有一处是这天编的」的下界，不是构建时刻的精确值。
 constexpr const char* kRuntimeBuildTimestamp = __DATE__ " " __TIME__;
 
+// S-37：真正的「这份二进制什么时候产出的」= 本文件的落盘时刻。
+// 链接、ad-hoc 重签、打包拷贝三者都会刷新 mtime，而它们正是产出这份二进制的动作；
+// `kRuntimeBuildTimestamp` 恰恰相反——增量构建根本不会重编这个 TU，第 63 轮实测落后 3.7 小时。
+// 拿不到时返回空串（调用方打印 unknown，不许静默回退成 TU 时刻冒充构建时刻）。
+std::string runtimeExecutableBuildTime(const std::string& programName) {
+    if (programName.empty()) {
+        return {};
+    }
+    char resolved[PATH_MAX];
+    const char* path = programName.c_str();
+#ifdef _WIN32
+    if (_fullpath(resolved, programName.c_str(), sizeof(resolved)) != nullptr) {
+        path = resolved;
+    }
+#else
+    if (::realpath(programName.c_str(), resolved) != nullptr) {
+        path = resolved;
+    }
+#endif
+    struct stat info {};
+    if (::stat(path, &info) != 0) {
+        return {};
+    }
+    std::tm local {};
+#if defined(_WIN32)
+    if (localtime_s(&local, &info.st_mtime) != 0) {
+        return {};
+    }
+#else
+    if (localtime_r(&info.st_mtime, &local) == nullptr) {
+        return {};
+    }
+#endif
+    char text[32];
+    if (std::strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%S", &local) == 0) {
+        return {};
+    }
+    return text;
+}
+
 // foo.app/Contents/MacOS/concord_runtime → foo.app/Contents/Resources/BUILD-INFO.txt。
 // 路径形状不对（直接跑 build 产物）时返回空，调用方打印「未打包」。
 std::string runtimeBundleBuildInfoPath(const std::string& executablePath) {
@@ -707,7 +759,12 @@ std::string runtimeBundleBuildInfoPath(const std::string& executablePath) {
 void printRuntimeVersion(const std::string& programName) {
     std::cout << "ConcordRTS runtime " << kRuntimeVersion << '\n';
     std::cout << "arch: " << kRuntimeBuildArchitecture << '\n';
-    std::cout << "compiled: " << kRuntimeBuildTimestamp << '\n';
+    // built = 本文件落盘时刻（权威）；compiled = 版本 TU 编译时刻（只是下界）。
+    // 两个都印：只印后者时，增量构建的二进制会报出一个几小时前的时刻，看着像构建失败。
+    const std::string builtTime = runtimeExecutableBuildTime(programName);
+    std::cout << "built: " << (builtTime.empty() ? "unknown" : builtTime) << '\n';
+    std::cout << "compiled: " << kRuntimeBuildTimestamp
+              << " (版本 TU 编译时刻，增量构建不刷新，仅作下界)\n";
     // 包内身份：.app 由 scripts/pack-dist.sh 写 Contents/Resources/BUILD-INFO.txt
     // （git短hash + 打包时刻 + regress 三态）。直接跑 build 产物时没有这个文件，
     // 这里明说「没有」而不是留空——空白会被读成「最新」。
@@ -731,7 +788,7 @@ void printRuntimeHelp(const std::string& programName) {
               << "[--local-data-root <dir>] [--mod-root <dir>]\n\n";
     std::cout << "Options:\n";
     std::cout << "  --help, -h             Show this help text.\n";
-    std::cout << "  --version              Print runtime version, build architecture, compile time, and package build stamp.\n";
+    std::cout << "  --version              Print runtime version, build architecture, binary build time, and package build stamp.\n";
     std::cout << "  --smoke-test           Load config/map and print startup report without opening a window.\n";
     std::cout << "  --render-smoke-test    Draw one offscreen runtime map frame and validate it has terrain.\n";
     std::cout << "  --interaction-smoke-test Validate runtime point select, box select, and command state.\n";
