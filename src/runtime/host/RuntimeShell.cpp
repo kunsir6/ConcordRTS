@@ -60345,6 +60345,7 @@ bool runRuntimeNeutralBuildingPaletteRenderContractCheck(
 #include "simulation/movement/ground/diagnostics/RuntimeRepeatedMoveSmoke.inl"
 #include "simulation/navigation/occupancy/diagnostics/RuntimeInfantrySubcellContinuitySmoke.inl"
 #include "simulation/navigation/occupancy/diagnostics/RuntimeGroundOccupancySmoke.inl"
+#include "simulation/navigation/occupancy/diagnostics/RuntimeVehicleInfantryPassThroughSmoke.inl"
 #include "simulation/navigation/occupancy/diagnostics/RuntimeGroundFoundationIssue25Smoke.inl"
 #include "simulation/movement/ground/diagnostics/RuntimeGroundDepartureQueryBatchContract.inl"
 #include "simulation/navigation/planning/diagnostics/RuntimeCompactGroupDensitySmoke.inl"
@@ -61528,6 +61529,11 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
     if (std::getenv("CONCORD_COMMAND_SMOKE_GROUND_OCCUPANCY_ONLY")) {
         std::string error;
         if (!runRuntimeGroundOccupancySmoke(error)) { std::cerr << error << '\n'; return 1; }
+        return 0;
+    }
+    if (std::getenv("CONCORD_COMMAND_SMOKE_VEHICLE_INFANTRY_PASS_ONLY")) {
+        std::string error;
+        if (!runRuntimeVehicleInfantryPassThroughSmoke(error)) { std::cerr << error << '\n'; return 1; }
         return 0;
     }
     if (std::getenv("CONCORD_COMMAND_SMOKE_STOCK_MOVEMENT_CADENCE_ONLY")) {
