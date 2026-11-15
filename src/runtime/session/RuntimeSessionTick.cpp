@@ -631,6 +631,27 @@ bool advanceRuntimeSimulation(
     }
     }
 
+    // 进场（spy / 工程师 / 医疗维修 / 进驻）统一收口。放在逐对象推进之后单独扫一遍：
+    // 上面那段循环里对象可能因为各种 early continue 走不到，而这里的判据只看
+    // 「行为还在、意图是进入、门口走不进去」，与走了哪条分支无关。
+    {
+        std::vector<int> entryIntentIds;
+        entryIntentIds.reserve(state.behaviors.size());
+        for (const auto& [objectId, entryBehavior] : state.behaviors) {
+            if (entryBehavior.kind != RuntimeBehaviorKind::Move
+                || entryBehavior.pendingAllowedOccupiedObjectId < 0) continue;
+            entryIntentIds.push_back(objectId);
+        }
+        for (int entryObjectId : entryIntentIds) {
+            WorldObjectInstance* entryObject = findMutableObjectById(state, entryObjectId);
+            const auto entryBehavior = state.behaviors.find(entryObjectId);
+            if (entryObject == nullptr || entryBehavior == state.behaviors.end()) continue;
+            if (runtimeServiceBlockedStructureEntry(state, *entryObject, entryBehavior->second)) {
+                changed = true;
+            }
+        }
+    }
+
     // Exit finalization may erase the behavior being advanced.  Drain only
     // after the iteration has released every object/behavior reference.
     changed = drainRuntimeObjectExitQueue(state) || changed;

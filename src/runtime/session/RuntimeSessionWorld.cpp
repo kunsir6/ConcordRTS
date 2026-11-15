@@ -21010,19 +21010,250 @@ std::optional<RuntimeCellPoint> findRuntimeEngineerEntryCell(
         }
     );
 
+    // 入口格 = 实际最短路最短的那块地基格。
+    //
+    // 以前这里是「按到 preferredApproach 的距离排序，取第一个能规划出路径的」。
+    // 在拥挤基地里 preferredApproach 常常落在建筑群的另一侧，于是选中的是远处
+    // 那个角落的内侧格：路径非空（规划器允许），但实际要绕过整片建筑群，
+    // 单位会沿着一条越来越长的队路走远，永远到不了（实测 900 tick 走成 30→14
+    // 格还在偏离）。这里改成真的比路径长度，直接把「绕远」这个选项排除掉。
+    std::optional<RuntimeCellPoint> bestCell;
+    std::size_t bestPathLength = 0;
     for (const RuntimeCellPoint& candidate : footprint) {
-        if (candidate == engineerCell
-            || !findRuntimePath(
-                    state,
-                    engineer,
-                    engineerCell,
-                    candidate,
-                    target.instanceId
-                ).empty()) {
-            return candidate;
+        if (candidate == engineerCell) return candidate;
+        const std::vector<RuntimeCellPoint> path = findRuntimePath(
+            state,
+            engineer,
+            engineerCell,
+            candidate,
+            target.instanceId
+        );
+        if (path.empty()) continue;
+        if (!bestCell.has_value() || path.size() < bestPathLength) {
+            bestCell = candidate;
+            bestPathLength = path.size();
         }
     }
-    return std::nullopt;
+    return bestCell;
+}
+
+// 让「挡住结构入口」的步兵挪开。
+//
+// 用户现象（2026-11-15）：敌方兵营 / 战车工厂门口站着自己的兵时，工程师和间谍
+// 走到旁边就停住——最后一步踏不进地基格，行为结算成 Guard，而状态栏还写着
+// "spy infiltrating X"，看上去就是「钻不进去」。自己的兵营有兵时同理，新造的
+// 兵出不来。
+//
+// 清的是「门口这一圈」：入口格本身，加上它在地基之外的四邻——只清入口格时，
+// 站在门口两侧的兵仍然把接近路线堵死（实测每次都在门口重规划 200+ 次）。
+// 只挑**没有在跑别的命令**的步兵，挪到最近的可行格；一个都挪不动就返回 0，
+// 交给调用方明确失败，不再静默发呆。
+int runtimeDisplaceInfantryBlockingEntryCell(
+    RuntimeProductionHostState& state,
+    const WorldObjectInstance& mover,
+    const RuntimeCellPoint& entryCell,
+    const WorldObjectInstance* entryTarget
+) {
+    std::vector<RuntimeCellPoint> contested{entryCell};
+    if (entryTarget != nullptr) {
+        const std::vector<RuntimeCellPoint> footprint =
+            runtimeStructureFootprintCellsForObject(state, *entryTarget);
+        const auto insideFootprint = [&footprint](const RuntimeCellPoint& cell) {
+            return std::find(footprint.begin(), footprint.end(), cell)
+                != footprint.end();
+        };
+        const RuntimeCellPoint neighbours[] = {
+            {entryCell.x + 1, entryCell.y},
+            {entryCell.x - 1, entryCell.y},
+            {entryCell.x, entryCell.y + 1},
+            {entryCell.x, entryCell.y - 1}
+        };
+        for (const RuntimeCellPoint& neighbour : neighbours) {
+            if (!insideFootprint(neighbour)) contested.push_back(neighbour);
+        }
+    }
+
+    std::vector<int> blockers;
+    for (const WorldObjectInstance& other : state.world.getObjects()) {
+        if (!other.alive || other.health <= 0
+            || other.kind != WorldObjectKind::Infantry
+            || other.instanceId == mover.instanceId
+            || other.airborne
+            || std::find(
+                    contested.begin(),
+                    contested.end(),
+                    runtimeCellPointForObject(other)
+                ) == contested.end()) {
+            continue;
+        }
+        const auto behavior = state.behaviors.find(other.instanceId);
+        if (behavior != state.behaviors.end()) {
+            // 正在进场 / 上车 / 攻击的单位不算挡路，别把它们从既有命令里拽出来。
+            if (behavior->second.kind != RuntimeBehaviorKind::None
+                && behavior->second.kind != RuntimeBehaviorKind::Move) {
+                continue;
+            }
+            if (behavior->second.kind == RuntimeBehaviorKind::Move
+                && (behavior->second.targetObjectId >= 0
+                    || behavior->second.pendingAllowedOccupiedObjectId >= 0)) {
+                continue;
+            }
+        }
+        blockers.push_back(other.instanceId);
+    }
+
+    int displaced = 0;
+    for (int blockerId : blockers) {
+        WorldObjectInstance* blocker = findMutableObjectById(state, blockerId);
+        if (blocker == nullptr || !blocker->alive) continue;
+        const RuntimeCellPoint from = runtimeCellPointForObject(*blocker);
+        const std::optional<RuntimeCellPoint> aside = findRuntimePassableCellNear(
+            state,
+            *blocker,
+            from,
+            3,
+            -1
+        );
+        if (!aside.has_value() || *aside == from) continue;
+        eraseRuntimeBehavior(state, blockerId);
+        RuntimeObjectBehavior yield;
+        yield.kind = RuntimeBehaviorKind::Move;
+        yield.state = RuntimeBehaviorState::Queued;
+        yield.targetObjectId = -1;
+        yield.moveTarget = *aside;
+        yield.pendingAllowedOccupiedObjectId = -1;
+        setRuntimeMissionIntent(
+            state,
+            *blocker,
+            RuntimeMissionIntent::Idle,
+            "entryCellYield"
+        );
+        state.behaviors[blockerId] = std::move(yield);
+        ++displaced;
+    }
+    return displaced;
+}
+
+// 进场路线反复规划不出来时的收口。
+//
+// 进场意图（spy / 工程师 / 医疗维修 / 进驻 / 奴隶矿工交付）带着
+// `pendingAllowedOccupiedObjectId`，只能踏进目标建筑的格子。门口被兵堵住时，
+// 它会一直重规划却始终得不到路径（实测一次 246 次重规划、十几秒一动不动），
+// 而状态栏还在写 "spy infiltrating X"——玩家看到的就是「钻不进去」。
+//
+// 处理顺序：先再清一次门口（这时挡路的多半是后来才站过去的兵）；清得动就继续走，
+// 清不动就明确失败并把命令收掉，绝不再静默发呆。
+bool runtimeServiceBlockedStructureEntry(
+    RuntimeProductionHostState& state,
+    WorldObjectInstance& object,
+    RuntimeObjectBehavior& behavior
+) {
+    static const bool entryTrace =
+        std::getenv("CONCORD_ENTRY_TRACE") != nullptr;
+    const auto note = [&](const char* why) {
+        if (!entryTrace) return;
+        std::cerr << "entry-trace #" << object.instanceId << " " << why
+                  << " kind=" << int(behavior.kind)
+                  << " state=" << int(behavior.state)
+                  << " replans=" << behavior.pathReplans
+                  << " path=" << behavior.path.size()
+                  << " next=" << behavior.nextRepathTick
+                  << " tick=" << state.tick
+                  << " allowed=" << behavior.pendingAllowedOccupiedObjectId
+                  << " target=" << behavior.targetObjectId << "\n";
+    };
+    if (behavior.kind != RuntimeBehaviorKind::Move) return false;
+    const int targetId = behavior.pendingAllowedOccupiedObjectId;
+    if (targetId < 0 || targetId != behavior.targetObjectId) { note("no-entry-intent"); return false; }
+    WorldObjectInstance* target = findMutableObjectById(state, targetId);
+    if (target == nullptr || !target->alive || target->rubble) { note("no-target"); return false; }
+    if (runtimeCellDistanceToObjectFootprint(
+            state,
+            runtimeCellPointForObject(object),
+            *target
+        ) <= 0.001) {
+        return false;   // 已经在建筑格里，交给完成判定
+    }
+    // 两种「等死」形态都要收口：
+    // ① 反复重规划却始终没有路径（门口被后来的兵堵住，实测一次 246 次）；
+    // ② 重规划退避被推到很久以后（path 为空、nextRepathTick 远在几秒之外），
+    //    这种情况下单位表面上只是「站着」，实际这一局都不会再动。
+    constexpr int blockedEntryReplanLimit = 12;
+    const int repathBackoffTicks = behavior.nextRepathTick - state.tick;
+    const bool stalledRepathBackoff = behavior.path.empty()
+        && repathBackoffTicks > std::max(1, state.config.fixedTickHz) * 2;
+    if (behavior.pathReplans <= blockedEntryReplanLimit && !stalledRepathBackoff) {
+        note("below-threshold");
+        return false;
+    }
+    note("stall-detected");
+
+    const std::optional<RuntimeCellPoint> entry = findRuntimeEngineerEntryCell(
+        state,
+        object,
+        *target,
+        "entry-retry",
+        2
+    );
+    if (entry.has_value()
+        && runtimeDisplaceInfantryBlockingEntryCell(
+                state,
+                object,
+                *entry,
+                target
+            ) > 0) {
+        behavior.pathReplans = 0;
+        behavior.blockedTicks = 0;
+        behavior.moveTarget = *entry;
+        behavior.path.clear();
+        behavior.pathRequestPending = false;
+        behavior.nextRepathTick = state.tick;
+        return true;
+    }
+
+    const std::string targetType = target->type;
+    const int targetInstanceId = target->instanceId;
+    const int objectId = object.instanceId;
+    state.interactionStatus = "cannot reach " + targetType
+        + " #" + std::to_string(targetInstanceId)
+        + ": entrance blocked";
+    state.simulationStatus = state.interactionStatus;
+    state.economy.status = state.interactionStatus;
+    if (!state.runtimeSuppressPlayerAudioFeedback) {
+        emitRuntimeSound(state, "blocked");
+    }
+    eraseRuntimeBehavior(state, objectId);
+    clearRuntimeRenderPosition(object);
+    setRuntimeMissionIntent(
+        state,
+        object,
+        RuntimeMissionIntent::Idle,
+        "structureEntryUnreachable"
+    );
+    return true;
+}
+
+// 结构进场格 = 最短路最短的地基格，并且把站在那一格上的步兵先请开。
+// 所有「走进去」的指令（间谍渗透 / 工程师占领 / 医疗维修 / 中立建筑进驻 /
+// 奴隶矿工交付）都走这里，避免各自漏掉让位这一步。
+std::optional<RuntimeCellPoint> runtimeResolveStructureEntryCell(
+    RuntimeProductionHostState& state,
+    const WorldObjectInstance& mover,
+    const WorldObjectInstance& target,
+    const std::string& purpose,
+    int fallbackRadiusCells
+) {
+    const std::optional<RuntimeCellPoint> entry = findRuntimeEngineerEntryCell(
+        state,
+        mover,
+        target,
+        purpose,
+        fallbackRadiusCells
+    );
+    if (entry.has_value()) {
+        runtimeDisplaceInfantryBlockingEntryCell(state, mover, *entry, &target);
+    }
+    return entry;
 }
 
 bool runtimeSpyCanInfiltrateTarget(
@@ -21085,7 +21316,7 @@ bool queueRuntimeSpyInfiltration(
         return false;
     }
     const std::optional<RuntimeCellPoint> entryCell =
-        findRuntimeEngineerEntryCell(
+        runtimeResolveStructureEntryCell(
             state,
             *spy,
             *target,
@@ -21289,7 +21520,7 @@ bool queueRuntimeEngineerCaptureForObject(
     }
 
     const std::optional<RuntimeCellPoint> entryCell =
-        findRuntimeEngineerEntryCell(
+        runtimeResolveStructureEntryCell(
             state,
             *engineer,
             *target,
@@ -21378,7 +21609,7 @@ bool queueRuntimeOccupyTarget(
         eligible = true;
         // Finish the existing walk inside the foundation, just like engineer
         // entry. The host is passable only for this retained entry order.
-        const auto entryCell = findRuntimeEngineerEntryCell(
+        const auto entryCell = runtimeResolveStructureEntryCell(
             state, *occupier, *target, "occupy", 2
         );
         if (!entryCell.has_value()) continue;
@@ -27603,6 +27834,22 @@ bool advanceRuntimeMoveBehavior(
         return visualChanged;
     }
 
+    // 进场意图（spy 渗透 / 工程师占领 / 医疗维修 / 奴隶矿工交付）必须走完最后
+    // 一格：`pendingAllowedOccupiedObjectId` 只允许它踏进目标建筑的格子。
+    // 一旦路径被局部避让或重规划改成了别的终点，进场意图就悄悄丢了——单位会
+    // 沿那条队路一直走远（实测：入口 76,50，路径终点却是 70,45，越走越偏，
+    // 900 tick 还在绕整片建筑群）。这里把终点对不上的路径直接重挂。
+    if (behavior.pendingAllowedOccupiedObjectId >= 0
+        && behavior.pendingAllowedOccupiedObjectId == behavior.targetObjectId
+        && !behavior.path.empty()
+        && behavior.path.back() != behavior.moveTarget) {
+        behavior.path.clear();
+        behavior.pathRequestPending = true;
+        behavior.nextRepathTick = state.tick;
+        return false;
+    }
+
+
     if (prepareRuntimeFollowMove(state, object, behavior)) {
         return true;
     }
@@ -27721,6 +27968,15 @@ bool advanceRuntimeMoveBehavior(
             state.simulationStatus =
                 "path cooldown #"
                 + std::to_string(object.instanceId);
+            // 进场意图在这里等退避，如果退避已经被推到两秒之后，就等价于这一局
+            // 都不会再动（实测 nextRepathTick 落在 6000 tick 之外）。这时候不再
+            // 沉默等待，交给统一的进场收口：要么再清一次门口，要么明确失败。
+            if (behavior.pendingAllowedOccupiedObjectId >= 0
+                && behavior.pendingAllowedOccupiedObjectId == behavior.targetObjectId
+                && behavior.nextRepathTick - state.tick
+                    > std::max(1, state.config.fixedTickHz) * 2) {
+                (void)runtimeServiceBlockedStructureEntry(state, object, behavior);
+            }
             return false;
         }
         const std::unordered_set<int> ignoredObjectIds =

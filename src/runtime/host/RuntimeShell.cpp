@@ -60099,6 +60099,7 @@ bool runRuntimeNumberImpassableRowsSemanticsProbe(
 #include "simulation/abilities/radiation/diagnostics/RuntimeVirusGasDamageSmoke.inl"
 #include "simulation/abilities/radiation/diagnostics/RuntimeVirusFriendlyGasSmoke.inl"
 #include "simulation/production/diagnostics/RuntimeCloningBatchSmoke.inl"
+#include "simulation/abilities/psionic/diagnostics/RuntimeSpyIndustryInfiltrationSmoke.inl"
 #include "simulation/production/diagnostics/RuntimeFactoryExitClearanceSmoke.inl"
 #include "simulation/production/diagnostics/RuntimeFactoryAirClearanceSmoke.inl"
 #include "simulation/production/diagnostics/RuntimeFactoryRoofSmoke.inl"
@@ -60431,6 +60432,32 @@ bool runRuntimeNeutralBuildingPaletteRenderContractCheck(
 bool runRuntimeKeyboardParentReconciliationSmoke(const RuntimeConfig& config, std::ostream& output);
 
 int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
+    if (const char* only = std::getenv("CONCORD_COMMAND_SMOKE_SPY_INDUSTRY_ONLY"); only != nullptr) {
+        if (std::string(only) != "1") {
+            std::cerr << "Spy industry: ONLY must be exactly 1\n";
+            return 1;
+        }
+        auto stock = std::make_unique<RuntimeWindowState>();
+        stock->config = config;
+        stock->runtimePreferencePersistenceEnabled = false;
+        stock->report = buildRuntimeStartupReport(config, &stock->world,
+            &stock->theater, &stock->art, &stock->rules, &stock->mapFacts);
+        stock->rulesLoaded = stock->report.rulesLoaded;
+        stock->artLoaded = stock->report.artLoaded;
+        stock->theaterLoaded = stock->report.theaterLoaded;
+        stock->mapFactsLoaded = stock->report.map.loaded;
+        if (!stock->report.success) {
+            std::cerr << "Spy industry: original asset startup failed\n";
+            return 1;
+        }
+        std::string spyIndustryError;
+        if (!runRuntimeSpyIndustryInfiltrationSmoke(*stock, spyIndustryError)) {
+            std::cerr << "Command smoke failed: " << spyIndustryError << '\n';
+            return 1;
+        }
+        return 0;
+    }
+
     if (const char* only = std::getenv("CONCORD_COMMAND_SMOKE_KEYBOARD_PARENT_ONLY"); only != nullptr) {
         if (std::string(only) != "1") {
             std::cerr << "Keyboard parent: ONLY must be exactly 1\n";
@@ -63075,6 +63102,14 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
         std::string gasError;
         if (!runRuntimeVirusFriendlyGasSmoke(state, gasError)) {
             std::cerr << "Command smoke failed: " << gasError << '\n';
+            return 1;
+        }
+        return 0;
+    }
+    if (std::getenv("CONCORD_COMMAND_SMOKE_SPY_INDUSTRY_ONLY") != nullptr) {
+        std::string spyIndustryError;
+        if (!runRuntimeSpyIndustryInfiltrationSmoke(state, spyIndustryError)) {
+            std::cerr << "Command smoke failed: " << spyIndustryError << '\n';
             return 1;
         }
         return 0;

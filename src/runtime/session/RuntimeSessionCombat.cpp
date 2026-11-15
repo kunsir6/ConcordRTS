@@ -13891,7 +13891,7 @@ bool queueRuntimeInfantryServiceTarget(
             continue;
         }
         const std::optional<RuntimeCellPoint> entryCell =
-            findRuntimeEngineerEntryCell(
+            runtimeResolveStructureEntryCell(
                 state,
                 *infantry,
                 *target,

@@ -7727,6 +7727,28 @@ std::optional<RuntimeCellPoint> findRuntimeEngineerEntryCell(
     const std::string& purpose,
     int fallbackRadiusCells);
 
+// 结构进场统一入口：最短路最短的地基格 + 把站在那格上的步兵请开一格。
+// 详见 RuntimeSessionWorld.cpp 里 runtimeDisplaceInfantryBlockingEntryCell 的注释。
+std::optional<RuntimeCellPoint> runtimeResolveStructureEntryCell(
+    RuntimeProductionHostState& state,
+    const WorldObjectInstance& mover,
+    const WorldObjectInstance& target,
+    const std::string& purpose,
+    int fallbackRadiusCells);
+
+int runtimeDisplaceInfantryBlockingEntryCell(
+    RuntimeProductionHostState& state,
+    const WorldObjectInstance& mover,
+    const RuntimeCellPoint& entryCell,
+    const WorldObjectInstance* entryTarget);
+
+// 进场路线卡死（反复重规划 / 退避被推到很久以后）时的收口：再清一次门口，
+// 清不动就明确 "cannot reach" 并收掉命令。返回 true 表示这一拍已被它处理。
+bool runtimeServiceBlockedStructureEntry(
+    RuntimeProductionHostState& state,
+    WorldObjectInstance& object,
+    RuntimeObjectBehavior& behavior);
+
 const BuildingType* runtimeInfantryServiceBuildingRules(
     const RuntimeGameSessionState& state,
     const WorldObjectInstance& target);
