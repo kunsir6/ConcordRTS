@@ -12,6 +12,7 @@
 #include <iostream>
 #include <charconv>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 
 #ifdef _WIN32
@@ -67,6 +68,8 @@ struct RuntimeCommandLine {
     concord::presentation::FrameBackendOptions presentation;
     RuntimeConfigOverrides overrides;
     bool showHelp = false;
+    // EVO-07：版本身份（--version）。只回答「这个二进制是哪个版本/架构/哪天编的」。
+    bool showVersion = false;
     bool smokeTest = false;
     bool renderSmokeTest = false;
     bool interactionSmokeTest = false;
@@ -157,6 +160,11 @@ RuntimeCommandLine parseRuntimeCommandLine(int argc, char** argv) {
 
         if (argument == "--help" || argument == "-h") {
             commandLine.showHelp = true;
+            return commandLine;
+        }
+
+        if (argument == "--version") {
+            commandLine.showVersion = true;
             return commandLine;
         }
 
@@ -655,6 +663,65 @@ RuntimeCommandLine parseRuntimeCommandLine(int argc, char** argv) {
     return commandLine;
 }
 
+// EVO-07：版本身份。回答「这个二进制是什么版本、什么架构、什么时候编的」。
+// 与 dist/BUILD-STAMP.txt 故意不同源：这里没有 git hash（算 hash 要 CMake 传定义，
+// 会让 1642 个目标全量重编），hash 由打包链写进包内的 BUILD-INFO.txt 再由 --version 读出来。
+#if defined(__aarch64__) || defined(_M_ARM64)
+constexpr const char* kRuntimeBuildArchitecture = "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+constexpr const char* kRuntimeBuildArchitecture = "x86_64";
+#else
+constexpr const char* kRuntimeBuildArchitecture = "unknown";
+#endif
+// 必须与 scripts/pack-dist.sh 的 VERSION 默认值一致（两处都改才算改版本号）。
+constexpr const char* kRuntimeVersion = "0.1.0";
+// __DATE__/__TIME__ 是**本 TU** 的编译时刻：只改别的文件时它不会更新，
+// 所以它是「这份二进制里至少有一处是这天编的」的下界，不是构建时刻的精确值。
+constexpr const char* kRuntimeBuildTimestamp = __DATE__ " " __TIME__;
+
+// foo.app/Contents/MacOS/concord_runtime → foo.app/Contents/Resources/BUILD-INFO.txt。
+// 路径形状不对（直接跑 build 产物）时返回空，调用方打印「未打包」。
+std::string runtimeBundleBuildInfoPath(const std::string& executablePath) {
+    const std::size_t macosSlash = executablePath.find_last_of('/');
+    if (macosSlash == std::string::npos || macosSlash == 0) {
+        return {};
+    }
+    const std::string macosDir = executablePath.substr(0, macosSlash);
+    const std::size_t contentsSlash = macosDir.find_last_of('/');
+    if (contentsSlash == std::string::npos) {
+        return {};
+    }
+    const std::string contentsDir = macosDir.substr(0, contentsSlash);
+    const std::string contentsSuffix = "Contents";
+    if (contentsDir.size() <= contentsSuffix.size()
+        || contentsDir.compare(
+               contentsDir.size() - contentsSuffix.size(),
+               contentsSuffix.size(),
+               contentsSuffix
+           ) != 0) {
+        return {};
+    }
+    return contentsDir + "/Resources/BUILD-INFO.txt";
+}
+
+void printRuntimeVersion(const std::string& programName) {
+    std::cout << "ConcordRTS runtime " << kRuntimeVersion << '\n';
+    std::cout << "arch: " << kRuntimeBuildArchitecture << '\n';
+    std::cout << "compiled: " << kRuntimeBuildTimestamp << '\n';
+    // 包内身份：.app 由 scripts/pack-dist.sh 写 Contents/Resources/BUILD-INFO.txt
+    // （git短hash + 打包时刻 + regress 三态）。直接跑 build 产物时没有这个文件，
+    // 这里明说「没有」而不是留空——空白会被读成「最新」。
+    const std::string stampPath = runtimeBundleBuildInfoPath(programName);
+    std::ifstream stamp(stampPath);
+    if (stamp) {
+        std::string line;
+        std::getline(stamp, line);
+        std::cout << "package: " << line << '\n';
+    } else {
+        std::cout << "package: (不在 .app 内，未打包)\n";
+    }
+}
+
 void printRuntimeHelp(const std::string& programName) {
     std::cout << "ConcordRTS runtime shell\n\n";
     std::cout << "Usage:\n";
@@ -664,6 +731,7 @@ void printRuntimeHelp(const std::string& programName) {
               << "[--local-data-root <dir>] [--mod-root <dir>]\n\n";
     std::cout << "Options:\n";
     std::cout << "  --help, -h             Show this help text.\n";
+    std::cout << "  --version              Print runtime version, build architecture, compile time, and package build stamp.\n";
     std::cout << "  --smoke-test           Load config/map and print startup report without opening a window.\n";
     std::cout << "  --render-smoke-test    Draw one offscreen runtime map frame and validate it has terrain.\n";
     std::cout << "  --interaction-smoke-test Validate runtime point select, box select, and command state.\n";
@@ -781,6 +849,11 @@ int runRuntimeApplication(int argc, char** argv) {
 
     const std::string programName =
         argc > 0 && argv[0] != nullptr ? argv[0] : "concord_runtime";
+
+    if (commandLine.showVersion) {
+        printRuntimeVersion(programName);
+        return 0;
+    }
 
     if (commandLine.showHelp) {
         printRuntimeHelp(programName);
