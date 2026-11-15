@@ -185,7 +185,11 @@ RuntimeDataRootSearch runtimeLocateDataRoot(
     //    任何位置都还能找到数据——这是 symlink 做不到的（拷贝会把它扯断）。
     //    相对路径按「相对 Resources 目录」解释，其次才按 cwd。
     //
-    //    顺序上放在环境变量之后：CONCORD_DATA_ROOT 是显式覆盖，仍然最高优先。
+    //    优先级：本指针**高于**环境变量。原来的注释写反了（说「放在环境变量之后」），
+    //    实测对账：第 55 轮出 dmg 时给 CONCORD_DATA_ROOT=/nonexistent 仍然报
+    //    source=app-resources —— 因为这一段先跑并且指针在本机解析成功就直接 return。
+    //    行为本身不改（改优先级是产品决策，且会让「包自带数据位置」失效），只把注释改成事实：
+    //    拿到这个包的人想覆盖数据根，要么改指针（改完重签），要么把数据树放成同级目录。
     {
         const fs::path resourcesDir = executableDirectory / ".." / "Resources";
         const std::string declared = readPointerLine(resourcesDir / "data-root");
