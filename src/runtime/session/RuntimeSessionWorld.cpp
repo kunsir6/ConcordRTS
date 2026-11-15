@@ -19082,9 +19082,15 @@ void cleanRuntimeSelection(RuntimeProductionHostState& state) {
                 }
                 const WorldObjectInstance* object =
                     findObjectById(state, objectId);
+                // A descending paratrooper stays selected while still in the
+                // air (original behaviour, user-confirmed 2026-11-15). Only
+                // the orders wait: runtimeObjectCanMove and
+                // runtimePlayerActorTemporarilyCommandLocked keep rejecting
+                // commands until the parachute lands and restores Guard.
+                // Support aircraft are still dropped here because they are
+                // never player units.
                 if (object == nullptr
                     || (!state.runtimeIssuingAutonomousOrder && !runtimeObjectAcceptsPlayerSelection(state, *object))
-                    || object->mission == "ParadropDrop"
                     || object->mission == "SupportFlightEast" || object->mission == "SupportFlightWest") {
                     return true;
                 }

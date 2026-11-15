@@ -12361,9 +12361,10 @@ std::string buildRuntimeCapabilityLine(
 
 
 bool runtimeObjectCanBeBoxSelected(const WorldObjectInstance& object) {
+    // Same rule as click selection: a parachuting infantry body can be framed
+    // while it is still descending, its orders start after touchdown.
     return object.alive
         && object.mission != "SupportFlightEast" && object.mission != "SupportFlightWest"
-        && object.mission != "ParadropDrop"
         && (object.kind == WorldObjectKind::Unit
             || object.kind == WorldObjectKind::Infantry);
 }

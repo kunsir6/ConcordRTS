@@ -9,6 +9,7 @@ bool runRuntimeParatrooperTargetSmoke(const RuntimeConfig& config, std::string& 
         &assets->art, &assets->rules, &assets->mapFacts);
     if (!assets->report.success) return fail("native resources");
     int cases = 0, frames = 0, saves = 0, aaHits = 0, groundHits = 0, lowAirFrames = 0;
+    int selectableCases = 0;
     for (int hz : {15, 30, 60}) for (const char* type : {"E1", "HTNK", "MTNK", "LTNK", "SHK", "DESO", "FV", "GGI", "FLAKT"}) {
         const bool antiAir = std::string(type) == "FV" || std::string(type) == "GGI" || std::string(type) == "FLAKT";
         const std::string scene = std::string(type) + "/" + std::to_string(hz) + "Hz";
@@ -50,6 +51,35 @@ bool runRuntimeParatrooperTargetSmoke(const RuntimeConfig& config, std::string& 
         if (!target || !target->airborne || target->kind != WorldObjectKind::Infantry) return fail(scene + " native airborne infantry");
         // Keep the native infantry alive long enough to observe AA hits and landing.
         target->health = 10000; const int initialHealth = target->health;
+        // 用户口径（2026-11-15）：原版伞兵下落过程中就能选中。修复前这一段是红的
+        // ——点击其实进了 selectedObjectIds，但同一拍末尾的 cleanRuntimeSelection
+        // 会把 mission=="ParadropDrop" 清掉，观感就是"怎么点都没反应"。
+        // 断言必须走 UI 真实入口 applyRuntimePlayerSelection（左键与框选共用），
+        // 再跑一整拍确认它没被清扫；同时钉住"可选但还下不了令"，防止顺手把
+        // runtimeObjectCanMove 的命令锁一起放开。
+        {
+            const std::string savedOwner = s.economy.owner;
+            s.economy.owner = target->owner;
+            if (!runtimePlayerLocalSelectable(s, targetId))
+                return fail(scene + " descending paratrooper not locally selectable");
+            if (!runtimeObjectCanBeBoxSelected(*target))
+                return fail(scene + " descending paratrooper rejected by box select");
+            applyRuntimePlayerSelection(s, {targetId}, false, false);
+            if (!selectionContains(s, targetId))
+                return fail(scene + " click selection refused during descent");
+            ++s.tick; advanceRuntimeSimulation(s);
+            target = findMutableObjectById(s, targetId);
+            if (!target || !target->airborne)
+                return fail(scene + " descent ended inside the selection check");
+            if (!selectionContains(s, targetId))
+                return fail(scene + " selection erased while still descending");
+            issueRuntimeMoveCommand(s, {target->x + 1, target->y});
+            if (s.lastCommand.acceptedCount != 0)
+                return fail(scene + " mid-air paratrooper accepted a move order");
+            s.selectedObjectIds.clear();
+            s.economy.owner = savedOwner;
+            ++selectableCases;
+        }
         const RuntimeCellPoint at = runtimeCellPointForObject(*target);
         const auto* native = s.rules.findUnitType("InfantryType", type);
         auto* actor = addRuntimeObjectInstanceForOwner(s, "Russians", native ? RuntimeBuildKind::Infantry : RuntimeBuildKind::Unit,
@@ -135,8 +165,11 @@ bool runRuntimeParatrooperTargetSmoke(const RuntimeConfig& config, std::string& 
         std::cout << "Paratrooper target " << scene << " manual/force/auto/projectile/landing PASS\n";
     }
     if (lowAirFrames == 0) return fail("no above-ground descent frames at rounded level zero");
+    if (selectableCases != cases) return fail("paratrooper selection not exercised in every scene: "
+        + std::to_string(selectableCases) + "/" + std::to_string(cases));
     std::cout << "Paratrooper targeting passed: " << cases << " native drops, " << frames << " descent frames, "
-        << groundHits << " landed ground hits, " << aaHits << " airborne AA hits, " << saves << " saves, " << lowAirFrames << " low airborne frames\n";
+        << groundHits << " landed ground hits, " << aaHits << " airborne AA hits, " << saves << " saves, "
+        << lowAirFrames << " low airborne frames, " << selectableCases << " mid-air selectable drops\n";
     error.clear(); return true;
 }
 #ifdef _MSC_VER
