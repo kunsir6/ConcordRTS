@@ -67,13 +67,12 @@ int runRuntimeCountryLoadingPresentationSmoke(const RuntimeConfig& config) {
         SendMessageW(loading.window, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
         GdiFlush();
         const auto* pixels = static_cast<const std::uint32_t*>(bits);
-        const double scale = std::min(216.0 / loading.mapPreview.width, 166.0 / loading.mapPreview.height);
-        const int width = std::max(1, static_cast<int>(std::lround(loading.mapPreview.width * scale)));
-        const int height = std::max(1, static_cast<int>(std::lround(loading.mapPreview.height * scale)));
+        // The production renderer fills the fixed 216x166 slot.
+        constexpr int width = 216, height = 166;
         bool firstFrameVisible = true;
         for (const auto& marker : firstMarkers) {
-            const int x = 500 + (216 - width) / 2 + static_cast<int>(std::lround(marker.x * (width - 1)));
-            const int y = 380 + (166 - height) / 2 + static_cast<int>(std::lround(marker.y * (height - 1)));
+            const int x = 500 + static_cast<int>(std::lround(marker.x * (width - 1)));
+            const int y = 380 + static_cast<int>(std::lround(marker.y * (height - 1)));
             const std::uint32_t rgb = (GetRValue(marker.color) << 16)
                 | (GetGValue(marker.color) << 8) | GetBValue(marker.color);
             int colored = 0;
@@ -209,13 +208,14 @@ int runRuntimeCountryLoadingPresentationSmoke(const RuntimeConfig& config) {
             const bool captured = capture(width, height, unmarked);
             loading.mapStarts = markers;
             if (!captured) return false;
-            const double scale = std::min(216.0 / loading.mapPreview.width, 166.0 / loading.mapPreview.height);
-            const int pw = std::max(1, static_cast<int>(std::lround(loading.mapPreview.width * scale)));
-            const int ph = std::max(1, static_cast<int>(std::lround(loading.mapPreview.height * scale)));
+            // The production renderer fills the fixed 216x166 slot (see
+            // drawRuntimeCountryLoading), so the marker oracle uses the slot
+            // geometry rather than the source image's aspect-fitted size.
+            constexpr int pw = 216, ph = 166;
             std::vector<RECT> boxes;
             for (const auto& marker : markers) {
-                const int x = 500 + (216 - pw) / 2 + static_cast<int>(std::lround(marker.x * (pw - 1)));
-                const int y = 380 + (166 - ph) / 2 + static_cast<int>(std::lround(marker.y * (ph - 1)));
+                const int x = 500 + static_cast<int>(std::lround(marker.x * (pw - 1)));
+                const int y = 380 + static_cast<int>(std::lround(marker.y * (ph - 1)));
                 const RECT box = runtimeMatchScoreScaledRect(RECT{0, 0, width, height}, RECT{x - 4, y - 4, x + 5, y + 5});
                 const std::uint32_t rgb = (GetRValue(marker.color) << 16) | (GetGValue(marker.color) << 8) | GetBValue(marker.color);
                 int colored = 0;
@@ -224,6 +224,25 @@ int runRuntimeCountryLoadingPresentationSmoke(const RuntimeConfig& config) {
                 if (colored < 4) return false;
                 boxes.push_back(box);
             }
+            // The thumbnail itself must be on screen, not only the markers: a
+            // blank slot passed the marker-only differential. Sample the slot
+            // from the marker-free capture and require real terrain (mostly
+            // opaque pixels and a wide palette) — see reports/FIX-67 §二.
+            const RECT slot = runtimeMatchScoreScaledRect(RECT{0, 0, width, height},
+                RECT{500, 380, 500 + pw, 380 + ph});
+            int sampled = 0, opaque = 0;
+            std::vector<std::uint32_t> slotColors;
+            for (int py = std::max(0, slot.top); py < std::min(height, slot.bottom); py += 2) {
+                for (int px = std::max(0, slot.left); px < std::min(width, slot.right); px += 2) {
+                    const std::uint32_t pixel = unmarked[py * width + px] & 0xffffffU;
+                    ++sampled;
+                    opaque += pixel != 0;
+                    slotColors.push_back(pixel);
+                }
+            }
+            std::sort(slotColors.begin(), slotColors.end());
+            slotColors.erase(std::unique(slotColors.begin(), slotColors.end()), slotColors.end());
+            if (sampled == 0 || opaque * 2 < sampled || slotColors.size() < 24) return false;
             int changed = 0;
             for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
                 if (marked[y * width + x] == unmarked[y * width + x]) continue;

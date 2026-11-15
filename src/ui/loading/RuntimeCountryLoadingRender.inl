@@ -193,12 +193,15 @@ void drawRuntimeCountryLoading(HDC dc, const RECT& client, const RuntimeLoadingW
     const auto& preview = loading.mapPreview;
     const RECT previewFrame{500, 380, 716, 546};
     if (preview.width > 0 && preview.height > 0 && !preview.pixels.empty()) {
-        const double scale = std::min(216.0 / preview.width, 166.0 / preview.height);
-        const int width = std::max(1, static_cast<int>(std::lround(preview.width * scale)));
-        const int height = std::max(1, static_cast<int>(std::lround(preview.height * scale)));
-        const RECT base{500 + (216 - width) / 2, 380 + (166 - height) / 2,
-            500 + (216 - width) / 2 + width, 380 + (166 - height) / 2 + height};
-        const RECT destination = runtimeMatchScoreScaledRect(client, base);
+        // The retail page reserves a fixed 216x166 slot for the thumbnail (the
+        // page artwork paints exactly that rectangle black), and the skirmish
+        // map panel draws the same preview stretched into its destination rect.
+        // Filling the slot keeps both pages consistent and stops the letterbox
+        // bands from reading as two black stripes on the pages whose artwork is
+        // light behind the slot (observer / Yuri).
+        const int slotWidth = previewFrame.right - previewFrame.left;
+        const int slotHeight = previewFrame.bottom - previewFrame.top;
+        const RECT destination = runtimeMatchScoreScaledRect(client, previewFrame);
         BITMAPINFO info{};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = preview.width; info.bmiHeader.biHeight = -preview.height;
@@ -208,8 +211,8 @@ void drawRuntimeCountryLoading(HDC dc, const RECT& client, const RuntimeLoadingW
         const int saved = SaveDC(dc);
         IntersectClipRect(dc, destination.left, destination.top, destination.right, destination.bottom);
         for (const auto& marker : loading.mapStarts) {
-            const int x = base.left + static_cast<int>(std::lround(marker.x * (width - 1)));
-            const int markerY = base.top + static_cast<int>(std::lround(marker.y * (height - 1)));
+            const int x = previewFrame.left + static_cast<int>(std::lround(marker.x * (slotWidth - 1)));
+            const int markerY = previewFrame.top + static_cast<int>(std::lround(marker.y * (slotHeight - 1)));
             fill(RECT{x - 4, markerY - 4, x + 5, markerY + 5}, RGB(0, 0, 0));
             fill(RECT{x - 3, markerY - 3, x + 4, markerY + 4}, marker.color, true);
         }

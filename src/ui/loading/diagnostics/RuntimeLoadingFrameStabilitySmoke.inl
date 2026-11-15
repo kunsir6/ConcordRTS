@@ -288,12 +288,11 @@ int runRuntimeLoadingFrameStabilitySmoke(const RuntimeConfig& config) {
                 nativePixels += verified; return true;
             };
             const auto markers = [&](const std::vector<std::uint32_t>& pixels) {
-                const double factor = std::min(216.0/loading.mapPreview.width,166.0/loading.mapPreview.height);
-                const int pw = std::max(1,int(std::lround(loading.mapPreview.width*factor)));
-                const int ph = std::max(1,int(std::lround(loading.mapPreview.height*factor)));
+                // The production renderer fills the fixed 216x166 slot.
+                constexpr int pw = 216, ph = 166;
                 for (const auto& marker : starts) {
-                    const int x = 500+(216-pw)/2+int(std::lround(marker.x*(pw-1)));
-                    const int y = 380+(166-ph)/2+int(std::lround(marker.y*(ph-1)));
+                    const int x = 500+int(std::lround(marker.x*(pw-1)));
+                    const int y = 380+int(std::lround(marker.y*(ph-1)));
                     int matching = 0;
                     for (int py = scaled(y-4); py < scaled(y+5); ++py)
                         for (int px = scaled(x-4); px < scaled(x+5); ++px)
