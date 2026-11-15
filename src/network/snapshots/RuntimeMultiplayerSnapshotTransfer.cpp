@@ -1,5 +1,7 @@
 #include "network/snapshots/RuntimeMultiplayerSnapshotTransfer.h"
 
+#include "network/detail/RuntimeBigEndianCodec.h"
+
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -14,180 +16,13 @@ constexpr std::size_t kDescriptorMaximumPayloadBytes =
 constexpr std::size_t kChunkEnvelopeBytes = 30U;
 constexpr std::size_t kAckMaximumPayloadBytes = 26U;
 
-class ByteWriter {
-public:
-    void writeU8(std::uint8_t value) {
-        bytes_.push_back(value);
-    }
+// S-20：本地那份大端编解码器已并入 network/detail/RuntimeBigEndianCodec.h。
+// 名字保持 ByteWriter / ByteReader，既有调用点一字不改；
+// 错误文案前缀由读取器构造参数给出，与合并前逐字节相同。
+using ByteWriter = concord::network::detail::BigEndianWriter;
+using ByteReader = concord::network::detail::BigEndianReader;
 
-    void writeU16(std::uint16_t value) {
-        bytes_.push_back(static_cast<std::uint8_t>(value >> 8U));
-        bytes_.push_back(static_cast<std::uint8_t>(value));
-    }
-
-    void writeU32(std::uint32_t value) {
-        bytes_.push_back(static_cast<std::uint8_t>(value >> 24U));
-        bytes_.push_back(static_cast<std::uint8_t>(value >> 16U));
-        bytes_.push_back(static_cast<std::uint8_t>(value >> 8U));
-        bytes_.push_back(static_cast<std::uint8_t>(value));
-    }
-
-    void writeU64(std::uint64_t value) {
-        for (int shift = 56; shift >= 0; shift -= 8) {
-            bytes_.push_back(static_cast<std::uint8_t>(
-                value >> static_cast<unsigned int>(shift)
-            ));
-        }
-    }
-
-    void writeString(const std::string& value) {
-        writeU16(static_cast<std::uint16_t>(value.size()));
-        bytes_.insert(bytes_.end(), value.begin(), value.end());
-    }
-
-    void writeByteVector(const std::vector<std::uint8_t>& value) {
-        writeU32(static_cast<std::uint32_t>(value.size()));
-        bytes_.insert(bytes_.end(), value.begin(), value.end());
-    }
-
-    template <std::size_t Size>
-    void writeArray(const std::array<std::uint8_t, Size>& value) {
-        bytes_.insert(bytes_.end(), value.begin(), value.end());
-    }
-
-    const std::vector<std::uint8_t>& bytes() const {
-        return bytes_;
-    }
-
-private:
-    std::vector<std::uint8_t> bytes_;
-};
-
-class ByteReader {
-public:
-    explicit ByteReader(std::span<const std::uint8_t> bytes)
-        : bytes_(bytes) {}
-
-    bool readU8(std::uint8_t& value) {
-        if (!require(1U)) return false;
-        value = bytes_[offset_++];
-        return true;
-    }
-
-    bool readU16(std::uint16_t& value) {
-        if (!require(2U)) return false;
-        value = static_cast<std::uint16_t>(
-            (static_cast<std::uint16_t>(bytes_[offset_]) << 8U)
-            | static_cast<std::uint16_t>(bytes_[offset_ + 1U])
-        );
-        offset_ += 2U;
-        return true;
-    }
-
-    bool readU32(std::uint32_t& value) {
-        if (!require(4U)) return false;
-        value =
-            (static_cast<std::uint32_t>(bytes_[offset_]) << 24U)
-            | (static_cast<std::uint32_t>(bytes_[offset_ + 1U]) << 16U)
-            | (static_cast<std::uint32_t>(bytes_[offset_ + 2U]) << 8U)
-            | static_cast<std::uint32_t>(bytes_[offset_ + 3U]);
-        offset_ += 4U;
-        return true;
-    }
-
-    bool readU64(std::uint64_t& value) {
-        if (!require(8U)) return false;
-        value = 0U;
-        for (std::size_t index = 0; index < 8U; ++index) {
-            value = (value << 8U)
-                | static_cast<std::uint64_t>(bytes_[offset_ + index]);
-        }
-        offset_ += 8U;
-        return true;
-    }
-
-    bool readString(
-        std::size_t maximumBytes,
-        std::string& value,
-        const char* fieldName
-    ) {
-        std::uint16_t length = 0U;
-        if (!readU16(length)) return false;
-        if (static_cast<std::size_t>(length) > maximumBytes) {
-            return fail(
-                std::string("snapshot ") + fieldName
-                    + " exceeds the size limit"
-            );
-        }
-        if (!require(static_cast<std::size_t>(length))) return false;
-        value.assign(
-            reinterpret_cast<const char*>(bytes_.data() + offset_),
-            static_cast<std::size_t>(length)
-        );
-        offset_ += static_cast<std::size_t>(length);
-        return true;
-    }
-
-    bool readByteVector(
-        std::size_t maximumBytes,
-        std::vector<std::uint8_t>& value,
-        const char* fieldName
-    ) {
-        std::uint32_t length = 0U;
-        if (!readU32(length)) return false;
-        if (static_cast<std::size_t>(length) > maximumBytes) {
-            return fail(
-                std::string("snapshot ") + fieldName
-                    + " exceeds the size limit"
-            );
-        }
-        if (!require(static_cast<std::size_t>(length))) return false;
-        value.assign(
-            bytes_.begin() + static_cast<std::ptrdiff_t>(offset_),
-            bytes_.begin() + static_cast<std::ptrdiff_t>(
-                offset_ + static_cast<std::size_t>(length)
-            )
-        );
-        offset_ += static_cast<std::size_t>(length);
-        return true;
-    }
-
-    template <std::size_t Size>
-    bool readArray(std::array<std::uint8_t, Size>& value) {
-        if (!require(Size)) return false;
-        std::copy_n(bytes_.begin() + static_cast<std::ptrdiff_t>(offset_),
-                    Size,
-                    value.begin());
-        offset_ += Size;
-        return true;
-    }
-
-    bool finished() const {
-        return offset_ == bytes_.size();
-    }
-
-    bool fail(std::string message) {
-        if (error_.empty()) error_ = std::move(message);
-        return false;
-    }
-
-    const std::string& error() const {
-        return error_;
-    }
-
-private:
-    bool require(std::size_t count) {
-        if (offset_ <= bytes_.size()
-            && count <= bytes_.size() - offset_) {
-            return true;
-        }
-        return fail("snapshot payload is truncated");
-    }
-
-    std::span<const std::uint8_t> bytes_;
-    std::size_t offset_ = 0U;
-    std::string error_;
-};
+constexpr const char* kCodecErrorLabel = "snapshot ";
 
 bool fail(std::string& errorMessage, std::string message) {
     errorMessage = std::move(message);
@@ -677,7 +512,7 @@ bool decodeRuntimeMultiplayerSnapshotDescriptor(
     if (payload.size() > kDescriptorMaximumPayloadBytes) {
         return fail(errorMessage, "snapshot descriptor payload is too large");
     }
-    ByteReader reader(payload);
+    ByteReader reader(payload, kCodecErrorLabel);
     RuntimeMultiplayerSnapshotDescriptor candidate;
     std::uint32_t magic = 0U;
     std::uint16_t version = 0U;
@@ -773,7 +608,7 @@ bool decodeRuntimeMultiplayerSnapshotChunk(
         > runtimeMultiplayerSnapshotChunkBytes + kChunkEnvelopeBytes) {
         return fail(errorMessage, "snapshot chunk payload exceeds the limit");
     }
-    ByteReader reader(payload);
+    ByteReader reader(payload, kCodecErrorLabel);
     RuntimeMultiplayerSnapshotChunk candidate;
     std::uint32_t magic = 0U;
     std::uint16_t version = 0U;
@@ -831,7 +666,7 @@ bool decodeRuntimeMultiplayerSnapshotChunkAck(
     if (payload.size() > kAckMaximumPayloadBytes) {
         return fail(errorMessage, "snapshot ack payload exceeds the limit");
     }
-    ByteReader reader(payload);
+    ByteReader reader(payload, kCodecErrorLabel);
     RuntimeMultiplayerSnapshotChunkAck candidate;
     std::uint32_t magic = 0U;
     std::uint16_t version = 0U;
