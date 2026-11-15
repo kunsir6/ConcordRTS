@@ -264,7 +264,9 @@ bool runRuntimeVehicleTerrainSlopeSmoke(RuntimeWindowState& live, std::string& e
     using namespace RuntimeVehicleTerrainSlopeOracle;
     std::cout << std::unitbuf;
     const char* destination = std::getenv("CONCORD_VEHICLE_TERRAIN_SLOPE_OUTPUT");
-    const std::filesystem::path root = destination && *destination ? destination : "build/issue22_15_vehicle_terrain_slope";
+    const std::filesystem::path root = destination && *destination
+        ? destination
+        : std::filesystem::path(runtimeSmokeArtifactDirectory("build")) / "issue22_15_vehicle_terrain_slope";
     const char* selected = std::getenv("CONCORD_VEHICLE_TERRAIN_SLOPE_CASE");
     const std::string filter = selected ? selected : "";
     if (filter == "render-only") {

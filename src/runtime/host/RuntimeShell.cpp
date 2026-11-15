@@ -6,6 +6,7 @@
 #include "simulation/vision/RuntimeVisionPhase.h"
 #include "simulation/triggers/RuntimeTriggerScheduler.h"
 #include "core/determinism/RuntimeAuthorityHashPrimitives.h"
+#include "runtime/host/diagnostics/RuntimeSmokeArtifacts.h"
 #include "simulation/ai/RuntimeComputerAiTriggerHash.h"
 #include "runtime/persistence/RuntimeLoadTransaction.h"
 #include "ui/text/win32/RuntimeHudSystemFontWin32.h"
@@ -36859,7 +36860,8 @@ int runRuntimeResultPresentationSmokeTest(const RuntimeConfig& config) {
     const std::filesystem::path outputRoot =
         std::getenv("CONCORD_RESULT_PRESENTATION_OUTPUT") != nullptr
             ? std::filesystem::path(std::getenv("CONCORD_RESULT_PRESENTATION_OUTPUT"))
-            : std::filesystem::path(config.localDataRootPath).parent_path() / "build";
+            : std::filesystem::path(runtimeSmokeArtifactDirectory(
+                  pathString(std::filesystem::path(config.localDataRootPath).parent_path() / "build")));
     const auto save = [&](const char* name, const std::vector<std::uint32_t>& pixels) {
         std::string error;
         return pixels.size() == width * height && writeRuntimeSmokeBmp(

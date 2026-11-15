@@ -1,3 +1,7 @@
+// 冒烟产物落点（S-39）：默认仍是 `build/`（手工单跑行为不变），regress 用
+// CONCORD_SMOKE_ARTIFACT_DIR 把它指到本轮 artifacts 目录。
+#include "runtime/host/diagnostics/RuntimeSmokeArtifacts.h"
+
 // Exercise the actual loading window renderer without showing a game window.
 int runRuntimeCountryLoadingPresentationSmoke(const RuntimeConfig& config) {
     RuntimeWindowState runtime;
@@ -84,8 +88,8 @@ int runRuntimeCountryLoadingPresentationSmoke(const RuntimeConfig& config) {
         std::string captureError;
         const bool random = state.config.playerSlots[0].startPosition == 0;
         const bool captured = writeRuntimeSmokeBmp(random
-            ? "build/issue21_loading_first_frame_random.bmp"
-            : "build/issue21_loading_first_frame_fixed.bmp", pixels, 800, 600, captureError);
+            ? runtimeSmokeArtifactPath("issue21_loading_first_frame_random.bmp")
+            : runtimeSmokeArtifactPath("issue21_loading_first_frame_fixed.bmp"), pixels, 800, 600, captureError);
         SelectObject(dc, old); DeleteObject(bitmap); DeleteDC(dc);
         DestroyWindow(loading.window); loading.window = nullptr;
         if (!firstFrameVisible || !captured
@@ -274,13 +278,14 @@ int runRuntimeCountryLoadingPresentationSmoke(const RuntimeConfig& config) {
         }
         if (okay) {
             const auto token = runtimeLoadingCountryText(loading.imageId).imageToken;
-            const auto output = std::filesystem::path("build") / (std::string("loading_") + token + ".bmp");
-            okay = writeRuntimeSmokeBmp(pathString(output), half.data(), 800, 600, captureError);
+            const auto output = runtimeSmokeArtifactPath(std::string("loading_") + token + ".bmp");
+            okay = writeRuntimeSmokeBmp(output, half.data(), 800, 600, captureError);
             if (std::string(country) == "Africans") {
                 loading.completed = 1;
                 std::vector<std::uint32_t> scaled;
                 okay = capture(640, 480, scaled) && okay;
-                if (okay) okay = writeRuntimeSmokeBmp("build/loading_libya_640.bmp", scaled.data(), 640, 480, captureError);
+                if (okay) okay = writeRuntimeSmokeBmp(runtimeSmokeArtifactPath("loading_libya_640.bmp"),
+                                                      scaled.data(), 640, 480, captureError);
             }
         }
         DestroyWindow(loading.window);
