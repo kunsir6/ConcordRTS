@@ -84,6 +84,117 @@ bool runRuntimeBuildingReadySmoke(const RuntimeConfig& config, std::string& erro
     };
     if (!checkSave(false)) return false;
 
+    // 偷星后建造栏要能看出「造出来带级」。奖励在数据层是「按 owner × 类别」的布尔
+    // （RuntimeSpySystemState::hasVeteranProduction），不是建筑身上存的等级，所以这里
+    // 三连渲染证明两件事：拿到奖励时角标像素出现，奖励清掉后逐像素回到基线。
+    {
+        const RuntimeBuildKind savedTab = state.activeBuildTab;
+        // 侧栏的步兵页按「有对应工厂」过滤，而这条夹具的基地只有一座部署好的 MCV，
+        // 步兵页因此是空的。注入己方兵营，走 M-15 注入己方工厂的同一条创建路径
+        // （手搓 WorldObjectInstance 会让命中与投影分家）。
+        state.activeBuildTab = RuntimeBuildKind::Infantry;
+        if (runtimeFilteredBuildCatalogIndices(state).empty()) {
+            RuntimeCellPoint reference{40, 40};
+            for (const WorldObjectInstance& object : state.world.getObjects()) {
+                if (object.alive && object.kind == WorldObjectKind::Structure) {
+                    reference = RuntimeCellPoint{object.x, object.y};
+                    break;
+                }
+            }
+            RuntimeBuildCatalogItem barracks;
+            barracks.kind = RuntimeBuildKind::Building;
+            barracks.typeId = "GAPILE";
+            barracks.owner = state.economy.owner;
+            barracks.buildTicks = 1;
+            barracks.techLevel = 1;
+            barracks.cost = 1;
+            const std::optional<RuntimeCellPoint> cell =
+                findRuntimePlacementCellNear(state, barracks, reference, 48, state.economy.owner, false);
+            if (!cell) { state.activeBuildTab = savedTab; return fail("no free barracks foundation for the veteran badge"); }
+            WorldObjectInstance* factory = addRuntimeObjectInstanceForOwner(
+                state, state.economy.owner, RuntimeBuildKind::Building, "GAPILE", *cell);
+            if (factory == nullptr) { state.activeBuildTab = savedTab; return fail("could not inject an owned barracks"); }
+            factory->mission = "Guard";
+            factory->health = std::max(1, factory->health);
+            refreshRuntimeObjectOccupancyAfterLocalChange(state);
+            state.projectedObjectsCacheValid = false;
+        }
+        const RECT sidebarRect = runtimeSidebarRect(clientRect);
+        const std::vector<int> visible = runtimeVisibleBuildCatalogIndices(state, sidebarRect);
+        int slot = -1;
+        for (int i = 0; i < static_cast<int>(visible.size()); ++i) {
+            if (state.economy.catalog[visible[i]].kind == RuntimeBuildKind::Infantry) { slot = i; break; }
+        }
+        if (slot < 0) { state.activeBuildTab = savedTab; return fail("no visible infantry cameo for the veteran badge"); }
+        const std::string cameoType = state.economy.catalog[visible[slot]].typeId;
+        const RECT badgeButton = runtimeBuildButtonRect(sidebarRect, slot);
+
+        struct Surface {
+            RuntimeBackBuffer buffer;
+            ~Surface() { releaseRuntimeBackBuffer(buffer); }
+        } surface;
+        HDC screenDc = GetDC(nullptr);
+        const bool allocated = ensureRuntimeBackBuffer(surface.buffer, screenDc, 1024, 768);
+        if (screenDc != nullptr) ReleaseDC(nullptr, screenDc);
+        if (!allocated) { state.activeBuildTab = savedTab; return fail("veteran badge surface allocation"); }
+        const auto capture = [&](std::vector<std::uint32_t>& out) {
+            std::memset(surface.buffer.pixels, 0, static_cast<std::size_t>(1024) * 768 * 4);
+            drawRuntimeSidebar(surface.buffer.memoryDc, clientRect, state, 0);
+            GdiFlush();
+            const auto* pixels = static_cast<const std::uint32_t*>(surface.buffer.pixels);
+            out.clear();
+            for (int y = badgeButton.bottom - 18; y < badgeButton.bottom; ++y)
+                for (int x = badgeButton.left; x < badgeButton.left + 18; ++x)
+                    out.push_back(pixels[static_cast<std::size_t>(y) * 1024 + x]);
+        };
+        const auto hexOwner = [](const std::string& text) {
+            static const char* digits = "0123456789ABCDEF";
+            std::string out;
+            for (unsigned char c : text) {
+                out.push_back(digits[c >> 4]);
+                out.push_back(digits[c & 0x0F]);
+            }
+            return out;
+        };
+        const auto applySpyVeterans = [&](int mask) {
+            std::string text = "[SpyRuntime]\nVersion=2\nLastAdvancedTick=-1\n";
+            if (mask <= 0) {
+                text += "OwnerCount=0\nDisguiseCount=0\nDetectionCount=0\n\n";
+            } else {
+                text += "OwnerCount=1\nDisguiseCount=0\nDetectionCount=0\n\n";
+                text += "[SpyRuntime.Owner.0]\nOwnerHex=" + hexOwner(state.economy.owner)
+                    + "\nBlackoutUntilTick=0\nVeteranMask=" + std::to_string(mask) + "\n\n";
+            }
+            IniFile ini;
+            if (!ini.loadFromString(text)) return false;
+            if (!state.spies.load(ini, makeRuntimeSpyContext(state), state.tick, &error)) return false;
+            state.spiesInitialized = true;
+            return true;
+        };
+        const auto differing = [](const std::vector<std::uint32_t>& left, const std::vector<std::uint32_t>& right) {
+            int count = 0;
+            for (std::size_t i = 0; i < left.size() && i < right.size(); ++i) {
+                if (left[i] != right[i]) ++count;
+            }
+            return count;
+        };
+
+        std::vector<std::uint32_t> baseline, awarded, cleared;
+        capture(baseline);
+        if (!applySpyVeterans(1)) { state.activeBuildTab = savedTab; return fail("spy veteran fixture rejected: " + error); }
+        capture(awarded);
+        if (!applySpyVeterans(0)) { state.activeBuildTab = savedTab; return fail("spy veteran fixture reset rejected: " + error); }
+        capture(cleared);
+        state.activeBuildTab = savedTab;
+
+        const int appeared = differing(baseline, awarded);
+        const int restored = differing(baseline, cleared);
+        std::cout << "Sidebar veteran badge: cameo=" << cameoType
+                  << " appearedPixels=" << appeared << " restoredDiff=" << restored << "\n";
+        if (appeared <= 0) return fail("veteran production did not mark the build cameo");
+        if (restored != 0) return fail("cleared veteran production did not restore the build cameo");
+    }
+
     if (const char* bitmapPath = std::getenv("CONCORD_BUILDING_READY_BMP")) {
         struct Surface {
             RuntimeBackBuffer buffer;

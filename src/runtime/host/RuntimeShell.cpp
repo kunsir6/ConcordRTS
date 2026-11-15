@@ -20310,6 +20310,52 @@ bool runtimeSuperWeaponHasReadyLabel(const SuperWeaponSidebarSnapshot& snapshot)
         || snapshot.state == SuperWeaponRuntimeState::AwaitingSecondTarget;
 }
 
+// Retail marks a build cameo when the owner already owns veteran production for
+// that category, so the player can tell the queued unit will come out with a
+// chevron.  The award itself is per owner and per category (spy infiltration of
+// a barracks / war factory / airfield — see
+// RuntimeSpySystemState::hasVeteranProduction), not a rank stored on the
+// producing building, so the badge keys off exactly the same flag the
+// production path reads in applyRuntimeProducedObjectVeterancy.
+std::optional<RuntimeSpyVeteranProduction> runtimeSidebarItemVeteranProduction(
+    const RuntimeGameSessionState& state,
+    const RuntimeBuildCatalogItem& item
+) {
+    if (item.kind == RuntimeBuildKind::Infantry) {
+        return RuntimeSpyVeteranProduction::Infantry;
+    }
+    if (item.kind != RuntimeBuildKind::Unit) {
+        return std::nullopt;
+    }
+    if (runtimeBuildItemUsesPadAircraft(state, item)) {
+        return RuntimeSpyVeteranProduction::Aircraft;
+    }
+    if (state.rules.findUnitType("UnitType", item.typeId) == nullptr) {
+        return std::nullopt;
+    }
+    return RuntimeSpyVeteranProduction::Vehicles;
+}
+
+bool runtimeSidebarItemProducesVeterans(
+    const RuntimeProductionHostState& state,
+    const RuntimeBuildCatalogItem& item
+) {
+    const std::optional<RuntimeSpyVeteranProduction> production =
+        runtimeSidebarItemVeteranProduction(state, item);
+    return production.has_value()
+        && state.spies.hasVeteranProduction(
+            runtimeRepairDepotCanonicalOwnerId(state, state.economy.owner),
+            *production
+        );
+}
+
+// Defined after drawRuntimeVeterancyBadge so it can share the pip atlas lookup.
+void drawRuntimeSidebarVeterancyBadge(
+    HDC dc,
+    RuntimeWindowState& state,
+    const RECT& buttonRect
+);
+
 void drawRuntimeSidebar(
     HDC dc,
     const RECT& clientRect,
@@ -20648,6 +20694,10 @@ void drawRuntimeSidebar(
             );
         } else {
             drawRuntimeMissingCameo(dc, iconRect, item, enabled || ready || placementReady);
+        }
+
+        if (runtimeSidebarItemProducesVeterans(state, item)) {
+            drawRuntimeSidebarVeterancyBadge(dc, state, iconRect);
         }
 
         if (busy && !item.wall && activeOrder != nullptr) {
@@ -23355,6 +23405,60 @@ void drawRuntimeVeterancyBadge(
     DrawTextW(
         dc,
         label.c_str(),
+        -1,
+        &badge,
+        DT_SINGLELINE | DT_CENTER | DT_VCENTER
+    );
+    SetTextColor(dc, oldTextColor);
+    SetBkMode(dc, oldBkMode);
+}
+
+// Bottom-left corner of the cameo: the top-right corner already carries the
+// queue count and the centre carries the "就绪" label.  A spy award is always
+// the single professional chevron, so only the veteran frame is used here.
+void drawRuntimeSidebarVeterancyBadge(
+    HDC dc,
+    RuntimeWindowState& state,
+    const RECT& buttonRect
+) {
+    if (const std::optional<std::pair<int, int>> frames =
+            runtimeVeterancyPipFrames(state)) {
+        const int frameIndex = frames->first;
+        RuntimeUiShpCacheEntry* pip = loadRuntimeUiShpFrame(
+            state,
+            "sidebar",
+            "pips",
+            frameIndex
+        );
+        if (pip != nullptr) {
+            if (drawRuntimeUiShpFrameNativeAt(
+                    dc,
+                    state,
+                    "sidebar",
+                    "pips",
+                    frameIndex,
+                    "palette",
+                    buttonRect.left + 2,
+                    buttonRect.bottom - pip->image.height - 2,
+                    true
+                )) {
+                return;
+            }
+        }
+    }
+    // Same intentional degradation as the world badge: a glyph beats silence
+    // when the pip atlas cannot be resolved.
+    RECT badge{
+        buttonRect.left + 2,
+        buttonRect.bottom - 16,
+        buttonRect.left + 16,
+        buttonRect.bottom - 2
+    };
+    const int oldBkMode = SetBkMode(dc, TRANSPARENT);
+    const COLORREF oldTextColor = SetTextColor(dc, RGB(214, 232, 255));
+    DrawTextW(
+        dc,
+        L"V",
         -1,
         &badge,
         DT_SINGLELINE | DT_CENTER | DT_VCENTER
