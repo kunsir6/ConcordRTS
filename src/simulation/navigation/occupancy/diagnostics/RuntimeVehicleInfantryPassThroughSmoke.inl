@@ -20,7 +20,11 @@
 
 bool runRuntimeVehicleInfantryPassThroughSmoke(std::string& error) {
     const auto fail = [&](const std::string& why) {
-        error = "vehicle pass-through infantry: " + why;
+        // 措辞带 failed：regress 的 pick_evidence 按 *failed* 选证据行，而本冒烟
+        // 前面会先打一行 `Failed to open INI file: …2peaks.map`（夹具噪声）——
+        // 失败行不含 failed 时，证据行会被那行抢走，known-red 的前缀门禁就钉在
+        // 噪声上，真原因换了也照不出来。
+        error = "vehicle pass-through failed: " + why;
         return false;
     };
     IniFile ini;
