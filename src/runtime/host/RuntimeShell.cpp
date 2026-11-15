@@ -90409,7 +90409,20 @@ int runRuntimeWindowSession(
         }
 
         advanceRuntimeUiPresentation(state);
-        if (tickAdvanced) {
+        // M-03（第 63 轮）：tick 推进不再无条件要求重绘。
+        //
+        // 上面每一拍已经按 `simulationChanged || waterWakeChanged` 置过
+        // repaintRequested，这里再无条件置一次会把它整体作废：真实会话的读数
+        // （performance/latest.txt，7492 帧 / 226 秒）是「复用缓存帧 13 / 重绘帧 7479」
+        // ——33 次/秒重画同一张画面，每次约 16 ms 的 render 全白花。
+        // 重绘请求一旦为假，reuseCachedFrame 就直接复用后备位图（跳过 beginWrite
+        // 与整幅场景绘制），只有 blit 还在。
+        //
+        // 两处兜底不许删：
+        // ①对战分支的画面由桥接泵提交，改动面在别的 TU，这里对它保持每拍重绘；
+        // ②本机分支每 30 拍强制重绘一次——万一某类视觉变化没被 `changed` 汇总到，
+        //   最坏也只是延迟 1/3 秒（满速 92 拍/秒），不会冻帧。
+        if (tickAdvanced && (multiplayerRuntime || state.tick % 30 == 0)) {
             state.repaintRequested = true;
         }
 
