@@ -21,6 +21,7 @@
 #import <QuartzCore/CoreAnimation.h>
 
 #include <CoreGraphics/CoreGraphics.h>
+#import <ImageIO/ImageIO.h>
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
@@ -63,6 +64,17 @@ long long gFullScreenCoverageFrames = 0;
 int gPresentedWidth = 0;
 int gPresentedHeight = 0;
 std::string gPresentedTitle;
+
+// L10N-03: HiDPI 文字层。
+//
+// 帧缓冲是 1x，Retina 上整块放大，文字因此是 2x2 的硬方块。这一层把系统字体
+// 文字从帧缓冲里摘出来单独按 backing 倍数光栅，作为 sublayer 叠在画面上。
+// generation 用来判"这张位图换过没有"——每帧无条件重建 CGImage 会让
+// CoreAnimation 每帧上传 8MB 纹理，静止界面完全没必要。
+CALayer* gTextLayer = nil;
+unsigned gTextLayerGeneration = 0;
+int gTextLayerPixelWidth = 0;
+int gTextLayerPixelHeight = 0;
 
 // ON-1-03: 一次性注入合成 Cmd+Q 的自测开关（CONCORD_QUIT_SELFTEST=1）。
 // 真实按键无法在无人值守环境下发出（需要辅助功能授权），但"事件进队列 →
@@ -220,7 +232,69 @@ constexpr CGBitmapInfo kSurfaceBitmapInfo = static_cast<CGBitmapInfo>(
     static_cast<std::uint32_t>(kCGBitmapByteOrder32Little)
     | static_cast<std::uint32_t>(kCGImageAlphaNoneSkipFirst));
 
-// ---------------------------------------------------------------------------
+// L10N-03：文字层是**有 alpha** 的——透明底 + 预乘字形。用 PremultipliedFirst
+// 而不是 NoneSkipFirst，才会让没墨的像素真的透明；用错这一位，整块文字图层
+// 会变成"黑底白字的大方块"，把整个画面盖掉。
+constexpr CGBitmapInfo kTextLayerBitmapInfo = static_cast<CGBitmapInfo>(
+    static_cast<std::uint32_t>(kCGBitmapByteOrder32Little)
+    | static_cast<std::uint32_t>(kCGImageAlphaPremultipliedFirst));
+
+// L10N-03 自证：把整棵 layer 树渲染成 PNG。
+//
+// 为什么不能直接截屏：本机没有屏幕录制授权，screencapture 只会返回全黑。
+// renderInContext: 走的是进程内的 CA 渲染路径，不经过 WindowServer，所以它
+// 给出的正是"屏幕该显示什么"——底图 + 文字层的合成结果。这正是判断
+// "HiDPI 文字有没有贴对位置、有没有把别的像素盖掉"唯一能自证的东西；
+// 单独 dump 文字层只能证明字形对，证明不了合成对。
+void dumpLayerTree(const char* directory, int index) {
+    if (directory == nullptr || directory[0] == '\0' || gView == nil) return;
+    const CGFloat scale = gWindow.backingScaleFactor;
+    const CGRect bounds = gView.bounds;
+    if (bounds.size.width <= 0.0 || bounds.size.height <= 0.0) return;
+    const std::size_t width =
+        static_cast<std::size_t>(std::lround(bounds.size.width * scale));
+    const std::size_t height =
+        static_cast<std::size_t>(std::lround(bounds.size.height * scale));
+    if (width == 0 || height == 0) return;
+
+    std::vector<unsigned char> pixels(width * height * 4, 0);
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    if (space == nullptr) return;
+    CGContextRef context = CGBitmapContextCreate(pixels.data(), width, height, 8,
+        width * 4, space, kTextLayerBitmapInfo);
+    if (context == nullptr) {
+        CGColorSpaceRelease(space);
+        return;
+    }
+    CGContextScaleCTM(context, scale, scale);
+    // 不翻转 CTM：renderInContext: 在 macOS 上按 layer 的坐标系（左上原点）画，
+    // 多翻一次会让整张图上下颠倒，而那看起来像"文字跑到了屏幕外"。
+    [gView.layer renderInContext:context];
+    CGContextRelease(context);
+
+    const std::string path = std::string(directory) + "/layer-" + std::to_string(index) + ".png";
+    CGDataProviderRef provider =
+        CGDataProviderCreateWithData(nullptr, pixels.data(), pixels.size(), nullptr);
+    CGImageRef image = provider != nullptr
+        ? CGImageCreate(width, height, 8, 32, width * 4, space,
+                        kTextLayerBitmapInfo, provider, nullptr, false, kCGRenderingIntentDefault)
+        : nullptr;
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr,
+        reinterpret_cast<const UInt8*>(path.c_str()), static_cast<CFIndex>(path.size()), false);
+    CGImageDestinationRef destination = (image != nullptr && url != nullptr)
+        ? CGImageDestinationCreateWithURL(url, CFSTR("public.png"), 1, nullptr) : nullptr;
+    if (destination != nullptr) {
+        CGImageDestinationAddImage(destination, image, nullptr);
+        const bool ok = CGImageDestinationFinalize(destination);
+        std::fprintf(stderr, "[layer-dump] %s %s (%zux%zu)\n", path.c_str(),
+                     ok ? "ok" : "failed", width, height);
+        CFRelease(destination);
+    }
+    if (url != nullptr) CFRelease(url);
+    if (image != nullptr) CGImageRelease(image);
+    if (provider != nullptr) CGDataProviderRelease(provider);
+    CGColorSpaceRelease(space);
+}// ---------------------------------------------------------------------------
 // U-10 系统指针可见性自证（CONCORD_CURSOR_SELFTEST=1）
 //
 // 用户报障：「鼠标在 app 框内隐藏了系统图标，移出去就看不到了」。
@@ -941,6 +1015,16 @@ void present(const Surface& surface) {
             // （实测这台机器 backingScaleFactor=2.0 而 layer 默认 1.0。）
             gView.layer.contentsScale = gWindow.backingScaleFactor;
             gWindow.contentView = gView;
+            // L10N-03：文字层。加在最后 = 盖在画面之上；透明底，只承载文字像素。
+            // contentsScale 跟 backing 走，contents 的尺寸也按物理像素给，
+            // 所以这层是 1:1 映射，不做任何放大（放大就回到方块了）。
+            if (gTextLayer == nil) {
+                gTextLayer = [CALayer layer];
+                gTextLayer.contentsGravity = kCAGravityResize;
+                [gView.layer addSublayer:gTextLayer];
+            }
+            gTextLayer.contentsScale = gWindow.backingScaleFactor;
+            gTextLayer.frame = gView.bounds;
             // U-04：系统指针策略。默认隐藏（与 Windows 上"只有游戏指针"一致）；
             // CONCORD_HIDE_SYSTEM_CURSOR=0 可恢复系统箭头，留给"某界面没有自绘指针"。
             // 这里主动失效一次 cursor rect，否则要等用户移动鼠标才生效。
@@ -1172,6 +1256,74 @@ void present(const Surface& surface) {
         }
         CGDataProviderRelease(provider);
         CGColorSpaceRelease(colorSpace);
+
+        // L10N-03：文字层。
+        //
+        // 比例不是直接取 backingScale，而是"view 物理像素 / surface 逻辑像素"。
+        // 平时两者相等（surface 是从客户区推出来的），但截断帧里 surface 仍是旧
+        // 尺寸、view 已经被拉大，此时只有这个比值能让文字和底图落在同一位置。
+        if (gTextLayer != nil) {
+            const NSRect viewBounds = gView.bounds;
+            const double viewPixelsWide = static_cast<double>(viewBounds.size.width)
+                * static_cast<double>(gWindow.backingScaleFactor);
+            const double textScale = (surface.width > 0 && viewPixelsWide > 0.0)
+                ? viewPixelsWide / static_cast<double>(surface.width)
+                : 1.0;
+            const concord_compat::apple::TextLayer text =
+                concord_compat::apple::updateTextLayer(
+                    surface.width, surface.height, textScale);
+            const bool adoptable = text.pixels != nullptr
+                && text.width > 0 && text.height > 0 && text.bytesPerRow > 0;
+            CGImageRef textImage = nullptr;
+            CGDataProviderRef textProvider = nullptr;
+            CGColorSpaceRef textSpace = nullptr;
+            if (adoptable
+                && (text.generation != gTextLayerGeneration
+                    || text.width != gTextLayerPixelWidth
+                    || text.height != gTextLayerPixelHeight)) {
+                textSpace = CGColorSpaceCreateDeviceRGB();
+                const std::size_t textBytes = static_cast<std::size_t>(text.bytesPerRow)
+                    * static_cast<std::size_t>(text.height);
+                // 不拷贝：位图归 compat 的文字层所有，直到下一次重建。
+                textProvider = CGDataProviderCreateWithData(
+                    nullptr, text.pixels, textBytes, nullptr);
+                textImage = CGImageCreate(
+                    static_cast<std::size_t>(text.width),
+                    static_cast<std::size_t>(text.height),
+                    8, 32,
+                    static_cast<std::size_t>(text.bytesPerRow),
+                    textSpace,
+                    kTextLayerBitmapInfo,
+                    textProvider,
+                    nullptr, false, kCGRenderingIntentDefault);
+            }
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            if (textImage != nullptr) {
+                gTextLayer.contents = (__bridge id)textImage;
+                gTextLayer.contentsScale = gWindow.backingScaleFactor;
+                gTextLayer.frame = gView.bounds;
+                gTextLayerGeneration = text.generation;
+                gTextLayerPixelWidth = text.width;
+                gTextLayerPixelHeight = text.height;
+            }
+            // 没有位图（1x 屏 / 未接管）就把图层藏掉：留在屏幕上的是上一帧的字，
+            // 而这一帧的文字已经由帧缓冲画出来了，两层会叠成重影。
+            gTextLayer.hidden = !adoptable;
+            [CATransaction commit];
+            if (textImage != nullptr) CGImageRelease(textImage);
+            if (textProvider != nullptr) CGDataProviderRelease(textProvider);
+            if (textSpace != nullptr) CGColorSpaceRelease(textSpace);
+
+            // 自证：文字层刚换过，把整棵 layer 树 dump 一张（最多 3 张）。
+            if (textImage != nullptr) {
+                static int layerDumps = 0;
+                if (layerDumps < 3) {
+                    dumpLayerTree(std::getenv("CONCORD_LAYER_DUMP"), layerDumps);
+                    ++layerDumps;
+                }
+            }
+        }
 
         if (surface.visible) {
             if (gWindow.isMiniaturized) [gWindow deminiaturize:nil];

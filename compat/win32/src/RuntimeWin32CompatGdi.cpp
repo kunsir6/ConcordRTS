@@ -46,6 +46,7 @@
 #include <unistd.h>
 
 #include "RuntimeWin32CompatTextInternal.h"
+#include "RuntimeWin32CompatTextLayer.h"
 
 // 字形后端在自己的命名空间里（它不知道 GDI，也不知道 windows.h）。
 namespace text = concord::win32compat::text;
@@ -1575,6 +1576,35 @@ void drawTextRun(CompatDevice* device, int x, int y, const wchar_t* text, int co
     const text::FaceSpec spec = faceSpecFor(font);
     const std::uint32_t fg = toPixel(device->textColor);
     const std::uint32_t bg = toPixel(device->bkColor);
+
+    // L10N-03：屏幕文字层接管时不写像素，只登记。
+    //
+    // 必须"只登记不画"，不能"两边都画"——两层叠起来就是重影，而且 1x 那层的
+    // 方块字会从 2x 字形的缝隙里透出来。capture 只在真实上屏（present）后打开，
+    // 所有离屏 smoke 的 BMP 取证仍然走下面原来的 1x 合成，口径不变。
+    if (concord::win32compat::textlayer::captureEnabled()) {
+        concord::win32compat::textlayer::Run run;
+        run.text.assign(text, static_cast<std::size_t>(count));
+        run.x = x;
+        run.y = y;
+        run.cellWidth = m.width;
+        run.cellHeight = m.height;
+        run.face = spec;
+        run.fg = fg;
+        run.bg = bg;
+        run.bkMode = device->bkMode;
+        run.rop2 = device->rop2;
+        if (clip != nullptr) {
+            run.hasClip = true;
+            run.clipLeft = clip->left;
+            run.clipTop = clip->top;
+            run.clipRight = clip->right;
+            run.clipBottom = clip->bottom;
+        }
+        concord::win32compat::textlayer::record(run);
+        return;
+    }
+
     PixelSink sink{device->bitmap, device};
     int penX = x;
     for (int index = 0; index < count;) {

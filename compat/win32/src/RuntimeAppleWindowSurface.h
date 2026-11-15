@@ -90,6 +90,34 @@ void setResizeSink(ResizeSink sink, void* context);
 // 事件永远待在 AppKit 队列里，窗口看得见但点不动。
 void pumpEvents();
 
+// ---------------------------------------------------------------------------
+// L10N-03: HiDPI 文字层
+// ---------------------------------------------------------------------------
+// 帧缓冲是 1x 逻辑分辨率，Retina 上由 CoreAnimation 整块放大，文字因此是
+// 2x2 的硬方块。这一层把系统字体文字从帧缓冲里摘出来、按 backing 倍数重新
+// 光栅成一张透明位图，作为独立 CALayer 叠在画面上；像素画不受影响。
+//
+// 边界仍然是"裸指针 + int"（理由见文件头），pixels 是 BGRA 预乘、top-down，
+// 生命周期归 compat 侧所有，直到下一次 present。
+struct TextLayer {
+    const void* pixels = nullptr;
+    int width = 0;
+    int height = 0;
+    int bytesPerRow = 0;
+    unsigned generation = 0;  // 与上次不同才需要重新贴
+};
+
+// 每帧调用一次：告知表面尺寸与放大倍数，取回这一帧的文字位图。
+//
+// 三件事的顺序固定在内部（尺寸 → 倍数 → 重建），调用方写不反：先设倍数再设
+// 尺寸会让位图按旧尺寸分配、又被新倍数重建，得到一张尺寸对不上的图，而那种
+// 错误在屏幕上只是"文字错位"，不会报任何东西。
+//
+// scale <= 1.01（1x 屏）时返回的 pixels 为 nullptr：此时文字应该留在帧缓冲里，
+// 调用方要把文字图层隐藏。**像素是否回到帧缓冲由 compat 侧按同一判据决定**，
+// 两边必须用同一个阈值，否则会出现"图层隐藏了、帧缓冲也没画"的整屏无字。
+TextLayer updateTextLayer(int surfaceWidth, int surfaceHeight, double scale);
+
 // 隐藏/恢复窗口内的**系统**指针（U-04）。
 //
 // Windows 上游戏把硬件指针关掉、自己画箭头，所以玩家只看到一个指针；

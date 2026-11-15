@@ -74,6 +74,24 @@ bool rasterizeGlyph(char32_t cp, const FaceSpec& face, int narrow, int tall,
 // contract of GetGlyphIndicesW with GGI_MARK_NONEXISTING_GLYPHS.
 unsigned glyphIndex(char32_t cp, const FaceSpec& face, int tall);
 
+// HiDPI coverage rasterisation, for the on-screen text layer only.
+//
+// Same grid semantics as rasterizeGlyph, two differences:
+//
+//   * output is 8-bit coverage (0 = background, 255 = full ink) instead of a
+//     50% threshold, so the result can be alpha-blended and stays smooth after
+//     CoreAnimation maps it onto physical pixels;
+//   * the cell is given in **pixels already scaled up**, and the font is looked
+//     up at that cell height. A 2x request therefore rasterises a genuinely
+//     larger glyph; it does not magnify the 1x mask.
+//
+// This deliberately does not feed the GDI path. The 1-bit mask is the contract
+// that keeps "measure == draw", ROP2 and XOR-text reversibility true; a coverage
+// output has no exact inverse and would break all three if it were allowed into
+// drawTextRun's pixel path.
+bool rasterizeGlyphCoverage(char32_t cp, const FaceSpec& face, int cellWidth,
+                            int cellHeight, std::vector<unsigned char>& coverage);
+
 // Test hook: drop cached fonts and masks (lets a test observe first-use cost and
 // guarantees a deterministic starting state).
 void resetCaches();

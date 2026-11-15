@@ -171,6 +171,12 @@ set(
     # That split is what lets text honour the clip region without the text layer
     # ever touching a pixel.
     "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatText.cpp"
+    # L10N-03：屏幕文字层（HiDPI）。帧缓冲是 1x，Retina 上整块放大后文字是
+    # 2x2 的硬方块；这一份 TU 把系统字体文字登记下来、按 backing 倍数重新
+    # 光栅成一张透明位图，由 Cocoa 呈现层作为独立 CALayer 叠上去。
+    # 它只调用 text::rasterizeGlyphCoverage（不碰 Windows 语义），也不 include
+    # windows.h —— 边界与 RuntimeAppleWindowSurface.h 一样是裸指针 + int。
+    "${CMAKE_CURRENT_LIST_DIR}/../compat/win32/src/RuntimeWin32CompatTextLayer.cpp"
     # S7: the window / message / input backend.  Pure-offscreen route: HWND is a
     # pointer to a logical CompatWindow (handle-table + magic verified), the
     # message queue is a thread-level object, and the window DC is an offscreen

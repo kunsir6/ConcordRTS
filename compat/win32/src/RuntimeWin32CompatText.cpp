@@ -407,8 +407,64 @@ void rasterInto(CTFontRef font, double ascent, CGGlyph glyph, int cellWidth,
     }
 }
 
-// --- mask cache -------------------------------------------------------------
+// --- HiDPI coverage rasterisation -------------------------------------------
+//
+// 与 rasterInto 同一套格子语义，只换两件事：输出 8-bit 覆盖而不是 50% 阈值，
+// 以及格子尺寸直接按**像素**给（调用方负责乘上 backing 倍数）。后者是关键：
+// 传进来的是 2 倍格子，faceFor 就按 2 倍字号新建字面、CoreText 真的重新光栅，
+// 所以结果里有真实的亚像素边缘，而不是把 1x 掩码放大成方块。
+//
+// 单独一个函数而不是给 rasterInto 加参数：1-bit 阈值是 GDI 文本的硬合同
+// （measure == draw、ROP2、XOR 文本可逆），任何随倍率变化的输出一旦混进那条
+// 路径，那三条会同时失效，而且失效方式都是"看起来只是模糊"。
+void rasterIntoCoverage(CTFontRef font, double ascent, CGGlyph glyph,
+                        int cellWidth, int cellHeight,
+                        std::vector<unsigned char>& coverage) {
+    coverage.assign(static_cast<std::size_t>(cellWidth) * static_cast<std::size_t>(cellHeight), 0);
+    if (cellWidth <= 0 || cellHeight <= 0) return;
+    // 与字号成正比的外扩余量：accent / overhang 在大字号下也会变大。
+    const int pad = std::max(kScratchPad, cellHeight / 8);
+    const int scratchW = cellWidth + pad * 2 + 8;
+    const int scratchH = cellHeight + pad * 2;
+    std::vector<unsigned char> buffer(
+        static_cast<std::size_t>(scratchW) * static_cast<std::size_t>(scratchH), 0);
 
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    if (gray == nullptr) return;
+    CGContextRef context = CGBitmapContextCreate(buffer.data(), scratchW, scratchH, 8,
+        static_cast<std::size_t>(scratchW), gray, kCGImageAlphaNone);
+    CGColorSpaceRelease(gray);
+    if (context == nullptr) return;
+
+    // 抗锯齿开、font smoothing 关。Retina 上不需要 subpixel 那种彩色边缘，
+    // 而 smoothFonts 会受系统"字体平滑"开关影响，让同一份代码在不同机器上
+    // 出不同的字重——这一层要保持可复现。
+    CGContextSetShouldAntialias(context, true);
+    CGContextSetShouldSmoothFonts(context, false);
+    CGContextSetGrayFillColor(context, 1.0, 1.0);
+    CGContextSetTextMatrix(context, CGAffineTransformIdentity);
+    const double baselineFromTop = static_cast<double>(pad) + ascent;
+    const CGPoint position = CGPointMake(static_cast<CGFloat>(pad),
+        static_cast<CGFloat>(static_cast<double>(scratchH) - baselineFromTop));
+    CTFontDrawGlyphs(font, &glyph, &position, 1, context);
+    CGContextRelease(context);
+
+    // CGBitmapContext 的 row 0 是顶行（与 rasterInto 相同的已验证前提），
+    // 所以这里不需要翻转，只要把 pad 减掉。
+    for (int row = 0; row < cellHeight; ++row) {
+        const int sourceY = row + pad;
+        if (sourceY < 0 || sourceY >= scratchH) continue;
+        const unsigned char* line = buffer.data()
+            + static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(scratchW) + pad;
+        unsigned char* dest = coverage.data()
+            + static_cast<std::size_t>(row) * static_cast<std::size_t>(cellWidth);
+        for (int column = 0; column < cellWidth; ++column) {
+            dest[column] = line[column];
+        }
+    }
+}
+
+// --- mask cache -------------------------------------------------------------
 struct MaskKey {
     FaceKey face;
     char32_t codePoint = 0;
@@ -562,6 +618,38 @@ void resetCaches() {
 #if defined(__APPLE__)
     releaseFaces();
     masks().clear();
+#endif
+}
+
+bool rasterizeGlyphCoverage(char32_t cp, const FaceSpec& face, int cellWidth,
+                            int cellHeight, std::vector<unsigned char>& coverage) {
+    coverage.clear();
+    if (cellWidth <= 0 || cellHeight <= 0) return false;
+#if !defined(__APPLE__)
+    (void)cp;
+    (void)face;
+    return false;
+#else
+    // faceFor 的 key 含 cell 高度，所以 2x 请求拿到的是一个真的按两倍字号
+    // 创建/缓存的字面，不是把 1x 光栅结果放大。
+    const FaceEntry* entry = faceFor(face, cellHeight);
+    if (entry == nullptr) return false;
+    CTFontRef cascade = nullptr;
+    const CGGlyph glyph = lookupGlyph(*entry, cp, &cascade);
+    if (glyph == 0) {
+        if (cascade != nullptr) CFRelease(cascade);
+        return false;
+    }
+    CGGlyph local = glyph;
+    if (cascade != nullptr) {
+        // 级联字体（CJK / emoji）自带 ascent，基线要用它自己的量。
+        rasterIntoCoverage(cascade, static_cast<double>(CTFontGetAscent(cascade)), local,
+                           cellWidth, cellHeight, coverage);
+        CFRelease(cascade);
+    } else {
+        rasterIntoCoverage(entry->font, entry->ascent, local, cellWidth, cellHeight, coverage);
+    }
+    return true;
 #endif
 }
 
