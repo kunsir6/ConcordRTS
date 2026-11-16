@@ -25970,6 +25970,7 @@ void resetRuntimeMenuPage(
 }
 
 void setRuntimeMenuOpen(RuntimeWindowState& state, bool open) {
+    const bool wasOpen = state.runtimeMenuOpen;
     ensureRuntimeMenuOptionDefaults(state);
     state.runtimeMenuOpen = open;
     resetRuntimeMenuPage(state, RuntimeMenuPage::Main);
@@ -25978,6 +25979,14 @@ void setRuntimeMenuOpen(RuntimeWindowState& state, bool open) {
     state.rightPointer.active = false;
     state.rightPointer.moved = false;
     state.interactionStatus = open ? "menu open" : "menu closed";
+    // 菜单是模态的：主循环在 open 期间把 tickAccumulator 清零，模拟不再走拍，
+    // 于是「不会有新音效」，但**已经在响的**战斗音效与 EVA 语音会一直放下去，
+    // 和菜单自己的按钮音叠在一起。这两条通道不归 tick 管，必须在这里显式停掉。
+    // 音乐不动：零售的选项菜单不打断背景音乐。
+    if (open && !wasOpen) {
+        stopRuntimeSfxPlayback(state);
+        muteRuntimeEvaPlaybackPreservingSubtitle(state);
+    }
 }
 
 void advanceRuntimeResultPresentation(RuntimeWindowState& state, ULONGLONG now);
@@ -26652,8 +26661,13 @@ void drawRuntimeMenuOverlay(
 
     const RuntimeMenuBackgroundLayout layout =
         runtimeMenuBackgroundLayout(clientRect);
+    // 底色盖满整个客户区，而不是只盖 contentRect：contentRect 底部留了 32px
+    // 动作条余量，可地图视口是「客户区高度 - 侧栏宽度」——那一条在菜单打开时
+    // 仍然被 drawRuntimeMapWin32 画上了战斗画面。用户看到的就是「菜单下面露出
+    // 一条战场」，与暂停后的静态菜单同屏。侧栏区域随后由
+    // drawRuntimeMenuSidebarBackground 整体重画成菜单皮肤，先盖黑不会吃掉它。
     HBRUSH mask = CreateSolidBrush(RGB(0, 0, 0));
-    FillRect(dc, &layout.contentRect, mask);
+    FillRect(dc, &clientRect, mask);
     DeleteObject(mask);
     RuntimeUiShpCacheEntry* background = loadRuntimeUiShpFrame(
         state,
@@ -60285,6 +60299,7 @@ bool runRuntimeNeutralBuildingPaletteRenderContractCheck(
 #include "ui/input/diagnostics/RuntimeCameraKeySmoke.inl"
 #include "ui/input/diagnostics/RuntimeMenuKeySmoke.inl"
 #include "ui/input/diagnostics/RuntimeSessionKeySmoke.inl"
+#include "ui/input/diagnostics/RuntimeMenuModalPauseSmoke.inl"
 #include "ui/input/diagnostics/RuntimeKeyboardRouterSmoke.inl"
 #include "ui/input/diagnostics/RuntimeKeyboardIngressSmoke.inl"
 #include "ui/input/diagnostics/RuntimeChatTextSmoke.inl"
@@ -60532,6 +60547,28 @@ int runRuntimeCommandSmokeTest(const RuntimeConfig& config) {
             return 1;
         }
         return runRuntimeSessionKeySmokeProbe(*stock, std::cout) ? 0 : 1;
+    }
+    // 第 69 轮（用户报「战斗中 ESC 菜单与战斗显示/声音冲突」）：模态菜单的三条含义
+    // 逐条上判据——整屏被盖住（哨兵像素=0）、在播 SFX/EVA 通道被清、关掉不复活。
+    if (const char* only = std::getenv("CONCORD_COMMAND_SMOKE_MENU_MODAL_ONLY"); only != nullptr) {
+        if (std::string(only) != "1") {
+            std::cerr << "Menu modal: ONLY must be exactly 1\n";
+            return 1;
+        }
+        auto stock = std::make_unique<RuntimeWindowState>();
+        stock->config = config;
+        stock->runtimePreferencePersistenceEnabled = false;
+        stock->report = buildRuntimeStartupReport(config, &stock->world,
+            &stock->theater, &stock->art, &stock->rules, &stock->mapFacts);
+        stock->rulesLoaded = stock->report.rulesLoaded;
+        stock->artLoaded = stock->report.artLoaded;
+        stock->theaterLoaded = stock->report.theaterLoaded;
+        stock->mapFactsLoaded = stock->report.map.loaded;
+        if (!stock->report.success) {
+            std::cerr << "Menu modal: original asset startup failed\n";
+            return 1;
+        }
+        return runRuntimeMenuModalPauseSmokeProbe(*stock, std::cout) ? 0 : 1;
     }
     if (const char* only = std::getenv("CONCORD_COMMAND_SMOKE_MENU_KEY_ONLY"); only != nullptr) {
         if (std::string(only) != "1") {
