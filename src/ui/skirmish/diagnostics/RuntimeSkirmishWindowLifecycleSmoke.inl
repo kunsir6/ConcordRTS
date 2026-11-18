@@ -94,10 +94,16 @@ int runSkirmishWindowLifecycleSmoke(const RuntimeConfig& config, const fs::path&
                 DestroyWindow(host.window);
                 check(!IsWindow(window)&&state.hwnd==nullptr&&state.randomNameWindow==nullptr&&!state.selection.accepted,"parent-first destruction detaches child");
             } else {
-                state.phase=ShellMenuPhase::SlideIn;state.phaseStarted=GetTickCount64();
+                // 判定读 state.nowMs()（WM_TIMER(2) → updateMenuTransition），
+                // 起点就必须写在同一只钟上。写墙钟 GetTickCount64() 时，两只钟的差值
+                // 会直接抵掉这 1000ms 的「快进」：本机实测 gtc - uiClock = 820ms，
+                // 于是 elapsed = 1000 - 820 = 180 < duration(546)，滑出永远走不完，
+                // close 断言恒红；差值若大于 1000 则绕回成天文数字，反过来变成恒绿。
+                // 与主菜单那条冒烟（RuntimeMainMenu.cpp:3249）、交互冒烟两处 tooltip 同源。
+                state.phase=ShellMenuPhase::SlideIn;state.phaseStarted=state.nowMs();
                 SendMessageW(window,WM_CLOSE,0,0);
                 check(state.phase==ShellMenuPhase::SlideOut&&!state.selection.accepted&&IsWindow(window),"close during slide-in begins cancellation");
-                state.phaseStarted=GetTickCount64()-1000;
+                state.phaseStarted=state.nowMs()-1000;
                 SendMessageW(window,WM_TIMER,2,0);
                 check(!IsWindow(window)&&state.hwnd==nullptr&&state.closing,"native timer completes close and detaches");
                 check(host.window==nullptr||IsWindow(host.window),"child close preserves parent");
