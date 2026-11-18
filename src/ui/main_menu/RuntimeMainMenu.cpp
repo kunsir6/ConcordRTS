@@ -3240,7 +3240,13 @@ int runRuntimeMainMenuSmokeTest(
     state.pending = MenuAction::None;
     const ULONGLONG preparationStarted = GetTickCount64();
     beginAction(state, MenuAction::Skirmish);
-    state.phaseStarted = GetTickCount64() - 1000;
+    // updateAnimation 的 elapsed 是按 presentationClock 算的（见 updateDynamicState），
+    // 这里的起点就必须落在同一条时间轴上。用 GetTickCount64() 时，两只钟的差值直接
+    // 变成 elapsed：差值小于一个滑入动画（(8-1+6)*42=546ms）就永远停在 SlideIn，
+    // pageStatus 也就永远写不进「正在准备遭遇战…」。x86_64 实测差值≈0 → 恒红；
+    // arm64 上差值恰好够大 → 一直是假绿。产品侧所有 phaseStarted 都读 presentationClock，
+    // 只有这条冒烟漏了。
+    state.phaseStarted = state.presentationClock->nowMs() - 1000;
     int pendingTicks = 0;
     while (!state.closing && GetTickCount64() - preparationStarted < 30000) {
         MSG message{};

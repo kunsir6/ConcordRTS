@@ -38363,8 +38363,13 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
     if (tooltipHit != nullptr && tooltipHit->object != nullptr) {
         state.runtimeGameplayTooltipHoverObjectId =
             tooltipHit->object->instanceId;
+        // 延迟判定读的是 runtimeUiClockNow()（见 runtimeGameplayObjectTooltipDelayElapsed），
+        // 探针写起点就必须用同一个时钟。用 GetTickCount64() 时两者并不同源：
+        // x86_64 实测 gtc=283706130 / uiClock=283705124（差 ~1.0 秒），
+        // 于是 now - start = 1994 < 3000，恒判「还没到时间」，断言必红。
+        // 这不影响产品逻辑（产品侧两端都用 uiClock），是探针自己的起点口径错。
         state.runtimeGameplayTooltipHoverStartedMs =
-            static_cast<std::uint64_t>(GetTickCount64())
+            runtimeUiClockNow(state)
             - runtimeGameplayObjectTooltipDelayMs;
     }
     const RuntimeGameplayTooltip tooltipEnabled =
@@ -38424,7 +38429,7 @@ int runRuntimeInteractionSmokeTest(const RuntimeConfig& config) {
                 runtimeGameplayTooltipAtPoint(state, clientRect);
             state.runtimeGameplayTooltipHoverBuildButtonIndex = *buildIndex;
             state.runtimeGameplayTooltipHoverBuildStartedMs =
-                static_cast<std::uint64_t>(GetTickCount64())
+                runtimeUiClockNow(state)
                 - runtimeGameplayBuildTooltipDelayMs;
             buildItemTooltipDelayed =
                 runtimeGameplayTooltipAtPoint(state, clientRect);
